@@ -166,10 +166,14 @@ sweep_config = {
     "metric": {"name": "val/rmse", "goal": "minimize"},
     "parameters": {
         "model_name": {"values": list(get_all_models().keys())},
-        "lr": {"values": [1e-4, 5e-4, 1e-3, 5e-3]},
-        "batch_size": {"values": [64, 128, 256]},
-        "weight_decay": {"values": [1e-5, 1e-4, 1e-3]},
-        "optimizer": {"values": ["adam", "adamw"]},
+        "lr": {"values": [1e-4]},
+        "batch_size": {
+            "values": [
+                64,
+            ]
+        },
+        "weight_decay": {"values": [1e-4]},
+        "optimizer": {"values": ["adamw"]},
         "scheduler": {"value": "cosine"},
         "n_epochs": {"value": DEFAULT_N_EPOCHS},
         "patience": {"value": DEFAULT_EARLY_STOPPING_PATIENCE},
