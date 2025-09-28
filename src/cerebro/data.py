@@ -185,6 +185,8 @@ def prepare_data_pipeline(
     task: str = "contrastChangeDetection",
     release: str = "R1",
     remove_bad_subjects: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    num_workers: int = DEFAULT_NUM_WORKERS,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Complete data pipeline from loading to dataloaders.
 
@@ -192,6 +194,8 @@ def prepare_data_pipeline(
         task: Task name
         release: Release version
         remove_bad_subjects: Whether to remove problematic subjects
+        batch_size: Batch size for dataloaders
+        num_workers: Number of workers for data loading
 
     Returns:
         Tuple of (train_loader, valid_loader, test_loader)
@@ -220,4 +224,4 @@ def prepare_data_pipeline(
     )
 
     # Create dataloaders
-    return create_dataloaders(train_set, valid_set, test_set)
+    return create_dataloaders(train_set, valid_set, test_set, batch_size=batch_size, num_workers=num_workers)

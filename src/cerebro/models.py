@@ -42,7 +42,82 @@ from braindecode.models import (
     USleep,
 )
 
-from .constants import N_CHANS, N_TIMES, SFREQ
+from .constants import N_CHANS, N_TIMES, SFREQ, DEFAULT_LR, DEFAULT_BATCH_SIZE, DEFAULT_WEIGHT_DECAY
+
+
+# Model-specific default configurations optimized for EEG tasks
+MODEL_CONFIGS = {
+    # Lightweight classical models (can handle larger batches)
+    "EEGNet": {"batch_size": 256, "lr": 1e-3, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "EEGNetv4": {"batch_size": 256, "lr": 1e-3, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "ShallowFBCSPNet": {"batch_size": 128, "lr": 2e-3, "weight_decay": 1e-5, "optimizer": "adamw"},
+    "EEGSimpleConv": {"batch_size": 256, "lr": 1e-3, "weight_decay": 1e-4, "optimizer": "adamw"},
+    
+    # Deep classical models (moderate batch sizes)
+    "Deep4Net": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    
+    # Temporal convolutional networks
+    "BDTCN": {"batch_size": 128, "lr": 1e-3, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "TCN": {"batch_size": 128, "lr": 1e-3, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "EEGTCNet": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "TIDNet": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    
+    # Attention-based models (memory intensive)
+    "ATCNet": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "AttentionBaseNet": {"batch_size": 32, "lr": 3e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    
+    # Transformer and conformer models (very memory intensive)
+    "BIOT": {"batch_size": 32, "lr": 1e-4, "weight_decay": 1e-5, "optimizer": "adamw"},
+    "EEGConformer": {"batch_size": 32, "lr": 1e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "EEGITNet": {"batch_size": 32, "lr": 1e-4, "weight_decay": 1e-5, "optimizer": "adamw"},
+    
+    # Inception-based models
+    "EEGInceptionERP": {"batch_size": 128, "lr": 1e-3, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "EEGInceptionMI": {"batch_size": 128, "lr": 1e-3, "weight_decay": 1e-4, "optimizer": "adamw"},
+    
+    # Advanced architectures
+    "EEGNeX": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "EEGMiner": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    
+    # Filter bank models (moderate memory usage)
+    "FBCNet": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "FBLightConvNet": {"batch_size": 128, "lr": 1e-3, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "FBMSNet": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    
+    # Self-supervised models
+    "ContraWR": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "SignalJEPA": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "SignalJEPA_Contextual": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "SignalJEPA_PostLocal": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "SignalJEPA_PreLocal": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    
+    # Specialized architectures
+    "CTNet": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "HybridNet": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "IFNet": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "Labram": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "MSVTNet": {"batch_size": 32, "lr": 3e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "SCCNet": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "SincShallowNet": {"batch_size": 128, "lr": 1e-3, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "SPARCNet": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "SyncNet": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "TSception": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    
+    # Sleep staging models (moderate requirements)
+    "AttnSleep": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "DeepSleepNet": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "SleepStagerBlanco2020": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "SleepStagerChambon2018": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    "USleep": {"batch_size": 64, "lr": 5e-4, "weight_decay": 1e-4, "optimizer": "adamw"},
+    
+    # Default fallback configuration
+    "default": {
+        "batch_size": DEFAULT_BATCH_SIZE,
+        "lr": DEFAULT_LR,
+        "weight_decay": DEFAULT_WEIGHT_DECAY,
+        "optimizer": "adamw"
+    }
+}
 
 
 def get_all_models():
@@ -149,6 +224,28 @@ def create_model(
 
     # Create model - let it fail explicitly if parameters are wrong
     return model_class(**params)
+
+
+def get_model_config(model_name: str, use_defaults: bool = True, **overrides):
+    """Get configuration parameters for a specific model.
+    
+    Args:
+        model_name: Name of the model
+        use_defaults: If True, use model-specific defaults; if False, use global defaults
+        **overrides: Parameters to override in the configuration
+        
+    Returns:
+        Dictionary with model configuration parameters
+    """
+    if use_defaults and model_name in MODEL_CONFIGS:
+        config = MODEL_CONFIGS[model_name].copy()
+    else:
+        config = MODEL_CONFIGS["default"].copy()
+    
+    # Apply any overrides
+    config.update(overrides)
+    
+    return config
 
 
 def get_model_info(model_name: str):

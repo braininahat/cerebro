@@ -84,6 +84,8 @@ dataset_ccd = EEGChallengeDataset(
 # ## Explore Data
 
 # %%
+%matplotlib qt
+
 raw = dataset_ccd.datasets[0].raw
 
 fig = raw.plot()
@@ -437,5 +439,8 @@ for epoch in range(1, N_EPOCHS + 1):
 # ## Save the model
 
 # %%
-torch.save(model.state_dict(), "weights_challenge_1.pt")
-print("Model saved as 'weights_challenge_1.pt'")
+from pathlib import Path
+weights_dir = Path("weights")
+weights_dir.mkdir(exist_ok=True)
+torch.save(model.state_dict(), weights_dir / "weights_challenge_1.pt")
+print("Model saved as 'weights/weights_challenge_1.pt'")

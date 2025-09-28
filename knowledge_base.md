@@ -238,11 +238,37 @@ eeg_mini_datasets/
 - Both use MSE/L1 loss for regression
 
 ### Training Recommendations
-- Batch size: 128 (adjustable based on GPU memory)
-- Learning rate: 1e-3 to 2e-3
-- Optimizer: AdamW or Adamax
+
+#### Model-Specific Hyperparameters (Implemented in `MODEL_CONFIGS`)
+- **Lightweight models** (EEGNet, EEGNetv4): batch_size=256, lr=1e-3, wd=1e-4
+- **Deep models** (Deep4Net): batch_size=64, lr=5e-4, wd=1e-4  
+- **Transformer models** (BIOT, EEGConformer, EEGITNet): batch_size=32, lr=1e-4, wd=1e-5
+- **Attention models** (ATCNet, AttentionBaseNet): batch_size=32-64, lr=3e-4-5e-4, wd=1e-4
+- **Default fallback**: batch_size=128, lr=1e-3, wd=1e-5
+
+#### General Training Settings
+- Optimizer: AdamW (model-specific default)
 - Scheduler: CosineAnnealingLR
 - Early stopping patience: 5-50 epochs
+
+#### Sweep Configurations Available
+1. `sweep_config_comparison`: Pure model performance comparison (CURRENT DEFAULT)
+   - Uses model-specific defaults, one run per model
+   - Comprehensive timing and performance metrics
+   - Focus on test performance comparison
+2. `sweep_config_focused`: Tests top 4 models only (~30-60 minutes)
+3. `sweep_config_default`: Original benchmarking configuration  
+4. `sweep_config_search`: Bayesian hyperparameter search (~8-12 hours)
+
+#### Performance Analysis Tools
+- `create_results_summary("sweep_id")`: Generates ranked comparison table
+- `print_wandb_instructions()`: Shows W&B access information
+- Real-time metrics: timing/epoch_seconds, timing/total_training_seconds, timing/epochs_to_best
+
+#### Model Weight Management
+- All weights saved to `weights/` directory with naming: `best_{model_name}_weights.pt`
+- Automatic W&B artifact upload with metadata (performance, parameters, timing)
+- Cloud storage and versioning of best model checkpoints
 
 ## References and Resources
 
