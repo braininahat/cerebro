@@ -83,6 +83,8 @@ Metrics logged per run include train/val/test loss, RMSE, MAE, learning rate, ti
 
 Use `src/cerebro/pretraining.py:create_pretraining_dataloader` to sample random crops across passive tasks for self-supervised objectives. The helper expects releases cached via `scripts/download_all_releases.py`.
 
+Foundation code lives under `fm/`: datamodules for pretraining, simple JEPA-style encoder (`fm/models`), and loss helpers (`fm/tasks`).
+
 ### Data Exploration (`notebooks/001_eda.py`, `notebooks/003_dataset_dataloader.py`)
 
 - `001_eda.py` reproduces the start kit Challenge 1 workflow with additional visualisation hooks.

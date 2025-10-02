@@ -46,3 +46,15 @@
 - Never commit raw data, checkpoints, or secrets. Use env vars or config files listed in `.gitignore`.
 - Document new flags or env vars in `README.md` so other agents stay aligned.
 - Before merging, verify that notebooks do not embed absolute paths or personal identifiers.
+
+## Foundation Model Workstream
+- Maintain active development on branch `foundation-model`; create feature branches as needed.
+- Observe the planned layout for future modules (to be added incrementally):
+  - `fm/` (protocol-aware foundation model code)
+  - `fm/datamodules/` (BIDS/HED loaders, windowing helpers)
+  - `fm/tasks/` (pretraining objectives)
+  - `fm/models/` (Conv-SSM, Conformer, set encoders)
+  - `fm/eval/` (Challenge 1/2 metrics, ablations)
+  - `fm/config/` (Hydra/YAML configs)
+  - `scripts/submit/` (Codabench packaging)
+- Keep this roadmap aligned with the NeurIPS EEG Foundation Challenge schedule (final phase ends Oct 31, 2025).
