@@ -50,6 +50,13 @@
 ## Foundation Model Workstream
 - Maintain active development on branch `foundation-model`; create feature branches as needed.
 - Observe the planned layout for future modules (to be added incrementally):
+- **Task metadata survey findings (R1 mini releases):**
+  - Movie runs (`DespicableMe`, `DiaryOfAWimpyKid`, `FunwithFractals`, `ThePresent`) expose `video_start`, `video_stop`, `9999` markers only → use absolute time alignment for inter-subject positives.
+  - `surroundSupp` annotations include `stim_ON` plus `stimulus_cond` {1,2,3} and `foreground_contrast`; map these to flicker conditions for SSVEP contrastive objectives.
+  - `contrastChangeDetection` provides rich trial markers (`contrastTrial_start`, `right/left_target`, button presses) and `feedback` (`smiley_face`/`sad_face`) → supports pre-trial readiness, RT regression, feedback-consistency.
+  - Sequence learning (`seqLearning6/8 target`) and `symbolSearch` contain dense `dot_noX_ON/OFF`, `learningBlock_N`, `trialResponse` events (potential Tier-2/analysis signals).
+  - `RestingState` includes `instructed_toOpenEyes/CloseEyes` events for eyes-open/closed auxiliary tasks.
+  - Some BDF mini subjects (e.g. `sub-NDARFK610GY5`) have missing `_scans.tsv`; re-download or skip in datamodules.
   - `fm/` (protocol-aware foundation model code)
   - `fm/datamodules/` (BIDS/HED loaders, windowing helpers)
   - `fm/tasks/` (pretraining objectives)
