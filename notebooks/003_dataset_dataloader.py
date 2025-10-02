@@ -1,8 +1,13 @@
 # %%
-from eegdash.dataset import EEGChallengeDataset
+import os
 from pathlib import Path
 
-FULL_DATASET_ROOT = Path("/media/varun/braininahat/datasets/eeg2025/full/")
+from eegdash.dataset import EEGChallengeDataset
+
+BASE_DATA_DIR = Path(os.getenv("EEG2025_DATA_DIR", Path(__file__).resolve().parents[1] / "data")).expanduser()
+BASE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+FULL_DATASET_ROOT = (BASE_DATA_DIR / "full")
+FULL_DATASET_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 # %%
