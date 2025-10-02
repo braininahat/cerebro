@@ -17,6 +17,7 @@ def load_mini_dataset(
     release: str = "R1",
     mini: bool = True,
     cache_dir: Path = MINI_DATASET_ROOT,
+    description_fields: list[str] | None = None,
 ) -> EEGChallengeDataset:
     """Load EEG challenge dataset for a specific task.
 
@@ -34,6 +35,7 @@ def load_mini_dataset(
         release=release,
         mini=mini,
         cache_dir=cache_dir,
+        description_fields=description_fields,
     )
 
 
