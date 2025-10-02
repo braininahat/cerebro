@@ -85,6 +85,8 @@ Use `src/cerebro/pretraining.py:create_pretraining_dataloader` to sample random 
 
 Foundation code lives under `fm/`: datamodules for pretraining, simple JEPA-style encoder (`fm/models`), and loss helpers (`fm/tasks`).
 
+See `docs/task_metadata/` for per-task annotation timelines and `docs/pretraining_tasks/` for detailed objective diagrams.
+
 Key protocol cues discovered so far: `surroundSupp` annotations expose stimulus conditions and contrast levels for flicker-aligned contrastive learning; `contrastChangeDetection` includes trial targets, button presses, and feedback (smiley/sad) for readiness and ErrP-style objectives; movie runs only expose start/stop markers so align positives by absolute time since `video_start`.
 
 ### Data Exploration (`notebooks/001_eda.py`, `notebooks/003_dataset_dataloader.py`)

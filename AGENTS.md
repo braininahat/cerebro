@@ -51,6 +51,9 @@
 - Maintain active development on branch `foundation-model`; create feature branches as needed.
 - Observe the planned layout for future modules (to be added incrementally):
 - **Task metadata survey findings (R1 mini releases):**
+- Refer to `docs/task_metadata/` for per-task mermaid timelines and event fields.
+- Detailed pretraining formulations (masking, SSVEP, etc.) live in `docs/pretraining_tasks/`.
+
   - Movie runs (`DespicableMe`, `DiaryOfAWimpyKid`, `FunwithFractals`, `ThePresent`) expose `video_start`, `video_stop`, `9999` markers only → use absolute time alignment for inter-subject positives.
   - `surroundSupp` annotations include `stim_ON` plus `stimulus_cond` {1,2,3} and `foreground_contrast`; map these to flicker conditions for SSVEP contrastive objectives.
   - `contrastChangeDetection` provides rich trial markers (`contrastTrial_start`, `right/left_target`, button presses) and `feedback` (`smiley_face`/`sad_face`) → supports pre-trial readiness, RT regression, feedback-consistency.
