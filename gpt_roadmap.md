@@ -1,65 +1,80 @@
-# Foundation-Model Roadmap for EEG2025
+**Foundation-Model Roadmap for EEG2025**  
+*Protocol-aware revision — 2 Oct 2025*
 
-This document outlines the long-term plan for building a foundation-style solution that ultimately addresses both EEG2025 challenges. Timelines are indicative; revisit and adjust as progress evolves.
+This plan bakes task/trial structure (HED events, timing, SSVEP stimulation) into pretraining while keeping preprocessing minimal. It aligns with the NeurIPS EEG Foundation Challenge timeline (final phase ends 31 Oct 2025).
 
-## 1. Understand the Challenge & Dataset (Week 1)
+---
 
-- **Challenge structure**: review both tasks in `startkit/README.md` and the official site. Challenge 1 predicts response time (RT) from Contrast Change Detection (CCD) epochs. Challenge 2 predicts the subject-level psychopathology (p-factor). Both operate on 129-channel, 100 Hz EEG recordings distributed in BIDS format.
-- **Tasks available**: passive (Resting State, Surround Suppression, Movie Watching) and active (CCD, Sequence Learning, Symbol Search) recordings span 3 000+ subjects.
-- **Window conventions**: Challenge 1 uses 2 s epochs starting 0.5 s post-stimulus; Challenge 2 aggregates 4 s windows with a 2 s stride, allowing random 2 s crops during training. Metrics emphasise MAE (C1) and concordance correlation (C2).
+### 0. Repo & Branch Conventions (Day 0)
+- Work on branch `foundation-model` (or `feature/fm-protocol-aware`).
+- Keep this roadmap mirrored in `AGENTS.md` at repo root.
+- Add new top-level directories for long-term development: `fm/`, `fm/datamodules/`, `fm/tasks/`, `fm/models/`, `fm/eval/`, `fm/config/`, `scripts/submit/`.
 
-## 2. Set Up the Project (Week 1)
+### 1. Understand the Challenge & Dataset (Today)
+- **Data**: 128-channel, 100 Hz EEG with six tasks (Resting State, Surround Suppression, Movie Watching, Sequence Learning, CCD, Symbol Search); BIDS + HED annotations; demographics; four psychopathology factors with availability flags.
+- **Splits**: Releases R1–R11 for train/validation (subject-disjoint; R5 reserved for validation). Release R12 is hidden test (code submission).
+- **Tasks**:
+  - Challenge 1 (Transfer): predict CCD response time from SuS + pre-trial EEG; evaluate 0.5–2.5 s post-onset windows + demographics; metric nRMSE.
+  - Challenge 2 (Psychopathology): per-subject regression of four factors; ≥15 min EEG per subject; metric nRMSE (70 % weight in final score).
 
-- Fork or clone the repo and work on a dedicated branch (e.g., `foundation-model`).
-- Install dependencies: `pip install -r startkit/requirements.txt` plus project extras. Verify `EEGChallengeDataset` loads CCD, SuS, and other tasks.
-- Download at least one mini release (R5 for validation) in the 100 Hz / 129-channel format.
-- Run `notebooks/002_benchmark.py` to familiarise with existing architectures and baseline performance.
-- Build a reusable data pipeline using Braindecode helpers (`create_windows_from_events`, `create_fixed_length_windows`), applying minimal preprocessing (per-epoch z-scoring, optional 0.5–50 Hz bandpass, notch). Avoid aggressive subject-specific cleaning to preserve cross-subject structure.
+### 2. Set Up the Project (2–4 Oct)
+- Ensure loaders read BIDS/HED via `EEGChallengeDataset` or custom datamodules, including demographics and availability flags.
+- Cache R1–R4 and R6–R11 mini/full releases (exclude R5 from training).
+- Preprocessing policy: per-window/recording z-score; optional 0.5–50 Hz band-pass + 60 Hz notch; avoid ICA/ASR.
+- Reproduce starter windowing for CCD (0.5–2.5 s) and generic 4 s windows with 2 s stride.
 
-## 3. Design the Backbone Architecture (Weeks 2–3)
+### 3. Backbone Architecture (2–8 Oct)
+- **Stem**: 2‑D conv to downsample to ~25 Hz and mix local channels.
+- **Sequence core**: Mamba-style SSM or EEG-Conformer blocks with RMSNorm + gated FFNs.
+- **Spatial mixing**: lightweight learned channel mixing; optional correlation-based grouping.
+- **Pooling**: global average or attention → 256 D embedding; variable-length friendly.
+- **Demographics**: FiLM or concatenated embeddings for age/sex/handedness ahead of task heads.
 
-- **Conv–SSM/Conformer backbone**: start with a 2‑D convolutional stem to downsample from 100 Hz (e.g., to 25 Hz), followed by state-space (Mamba) or Conformer blocks for long-range temporal modelling. Keep optional depthwise spatial convolutions lightweight.
-- **Latent embedding & pooling**: after sequence blocks, apply global average or attention pooling to produce a fixed embedding (≈256 D). Support variable-length inputs (2 s or 4 s windows).
-- **Demographics embedding**: encode age, sex, handedness via small learnable embeddings; combine with backbone features via concatenation or FiLM modulation before regression heads.
+### 4. Self-/Unsupervised Pretraining (2–14 Oct)
+- Pretrain on R1–R4, R6–R11 across all tasks (passive + active); rely on HED events and timing cues.
+- Objectives:
+  - Masked time×channel modeling (MTCM).
+  - JEPA latent prediction over HED-aligned context/target segments.
+  - CPC/InfoNCE on adjacent segments (pre→post onset, etc.).
+  - SSVEP-aware contrastive clustering using protocol tokens (flicker state bins).
+  - Pre-trial readiness ranking (contrastive RT quantiles).
+  - Feedback-consistency (ErrP proxy) with margin loss.
+  - Optional eyes-open/closed proxy from Resting State.
+- Augmentations: mild time masking, jitter, noise, ≤10 % channel dropout, same-subject mixup.
+- Track validation via subject-wise CV; save top-k backbones.
 
-## 4. Unsupervised / Self-Supervised Pretraining (Weeks 3–7)
+### 5. Challenge 1 Fine-Tuning (8–18 Oct)
+- Inputs: CCD 0.5–2.5 s windows (optionally add pre-trial summary token) + demographics.
+- Head: small MLP regressor; gradient-reversal adversary for subject invariance.
+- Train on R1–R4, R6–R11; early-stop on R5 nRMSE.
+- Ablations: pretraining objective mix, pre-trial embedding, feedback head, spatial grouping.
 
-Organisers encourage pretraining on passive tasks before fine-tuning.
+### 6. Challenge 2 Fine-Tuning (12–22 Oct)
+- Build per-subject window sets (≥15 min total EEG) across tasks.
+- Set encoder: transformer/DeepSets to pool windows; fuse demographics.
+- Head: 4-output regressor for p-factor, attention, internalizing, externalizing.
+- Freeze backbone partially; monitor nRMSE per factor and weighted score on R5.
 
-- **Latent future prediction (JEPA)**: split windows into context/target segments; predict target latents using an energy-based contrastive loss.
-- **Contrastive Predictive Coding (CPC)**: sample positives from adjacent segments within a recording, negatives across time/subjects; optimise InfoNCE.
-- **Masked time–channel modelling**: mask patches in the time×channel plane, reconstruct latent codes to capture local dependencies.
-- **Auxiliary EEG heads**: add lightweight supervised objectives (e.g., eyes open/closed, CCD feedback correctness) leveraging existing annotations.
-- **Augmentations**: time masking, channel dropout, jitter, Gaussian noise, same-subject mixup; avoid heavy filtering to maintain generality.
-- Cycle through all tasks and subjects (excluding held-out R5) with batch sizes 32–64. Monitor held-out loss, save backbone checkpoints once converged.
+### 7. Evaluation, Logging, Packaging (18–27 Oct)
+- Validation discipline: subject-disjoint; R5 only for model selection.
+- Metrics: nRMSE for C1 and each C2 factor (0.3/0.7 weighting).
+- Hyperparameter sweeps: LR, batch, dropout, mask ratios (limited budget).
+- Package Codabench submission (models + scripts + env) after dry-run inference.
 
-## 5. Challenge 1 Fine-Tuning (Weeks 7–8)
+### 8. Optional Last-Mile RL (24–29 Oct)
+- Reward-based objective scheduler (bandit) using R5 proxy nRMSE.
+- Curriculum over subjects/windows targeting hard pre-trial→RT cases.
+- Keep RL thin and decoupled from backbone.
 
-- Extract 2 s CCD epochs starting 0.5 s after stimulus onset (see `startkit/challenge_1.py`). Optionally add pre-stimulus context tokens.
-- Attach an MLP regression head; concatenate demographic embeddings. Use MSE and consider a gradient-reversal adversarial head to discourage subject leakage.
-- Fine-tune the head and optionally top backbone blocks with early stopping on a held-out R5 validation split (no R5 subjects in training). Track MAE, RMSE, nRMSE.
-- Ablate: CCD-only vs CCD + context vs CCD + pretrained backbone; explore adding SuS as auxiliary supervision.
+### 9. Risk Controls
+- Nested CV across train releases to avoid R5 overfitting.
+- Protocol leakage guard: use HED events for structure only; final heads trained strictly on allowed inputs.
+- Respect availability flags; ablate inclusion of “Caution” runs.
 
-## 6. Challenge 2 Fine-Tuning (Weeks 8–9)
-
-- Aggregate all 4 s windows (≥15 min per subject) across tasks. Construct per-subject window sets.
-- Implement a transformer / set encoder to pool variable-length window sets into subject embeddings; append demographic embeddings.
-- Train a regression head mapping to the p-factor (single output for current rules; keep architecture flexible). Freeze most of the backbone; optimise nRMSE or CCC. Validate on R5, and test multi-task fine-tuning alongside the Challenge 1 head.
-
-## 7. Evaluation & Iteration (Week 10)
-
-- Perform leave-one-mini-release-out cross-validation and record metrics per fold.
-- Hyperparameter sweeps: learning rates, batch sizes, dropout (use W&B or equivalent).
-- Compare against Braindecode baselines (EEGNet, Deep4Net, BIOT) on identical splits; document performance and efficiency differences.
-- Conduct ablations for each pretraining objective and augmentation to identify impactful components.
-
-## 8. Optional Last-Mile RL Enhancements (Week 11+)
-
-After solid foundation performance:
-
-- Explore reward-driven feature selection (e.g., MARS agents using CCD response-time rewards) layered atop the backbone.
-- Test RL-based sample selection policies while ensuring they maintain generalisation.
-
-## Summary
-
-Following this roadmap will deliver a foundation model that leverages passive-task pretraining and supports both challenges. Once a robust baseline is established, reinforcement-learning enhancements can be treated as optional experiments rather than core dependencies.
+### 10. Timeline to 31 Oct
+- **By 7 Oct**: BIDS/HED datamodule + MTCM & JEPA running; initial backbone checkpoint.
+- **By 14 Oct**: CPC, SSVEP-aware contrastive, readiness, and feedback heads implemented; top-2 backbones selected.
+- **By 18 Oct**: Challenge 1 head tuned; R5 nRMSE logged; initial ablations.
+- **By 22 Oct**: Challenge 2 set encoder trained; per-factor nRMSE reported.
+- **By 27 Oct**: Lock hyperparameters; prepare Codabench package; dry-run inference.
+- **31 Oct**: Final code submission.
