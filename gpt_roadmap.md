@@ -31,17 +31,17 @@ This plan bakes task/trial structure (HED events, timing, SSVEP stimulation) int
 - **Demographics**: FiLM or concatenated embeddings for age/sex/handedness ahead of task heads.
 
 ### 4. Self-/Unsupervised Pretraining (2–14 Oct)
-- Pretrain on R1–R4, R6–R11 across all tasks (passive + active); rely on HED events and timing cues.
-- Objectives:
-  - Masked time×channel modeling (MTCM).
-  - JEPA latent prediction over HED-aligned context/target segments.
-  - CPC/InfoNCE on adjacent segments (pre→post onset, etc.).
-  - SSVEP-aware contrastive clustering using protocol tokens (flicker state bins).
-  - Pre-trial readiness ranking (contrastive RT quantiles).
-  - Feedback-consistency (ErrP proxy) with margin loss.
-  - Optional eyes-open/closed proxy from Resting State.
-- Augmentations: mild time masking, jitter, noise, ≤10 % channel dropout, same-subject mixup.
-- Track validation via subject-wise CV; save top-k backbones.
+- Train on R1–R4, R6–R11 across all tasks with HED/timing context; reserve R5 for validation only.
+- **TIER 1 objectives (highest impact)**
+  1. **Inter-subject movie contrastive learning** – align embeddings for matching movie timestamps across subjects (SimCLR/NT-Xent).
+  2. **SSVEP frequency/phase contrastive learning** – leverage SuS/CCD flicker events via CCA/PLV-derived features for same-frequency positives, cross-frequency negatives.
+  3. **Masked time×channel prediction (BENDR/JEPA hybrid)** – contiguous span masking with contrastive future prediction instead of raw reconstruction.
+- **TIER 2 objectives (medium impact)**
+  4. **Pre-trial state→RT ranking** – use CCD pre-trial windows with RT quantile pseudo-labels (margin/contrastive loss) plus auxiliary supervised regression head.
+  5. **Feedback-consistency (ErrP proxy)** – cluster trials by feedback sign within subjects (margin loss).
+  6. **Eyes-open/closed proxy** – light supervised head on resting-state HED events.
+- **Shared augmentations**: mild time masking, jitter, Gaussian noise, ≤10 % channel dropout, same-subject mixup.
+- Evaluate with subject-wise CV on train releases; keep top-k backbones per objective mix.
 
 ### 5. Challenge 1 Fine-Tuning (8–18 Oct)
 - Inputs: CCD 0.5–2.5 s windows (optionally add pre-trial summary token) + demographics.
