@@ -1,7 +1,25 @@
+import os
 from pathlib import Path
 
+# Repository root (two levels up from this file)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_data_root() -> Path:
+    """Resolve the cache directory for EEG2025 datasets.
+
+    Priority:
+        1. `EEG2025_DATA_DIR` environment variable (expanded/resolved)
+        2. `<repo>/data` relative to the project root
+    """
+    env_path = os.getenv("EEG2025_DATA_DIR")
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+    return (_REPO_ROOT / "data").resolve()
+
+
 # Data paths
-MINI_DATASET_ROOT = Path("/media/varun/braininahat/datasets/eeg2025/mini/")
+MINI_DATASET_ROOT = _resolve_data_root()
 
 # EEG parameters
 N_CHANS = 129

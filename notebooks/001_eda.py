@@ -5,6 +5,7 @@
 # ## Import Libraries
 
 import copy
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -35,7 +36,9 @@ from tqdm.auto import tqdm
 # %% [markdown]
 # ## Constants
 
-MINI_DATASET_ROOT = Path("/media/varun/braininahat/datasets/eeg2025/mini/")
+DATA_DIR = Path(os.getenv("EEG2025_DATA_DIR", Path(__file__).resolve().parents[1] / "data")).expanduser()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 EPOCH_LEN_S = 2.0
 SFREQ = 100
 ANCHOR = "stimulus_anchor"
@@ -77,7 +80,7 @@ dataset_ccd = EEGChallengeDataset(
     task="contrastChangeDetection",
     release="R1",
     mini=True,
-    cache_dir=MINI_DATASET_ROOT,
+    cache_dir=DATA_DIR,
 )
 
 # %% [markdown]
@@ -200,6 +203,30 @@ print(f"Subjects: {subjects}")
 subjects = [s for s in subjects if s not in SUBJECTS_TO_REMOVE]
 print(f"Number of subjects: {len(subjects)}")
 print(f"Subjects: {subjects}")
+
+# %% [markdown]
+# ## Subject window counts
+
+# %%
+subject_counts = meta_information["subject"].value_counts().sort_index()
+print(subject_counts)
+fig, ax = plt.subplots(figsize=(12, 4))
+subject_counts.plot(kind="bar", ax=ax, color="steelblue")
+ax.set_ylabel("Number of windows")
+ax.set_title("Windows per subject (after exclusion)")
+plt.tight_layout()
+
+# %% [markdown]
+# ## Average response time per subject
+
+# %%
+subject_rt = meta_information.groupby("subject")["target"].mean().sort_index()
+print(subject_rt)
+fig, ax = plt.subplots(figsize=(12, 4))
+subject_rt.plot(kind="bar", ax=ax, color="darkorange")
+ax.set_ylabel("Mean response time (s)")
+ax.set_title("Mean response time by subject")
+plt.tight_layout()
 
 # %% [markdown]
 # ## Train Test Split

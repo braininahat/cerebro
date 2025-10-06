@@ -1,3 +1,4 @@
+import torch
 from braindecode.preprocessing import (
     Preprocessor,
     create_windows_from_events,
@@ -83,6 +84,26 @@ def create_single_windows(
         preload=True,
     )
     return windows
+
+
+def remove_high_amplitude_channels(signal, z_threshold=5.0):
+    """Return a boolean mask flagging channels whose z-score exceeds the threshold.
+
+    Args:
+        signal: Tensor with shape (n_channels, n_times)
+        z_threshold: Z-score threshold for outlier detection
+
+    Returns:
+        Boolean tensor of shape (n_channels,) with True for channels to drop.
+    """
+    if signal.numel() == 0:
+        return torch.zeros(signal.size(0), dtype=torch.bool)
+    mean = signal.mean(dim=1, keepdim=True)
+    std = signal.std(dim=1, keepdim=True)
+    std = torch.clamp(std, min=1e-6)
+    centered = signal - mean
+    rms = torch.sqrt((centered ** 2).mean(dim=1))
+    return rms >= z_threshold
 
 
 def add_metadata(windows, dataset, anchor=ANCHOR):
