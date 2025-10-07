@@ -218,6 +218,7 @@ __marimo__/
 wandb/
 
 *.pt
+weights/
 data/
 .vscode/
 .python-version

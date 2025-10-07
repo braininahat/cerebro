@@ -21,6 +21,14 @@ import torch
 from braindecode.models import SignalJEPA
 from braindecode.preprocessing import create_fixed_length_windows
 from eegdash.dataset import EEGChallengeDataset
+
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"^\s*\[EEGChallengeDataset\] EEG 2025 Competition Data Notice",
+    module="eegdash",
+)
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 

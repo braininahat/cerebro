@@ -31,6 +31,13 @@ This plan bakes task/trial structure (HED events, timing, SSVEP stimulation) int
 
 ### 4. Self-/Unsupervised Pretraining (9–18 Oct)
 - Train on R1–R4, R6–R11 (R5 held out) using short windows compatible with both challenges.
+- Use `scripts/download_all_releases.py` (multi-task CLI) to mirror organiser caches locally before long runs.
+- Bump `--workers` on the download script once bandwidth allows to keep mini/full releases cached ahead of training, and use `--materialize-raw` so pretraining never waits on downloads.
+- Multi-view dataloader and JEPA entrypoint now live (`create_pretraining_dataloader(views=2)`, `scripts/train_pretrain_jepa.py` + `fm/config/pretrain_jepa.toml`)—ready for smoke runs once caches are in place.
+- Linear probe (`scripts/evaluate_jepa_linear.py`) reports CCD RMSE/MAE on subject-disjoint splits for quick backbone sanity checks.
+- `training.dataset_variant` toggles mini/full releases; keep R5 excluded (val) per organiser guidance.
+- `EEGJEPAModel` now wraps Braindecode's `SignalJEPA`; HydroCel 129 coordinates are embedded in-code as learnable channel embeddings (with fallback ring layout) so the backbone stays consistent across objectives.
+- NEXT: add toggles for masked/movie pretext objectives and schedule baseline vs +mask vs +movie ablations once new JEPA checkpoints are trained.
 - Tier 1 priorities:
   1. Masked time×channel prediction (BENDR/JEPA-style) using the shared CNN backbone.
   2. SSVEP contrastive learning on surround-suppression data via CCA/PLV features (positives = same stimulus condition, negatives = others).

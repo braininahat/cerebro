@@ -1,8 +1,19 @@
+import copy
 from pathlib import Path
 from typing import Optional, Tuple
 
+import numpy as np
+
 from braindecode.datasets import BaseConcatDataset
 from eegdash.dataset import EEGChallengeDataset
+
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"^\s*\[EEGChallengeDataset\] EEG 2025 Competition Data Notice",
+    module="eegdash",
+)
 from joblib import Parallel, delayed
 from sklearn.model_selection import train_test_split
 from sklearn.utils import check_random_state
@@ -10,6 +21,36 @@ from torch.utils.data import DataLoader
 
 from .constants import *
 from .preprocessing import *
+from .channel_layouts import HYDROCEL_129_POSITIONS
+
+
+def load_challenge_dataset(
+    task: str,
+    release: str = "R1",
+    variant: str = "mini",
+    cache_dir: Path = MINI_DATASET_ROOT,
+    description_fields: list[str] | None = None,
+    full_subdir: str = "full",
+) -> EEGChallengeDataset:
+    """Load EEG challenge dataset (mini or full) for a specific task."""
+
+    if variant not in {"mini", "full"}:
+        raise ValueError("variant must be 'mini' or 'full'")
+
+    effective_cache = cache_dir
+    if variant == "full":
+        effective_cache = (cache_dir / full_subdir).resolve()
+
+    if description_fields is None:
+        description_fields = ["subject", "task", "run", "release"]
+
+    return EEGChallengeDataset(
+        task=task,
+        release=release,
+        mini=(variant == "mini"),
+        cache_dir=effective_cache,
+        description_fields=description_fields,
+    )
 
 
 def load_mini_dataset(
@@ -19,24 +60,70 @@ def load_mini_dataset(
     cache_dir: Path = MINI_DATASET_ROOT,
     description_fields: list[str] | None = None,
 ) -> EEGChallengeDataset:
-    """Load EEG challenge dataset for a specific task.
-
-    Args:
-        task: Task name (e.g., "contrastChangeDetection")
-        release: Release version (default "R1")
-        mini: Whether to use mini dataset (default True)
-        cache_dir: Directory containing cached data
-
-    Returns:
-        EEGChallengeDataset object
-    """
-    return EEGChallengeDataset(
+    variant = "mini" if mini else "full"
+    return load_challenge_dataset(
         task=task,
         release=release,
-        mini=mini,
+        variant=variant,
         cache_dir=cache_dir,
         description_fields=description_fields,
     )
+
+
+def load_sensor_positions(layout_path: Path | None = None) -> dict[str, np.ndarray]:
+    # Prefer hard-coded HydroCel map; fall back to optional .sfp file for overrides.
+    positions = {k: np.array(v, dtype=float) for k, v in HYDROCEL_129_POSITIONS.items()}
+    if layout_path is None:
+        return positions
+    if layout_path.exists():
+        with layout_path.open() as fh:
+            for line in fh:
+                parts = line.strip().split()
+                if len(parts) != 4:
+                    continue
+                label = parts[0].upper()
+                try:
+                    coords = np.array(list(map(float, parts[1:])), dtype=float)
+                except ValueError:
+                    continue
+                positions[label] = coords
+    return positions
+
+
+def load_chs_info(
+    task: str,
+    release: str,
+    variant: str = "mini",
+    cache_dir: Path = MINI_DATASET_ROOT,
+    full_subdir: str = "full",
+    layout_path: Path | None = None,
+):
+    ds = load_challenge_dataset(
+        task=task,
+        release=release,
+        variant=variant,
+        cache_dir=cache_dir,
+        full_subdir=full_subdir,
+    )
+    if not ds.datasets:
+        raise ValueError(f"No recordings found for {task}/{release}")
+    raw = ds.datasets[0].raw
+    chs = copy.deepcopy(raw.info["chs"])
+    positions = load_sensor_positions(layout_path)
+    for ch in chs:
+        name = ch.get("ch_name", "").upper()
+        coords = positions.get(name)
+        loc = ch.get("loc")
+        if loc is None or len(loc) == 0:
+            loc = np.zeros(12, dtype=float)
+        else:
+            loc = np.array(loc, dtype=float)
+            if loc.size < 12:
+                loc = np.pad(loc, (0, 12 - loc.size))
+        if coords is not None and not np.isnan(coords).any():
+            loc[:3] = coords
+        ch["loc"] = loc
+    return chs
 
 
 def download_all_raws(dataset, n_jobs=-1):

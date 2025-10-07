@@ -39,8 +39,30 @@ The start kit scripts accept the same directory when run from this repository (t
 
 ```bash
 pip install -r startkit/requirements.txt
-uv run python scripts/download_all_releases.py  # caches all mini releases and full releases
+uv run python scripts/download_all_releases.py  # caches all tasks + releases (mini + full)
 ```
+
+Use `--skip-full` or `--skip-mini` if you only need one variant, or `--releases` / `--tasks`
+to limit scope during quick smoke runs. Set `EEG2025_DATA_DIR` (or pass
+`--data-root`) before running; for a repo-local cache, point both to `data/`
+and add the environment variable to a `.env` file so `uv run` picks it up
+automatically. Add `--workers 4` (for example) to parallelise release/task
+downloads, set `--dataset-workers` to throttle per-dataset decompression
+(default `-1` uses all cores), and pass `--materialize-raw` to pre-fetch the
+actual BDF files so later training runs stay fully offline.
+
+To switch JEPA pretraining to the full BIDS releases, set
+`training.dataset_variant = "full"` in `fm/config/pretrain_jepa.toml` (or provide
+`--dataset-variant full` on the CLI) after caching the full releases with the
+download helper.
+
+For faster start-up on the full dataset, pre-slice windows once:
+
+```bash
+uv run python scripts/cache_windows.py --dataset-variant full --releases R1 R2 R3 R4 R6 R7 R8 R9 R10 R11 --tasks RestingState surroundSupp contrastChangeDetection
+```
+
+This writes tensors under `data/cached_windows/full/…`. Future JEPA runs reuse them automatically.
 
 All mini releases are mutually exclusive sets of 20 subjects. Use the following exclusion list before splitting by subject:
 
@@ -81,9 +103,33 @@ Metrics logged per run include train/val/test loss, RMSE, MAE, learning rate, ti
 
 ### Pretraining Utilities
 
-Use `src/cerebro/pretraining.py:create_pretraining_dataloader` to sample random crops across passive tasks for self-supervised objectives. The helper expects releases cached via `scripts/download_all_releases.py`.
+Use `src/cerebro/pretraining.py:create_pretraining_dataloader` to sample random crops across passive tasks for self-supervised objectives. The helper now supports multi-view sampling (`views=2`) so the JEPA trainer receives paired crops. It expects releases cached via `scripts/download_all_releases.py`.
 
-Foundation code lives under `fm/`: datamodules for pretraining, simple JEPA-style encoder (`fm/models`), and loss helpers (`fm/tasks`).
+Foundation code lives under `fm/`: datamodules for pretraining, JEPA (`SignalJEPA`) and masked-model encoders (`fm/models`), loss helpers (`fm/tasks`), and default configs (`fm/config/`). Validation splits are optional via `val_fraction` and JEPA runs now log both train and validation loss with Rich progress bars. Use `scripts/cache_windows.py` to cache fixed-length windows for full releases so training spins up immediately.
+
+Kick off multitask JEPA pretraining with:
+
+```bash
+uv run python scripts/train_pretrain_jepa.py --max-steps 200
+```
+
+The script reads `fm/config/pretrain_jepa.toml` (tasks, releases, optimiser, logging cadence) and writes resolved configs plus checkpoints to `weights/pretrain_jepa/`. Override any field via CLI flags (e.g., `--epochs`, `--releases R1 R2 R3`, `--device cpu`, `--val-fraction 0.1`, `--dataset-variant full`). Enable W&B logging in the config and pass `--materialize-raw` to the download helper first to avoid lazy fetches. To pre-slice windows ahead of time (reducing startup latency), run `uv run python scripts/cache_windows.py --dataset-variant full` and the trainer will reuse the saved tensors automatically.
+
+Masked autoencoder pretraining (time/channel masking) is available via:
+
+```bash
+uv run python scripts/train_masked_model.py --max-steps 200
+```
+
+Defaults live in `fm/config/masked_autoencoder.toml`. The loader returns masked windows alongside the originals; the loss is only computed on masked positions. Tweak `time_mask_fraction`, `channel_mask_fraction`, and `dataset_variant` in the config or via CLI.
+
+For quick linear probes using the frozen encoder, run:
+
+```bash
+uv run python scripts/evaluate_jepa_linear.py --checkpoint weights/pretrain_jepa/checkpoint_epoch_005.pt --release R5
+```
+
+This trains a ridge regression head on CCD windows split subject-wise (as in the start kit) and reports RMSE/MAE on validation and test splits.
 
 See `docs/task_metadata/` for per-task annotation timelines and `docs/pretraining_tasks/` for detailed objective diagrams.
 
@@ -99,8 +145,8 @@ These notebooks currently target Challenge 1; extending them to load p-factor l
 ## Development Workflow
 
 1. **Environment setup**
-   - `pip install -e .` to install Cerebro utilities in editable mode.
-   - `pip install -r startkit/requirements.txt` for the official dependencies.
+   - `uv pip install -e .` to install Cerebro utilities in editable mode.
+   - `uv pip install -r startkit/requirements.txt` for the official dependencies.
    - Use `uv run python <script>` when executing notebooks or scripts to ensure a consistent environment (see `CLAUDE.md`).
 2. **Formatting & linting**
    - `make format` or `black --check . && isort --check .` before committing.
