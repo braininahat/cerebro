@@ -23,9 +23,10 @@ import os
 import torch
 import warnings
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, TQDMProgressBar
+from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, TQDMProgressBar, RichModelSummary
 from lightning.pytorch.loggers import WandbLogger
 from torch.utils.data import DataLoader
+import wandb
 from braindecode.models import EEGNeX
 from braindecode.datasets import BaseConcatDataset
 from braindecode.preprocessing import preprocess, Preprocessor, create_windows_from_events
@@ -94,16 +95,44 @@ SHIFT_AFTER_STIM = 0.5  # Start window 0.5s after stimulus
 WINDOW_LEN = 2.0
 
 # Training parameters
-BATCH_SIZE = 1024
-EPOCHS = 2 if USE_MINI else 100
-LR = 1e-3  # Will be overridden by LR finder
+BATCH_SIZE = 2048
+EPOCHS = 2 if USE_MINI else 1000
+LR = 1e-4  # Will be overridden by LR finder
 WEIGHT_DECAY = 1e-5
 EARLY_STOPPING_PATIENCE = 10
-PRECISION = "32"  # Options: "32" (full), "16-mixed" (fast), "bf16-mixed" (stable+fast, requires Ampere+)
+PRECISION = "bf16-mixed"  # Options: "32" (full), "16-mixed" (fast), "bf16-mixed" (stable+fast, requires Ampere+)
+
+# Model architecture parameters
+N_CHANS = 129  # HBN dataset channel count
+N_OUTPUTS = 1  # Regression output
+
+# LR Finder parameters
+LR_FINDER_MIN_LR = 1e-5
+LR_FINDER_MAX_LR = 1e-1
+LR_FINDER_NUM_TRAINING = 100
+LR_FINDER_MODE = "exponential"
+
+# Batch Size Finder parameters
+BS_FINDER_MODE = "power"
+BS_FINDER_INIT_VAL = 32
+BS_FINDER_MAX_TRIALS = 6
+BS_FINDER_STEPS_PER_TRIAL = 3
+
+# Logging configuration
+LOGGER_NAME = "cerebro"
+LOG_LEVEL = logging.INFO
+LOG_FORMAT = "%(message)s"
+LOG_DATEFMT = "[%X]"
+LOG_FILE_MODE = "w"  # 'w' = overwrite, 'a' = append
+RICH_TRACEBACKS = True
+RICH_MARKUP = True
+
+# RichModelSummary configuration
+RICH_MODEL_SUMMARY_MAX_DEPTH = 1  # Layer nesting depth (0=off, 1=default, 2+=deeper)
 
 # Hyperparameter tuning switches
 RUN_LR_FINDER = True
-RUN_BATCH_SIZE_FINDER = True
+RUN_BATCH_SIZE_FINDER = False
 
 # Splits
 VAL_FRAC = 0.1
@@ -123,21 +152,41 @@ CACHE_DIR = OUTPUT_ROOT / "challenge1" / "cache"  # Shared across runs
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Setup logging to file and console
-log_file = LOG_DIR / f"train_mini{USE_MINI}.log"
+log_file = LOG_DIR / f"train_{'mini' if USE_MINI else 'full'}.log"
+
+# Custom formatter to strip Rich markup from file logs
+class PlainFormatter(logging.Formatter):
+    """Formatter that strips Rich markup tags for clean file output"""
+    def format(self, record):
+        # Create copy to avoid mutating original record
+        record = logging.makeLogRecord(record.__dict__)
+        # Strip Rich markup tags: [bold], [/bold], [green], etc.
+        import re
+        record.msg = re.sub(r'\[/?[^\]]+\]', '', str(record.msg))
+        return super().format(record)
 
 # Configure logging with Rich handler for console + file handler
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    datefmt="[%X]",
-    handlers=[
-        RichHandler(rich_tracebacks=True, markup=True),  # Pretty console output
-        logging.FileHandler(log_file, mode='w'),  # File output
-    ]
+rich_handler = RichHandler(
+    rich_tracebacks=RICH_TRACEBACKS,
+    markup=RICH_MARKUP
 )
 
+file_handler = logging.FileHandler(log_file, mode=LOG_FILE_MODE)
+file_handler.setFormatter(PlainFormatter(LOG_FORMAT))
+
+# Configure root logger explicitly to capture all loggers (including Lightning)
+root_logger = logging.getLogger()
+root_logger.setLevel(LOG_LEVEL)
+
+# Clear any existing handlers (prevents duplicates if running multiple times)
+root_logger.handlers.clear()
+
+# Add our handlers
+root_logger.addHandler(rich_handler)
+root_logger.addHandler(file_handler)
+
 console = Console()
-logger = logging.getLogger("cerebro")
+logger = logging.getLogger(LOGGER_NAME)
 
 # Log configuration
 logger.info(f"[bold green]Logging to:[/bold green] {log_file}")
@@ -364,10 +413,10 @@ class Challenge1Module(L.LightningModule):
 
         # Model
         self.model = EEGNeX(
-            n_chans=129,
-            n_outputs=1,
-            n_times=200,  # 2 seconds at 100 Hz
-            sfreq=100,
+            n_chans=N_CHANS,
+            n_outputs=N_OUTPUTS,
+            n_times=int(WINDOW_LEN * SFREQ),  # 2 seconds at 100 Hz
+            sfreq=SFREQ,
         )
 
         # Loss
@@ -510,6 +559,9 @@ early_stop_callback = EarlyStopping(
 # Progress bar with persistence
 progress_bar = TQDMProgressBar(leave=True)  # Keep bars after epoch completion
 
+# Model summary with rich formatting
+model_summary_callback = RichModelSummary(max_depth=RICH_MODEL_SUMMARY_MAX_DEPTH)
+
 # Logger
 wandb_logger = WandbLogger(
     entity=WANDB_TEAM,
@@ -543,12 +595,58 @@ model = Challenge1Module(
 logger.info(f"\n[bold]Model:[/bold] {model.model.__class__.__name__}")
 logger.info(f"[bold]Total parameters:[/bold] {sum(p.numel() for p in model.parameters()):,}")
 
+# Log all configuration to wandb for reproducibility
+wandb_logger.experiment.config.update({
+    # Data settings
+    "data_dir": str(DATA_DIR),
+    "releases": RELEASES,
+    "num_releases": len(RELEASES),
+    "use_mini": USE_MINI,
+    "excluded_subjects": EXCLUDED_SUBJECTS,
+
+    # Windowing parameters
+    "epoch_len_s": EPOCH_LEN_S,
+    "sfreq": SFREQ,
+    "anchor": ANCHOR,
+    "shift_after_stim": SHIFT_AFTER_STIM,
+    "window_len": WINDOW_LEN,
+
+    # Training parameters
+    "batch_size": BATCH_SIZE,
+    "epochs": EPOCHS,
+    "lr": LR,
+    "weight_decay": WEIGHT_DECAY,
+    "early_stopping_patience": EARLY_STOPPING_PATIENCE,
+    "precision": PRECISION,
+
+    # Hyperparameter tuning switches
+    "run_lr_finder": RUN_LR_FINDER,
+    "run_batch_size_finder": RUN_BATCH_SIZE_FINDER,
+
+    # Splits
+    "val_frac": VAL_FRAC,
+    "test_frac": TEST_FRAC,
+    "seed": SEED,
+    "num_train_subjects": len(train_subj),
+    "num_val_subjects": len(valid_subj),
+    "num_test_subjects": len(test_subj),
+    "num_train_windows": len(train_set),
+    "num_val_windows": len(val_set),
+    "num_test_windows": len(test_set),
+
+    # Model architecture
+    "model_name": model.model.__class__.__name__,
+    "n_chans": N_CHANS,
+    "n_times": int(WINDOW_LEN * SFREQ),
+    "num_parameters": sum(p.numel() for p in model.parameters()),
+})
+
 # %% Setup Trainer
 trainer = L.Trainer(
     max_epochs=EPOCHS,
     accelerator="auto",  # Auto-detect best available hardware
     devices=1,           # Use single device
-    callbacks=[checkpoint_callback, early_stop_callback, progress_bar],
+    callbacks=[checkpoint_callback, early_stop_callback, progress_bar, model_summary_callback],
     logger=wandb_logger,
     gradient_clip_val=1.0,
     precision=PRECISION,
@@ -563,10 +661,6 @@ logger.info(f"  Precision: {trainer.precision}")
 logger.info(f"  Gradient clip: 1.0")
 
 # %% Optional: Auto-tune hyperparameters with Lightning Tuner
-# Separate controls for tuner components
-RUN_LR_FINDER = True
-RUN_BATCH_SIZE_FINDER = False  # Disabled, using manual batch_size=2048
-
 if RUN_LR_FINDER or RUN_BATCH_SIZE_FINDER:
     from lightning.pytorch.tuner import Tuner
 
@@ -584,15 +678,26 @@ if RUN_LR_FINDER or RUN_BATCH_SIZE_FINDER:
         tuner.scale_batch_size(
             model,
             datamodule,
-            mode="power",
-            steps_per_trial=3,
-            init_val=32,
-            max_trials=6  # Caps at 1024 (32*2^5), won't try 4096+
+            mode=BS_FINDER_MODE,
+            steps_per_trial=BS_FINDER_STEPS_PER_TRIAL,
+            init_val=BS_FINDER_INIT_VAL,
+            max_trials=BS_FINDER_MAX_TRIALS  # Caps at 1024 (32*2^5), won't try 4096+
         )
 
         new_batch_size = datamodule.batch_size
         logger.info(f"[green]Optimal batch size:[/green] {new_batch_size}")
         logger.info(f"[bold]Updated datamodule batch_size to:[/bold] {new_batch_size}")
+
+        # Log batch size finder results to wandb
+        wandb_logger.experiment.config.update({
+            "batch_size_finder_enabled": True,
+            "batch_size_original": BATCH_SIZE,
+            "batch_size_optimal": new_batch_size,
+            "batch_size_finder_mode": BS_FINDER_MODE,
+            "batch_size_finder_init_val": BS_FINDER_INIT_VAL,
+            "batch_size_finder_max_trials": BS_FINDER_MAX_TRIALS,
+            "batch_size_finder_steps_per_trial": BS_FINDER_STEPS_PER_TRIAL,
+        })
 
     # Learning rate finder (RUN SECOND - uses finalized batch size)
     if RUN_LR_FINDER:
@@ -600,10 +705,10 @@ if RUN_LR_FINDER or RUN_BATCH_SIZE_FINDER:
         lr_finder = tuner.lr_find(
             model,
             datamodule,
-            min_lr=1e-6,
-            max_lr=1e-1,
-            num_training=1000,
-            mode="exponential",
+            min_lr=LR_FINDER_MIN_LR,
+            max_lr=LR_FINDER_MAX_LR,
+            num_training=LR_FINDER_NUM_TRAINING,
+            mode=LR_FINDER_MODE,
             attr_name="lr"
         )
 
@@ -619,8 +724,28 @@ if RUN_LR_FINDER or RUN_BATCH_SIZE_FINDER:
         model.hparams.lr = suggested_lr
         logger.info(f"[bold]Updated model LR to:[/bold] {suggested_lr:.6f}")
 
+        # Log LR finder results to wandb
+        wandb_logger.experiment.config.update({
+            "lr_finder_enabled": True,
+            "lr_original": LR,
+            "lr_suggested": suggested_lr,
+            "lr_finder_min_lr": LR_FINDER_MIN_LR,
+            "lr_finder_max_lr": LR_FINDER_MAX_LR,
+            "lr_finder_num_training": LR_FINDER_NUM_TRAINING,
+            "lr_finder_mode": LR_FINDER_MODE,
+        })
+
+        # Upload LR finder plot to wandb
+        wandb_logger.experiment.log({"lr_finder_plot": wandb.Image(str(lr_plot_path))})
+
     logger.info("\n[bold green]Tuning complete![/bold green]")
     logger.info("="*60)
+else:
+    # Log that tuners were disabled
+    wandb_logger.experiment.config.update({
+        "lr_finder_enabled": False,
+        "batch_size_finder_enabled": False,
+    })
 
 # %% Train model
 logger.info("\n" + "="*60)
