@@ -362,17 +362,39 @@ Capture in Memory (mcp__memory__add_observations)
 
 ## Running Code
 
-This is NOT an installable package. Always use `uv run` to execute Python code:
+Cerebro is an installable package. **One-time setup** (after cloning):
 
 ```bash
-# Training (uses Hydra config composition)
-uv run python scripts/train.py experiment=baseline_eegnex_c1
-uv run python scripts/train.py experiment=movie_pretrain
-uv run python scripts/train.py experiment=multitask_finetune training.pretrained_checkpoint=outputs/.../best.pt
+cd cerebro
+uv pip install -e .  # Install in editable mode
+```
+
+### CLI Commands (Lightning CLI)
+
+```bash
+# Training with Lightning CLI
+uv run cerebro fit --config configs/challenge1_base.yaml
+uv run cerebro fit --config configs/challenge1_mini.yaml
+
+# With LR finder
+uv run cerebro fit --config configs/challenge1_base.yaml --run_lr_finder true
 
 # Override config values
-uv run python scripts/train.py experiment=baseline_eegnex_c1 training.lr=0.0001 data.batch_size=256
+uv run cerebro fit --config configs/challenge1_base.yaml \
+    --model.init_args.lr 0.0001 \
+    --data.init_args.batch_size 256
 
+# Backward compatible (direct python)
+uv run python cerebro/cli/train.py fit --config configs/challenge1_base.yaml
+
+# Other Lightning CLI subcommands
+uv run cerebro validate --config configs/challenge1_base.yaml
+uv run cerebro test --config configs/challenge1_base.yaml --ckpt_path outputs/.../best.ckpt
+```
+
+### Scripts (future work)
+
+```bash
 # Local evaluation (critical for iteration)
 uv run python scripts/evaluate.py checkpoint=outputs/.../best.pt
 uv run python scripts/evaluate.py checkpoint=outputs/.../best.pt --fast-dev-run
@@ -422,23 +444,31 @@ Configs are composed from base modules:
 Experiment configs use `defaults` to inherit and `@package _global_` to override at root level.
 
 ### Module Organization
-**src/data/**: Dataset classes replicating startkit pipelines exactly
-- `challenge1.py`: Implements annotate→filter→window→label pipeline
+**cerebro/data/**: Dataset classes replicating startkit pipelines exactly
+- `challenge1.py`: Implements annotate→filter→window→label pipeline (Lightning DataModule)
 - `challenge2.py`: Implements filter→window→wrap pipeline with DatasetWrapper
 - `movies.py`: Implements positive/negative pair creation for contrastive learning
 
-**src/models/**: Model wrappers around braindecode implementations
+**cerebro/models/**: Model wrappers around braindecode implementations
+- `challenge1.py`: Challenge1Module (Lightning Module with EEGNeX)
 - `encoders.py`: Wraps braindecode.models (EEGNeX, SignalJEPA)
 - `projector.py`: MLP projection head for contrastive learning
 - `heads.py`: Regression heads for C1/C2
 - `multitask.py`: Shared encoder + dual heads architecture
 
-**src/training/**: Training loops with different objectives
+**cerebro/cli/**: Command-line interface
+- `train.py`: CerebroCLI (extends Lightning CLI with logging, LR finder, batch size finder)
+
+**cerebro/utils/**: Utilities
+- `logging.py`: Rich logging setup (console + file)
+- `tuning.py`: LR finder and batch size scaler wrappers
+
+**cerebro/training/**: Training loops with different objectives (future work)
 - `supervised.py`: Single-task MSE/MAE training
 - `contrastive.py`: InfoNCE loss with pair sampling
 - `multitask.py`: Joint C1+C2 optimization with frozen encoder phase
 
-**src/evaluation/**: Local scoring before submission
+**cerebro/evaluation/**: Local scoring before submission (future work)
 - `local_scoring.py`: Adapted from startkit, runs full evaluation pipeline
 - `submission_wrapper.py`: Converts checkpoint to Submission class format expected by competition
 
@@ -551,11 +581,12 @@ The `startkit/` directory contains reference implementations that MUST be replic
 
 ## Key Design Decisions
 
-1. **No packaging overhead**: Run with `uv run` for fast iteration without installation
-2. **Config-driven experiments**: Change hyperparameters via Hydra, not code
-3. **Aggressive caching**: EEGChallengeDataset caches downloads, preprocessed data should be cached
-4. **Baselines first**: Supervised training is safety net before trying contrastive learning
-5. **Local scoring critical**: Test with `uv run python startkit/local_scoring.py` before submitting to competition
+1. **Installable package**: Editable install (`uv pip install -e .`) for clean imports and IDE support
+2. **CLI entry point**: `uv run cerebro fit` command via package entry point (backward compatible with direct python)
+3. **Config-driven experiments**: Change hyperparameters via Lightning CLI, not code
+4. **Aggressive caching**: EEGChallengeDataset caches downloads, preprocessed data cached via pickle
+5. **Baselines first**: Supervised training is safety net before trying contrastive learning
+6. **Local scoring critical**: Test with `uv run python startkit/local_scoring.py` before submitting to competition
 
 ## User Preferences (from ~/.claude/CLAUDE.md)
 

@@ -1,0 +1,122 @@
+# Lightning CLI configuration for Challenge 1 (Response Time Prediction)
+# Usage: uv run python src/cli/train.py fit --config configs/challenge1_base.yaml
+
+# Seed everything for reproducibility
+seed_everything: 42
+
+# Tuning flags (root level, not under trainer)
+run_lr_finder: false
+run_batch_size_finder: false
+
+# LR finder parameters (used if run_lr_finder=true)
+lr_finder_min: 1.0e-07
+lr_finder_max: 0.1
+lr_finder_num_training: 100
+
+# Batch size finder parameters (used if run_batch_size_finder=true)
+bs_finder_mode: power
+bs_finder_init_val: 32
+bs_finder_max_trials: 6
+
+# Trainer configuration
+trainer:
+  max_epochs: 1000
+  accelerator: auto  # Auto-detect GPU/CPU
+  devices: 1
+  precision: "bf16-mixed" # Options: "32" (full), "16-mixed" (fast), "bf16-mixed" (stable+fast, requires Ampere+)
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 10
+
+  # Logger configuration
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025  # Change to your wandb team/username
+      name: challenge1_baseline
+      tags:
+        - challenge1
+        - supervised
+        - eegnex
+        - baseline
+      notes: "EEGNeX baseline for Challenge 1 (RT prediction from CCD task)"
+      log_model: all  # Upload all checkpoints as wandb artifacts
+      save_dir: outputs/challenge1
+
+  # Callbacks
+  callbacks:
+    # ModelCheckpoint: Save best models based on validation NRMSE
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/challenge1/checkpoints
+        filename: challenge1-{epoch:02d}-{val_nrmse:.4f}
+        monitor: val_nrmse
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    # EarlyStopping: Stop training if validation NRMSE doesn't improve
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_nrmse
+        patience: 10
+        mode: min
+        verbose: true
+
+    # TQDMProgressBar: Keep progress bars after epoch completion
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    # RichModelSummary: Display model architecture
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 1
+
+# Model configuration (class registered in CLI, just specify __init__ params)
+model:
+  n_chans: 129  # HBN dataset channel count
+  n_outputs: 1  # Regression output (RT)
+  n_times: 200  # 2 seconds at 100 Hz
+  sfreq: 100
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 100  # Must match trainer.max_epochs for scheduler
+
+# Data configuration (class registered in CLI, just specify __init__ params)
+data:
+  data_dir: ${oc.env:EEG2025_DATA_ROOT,data/full}
+  releases:
+    - R1
+    - R2
+    - R3
+    - R4
+    - R6
+    - R7
+    - R8
+    - R9
+    - R10
+    - R11
+  batch_size: 512
+  num_workers: 8  # Parallel data loading (adjust based on CPU cores)
+  excluded_subjects:
+    - NDARWV769JM7
+    - NDARME789TD2
+    - NDARUA442ZVF
+    - NDARJP304NK1
+    - NDARTY128YLU
+    - NDARDW550GU6
+    - NDARLD243KRE
+    - NDARUJ292JXV
+    - NDARBA381JGH
+  shift_after_stim: 0.5  # Start window 0.5s after stimulus
+  window_len: 2.0  # 2 second windows
+  use_mini: false  # Set to true for fast prototyping
+  cache_dir: null  # null = auto (data_dir/../cache/challenge1)
+  val_frac: 0.1
+  test_frac: 0.1
+  seed: 2025
+  sfreq: 100
+  epoch_len_s: 2.0
+  anchor: stimulus_anchor

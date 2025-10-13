@@ -1,0 +1,57 @@
+# Wandb sweep configuration for Challenge 1 hyperparameter search
+#
+# Usage:
+#   1. Initialize sweep: wandb sweep sweeps/challenge1_sweep.yaml
+#   2. Run agent: wandb agent <entity>/<project>/<sweep-id>
+#
+# Note: Uses flattened parameter names (dot notation) and ${args_json_file}
+# to work around Lightning CLI nested config issues. See:
+# https://community.wandb.ai/t/wandb-sweep-and-pytorchlightning-cli/9367
+
+program: src/cli/train.py
+method: bayes  # Options: random, grid, bayes
+metric:
+  name: val_nrmse
+  goal: minimize
+
+# Command template (uses args_json_file for Lightning CLI compatibility)
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - fit
+  - --config
+  - configs/challenge1_base.yaml
+  - ${args_json_file}  # Key: use args_json_file not args for Lightning CLI
+
+# Hyperparameters to sweep (flattened with dot notation)
+parameters:
+  # Learning rate (log-uniform distribution)
+  model.lr:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.01
+
+  # Weight decay (categorical)
+  model.weight_decay:
+    values: [0.00001, 0.0001, 0.001]
+
+  # Batch size (categorical)
+  data.batch_size:
+    values: [128, 256, 512, 1024]
+
+  # Fixed parameters (not swept)
+  trainer.max_epochs:
+    value: 100
+
+  model.epochs:
+    value: 100
+
+# Early termination (optional: stop poorly performing runs)
+early_terminate:
+  type: hyperband
+  min_iter: 10  # Minimum epochs before termination
+  s: 2
+  eta: 3

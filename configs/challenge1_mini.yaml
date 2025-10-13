@@ -1,0 +1,96 @@
+# Lightning CLI configuration for Challenge 1 (Mini Dataset)
+# Fast prototyping with mini dataset and reduced epochs
+# Usage: uv run python src/cli/train.py fit --config configs/challenge1_mini.yaml
+
+# Seed everything for reproducibility
+seed_everything: 42
+
+# Tuning flags (disabled for mini)
+run_lr_finder: false
+run_batch_size_finder: false
+
+# Trainer configuration
+trainer:
+  max_epochs: 2  # Fast iteration
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 10
+
+  # Logger configuration (full spec required)
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: challenge1_mini
+      tags:
+        - challenge1
+        - mini
+        - debug
+      notes: "Fast prototyping with mini dataset"
+      log_model: false  # Don't upload artifacts for mini
+      save_dir: outputs/challenge1
+
+  # Callbacks (same as base)
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/challenge1/checkpoints
+        filename: challenge1-{epoch:02d}-{val_nrmse:.4f}
+        monitor: val_nrmse
+        mode: min
+        save_top_k: 3
+        save_last: true
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_nrmse
+        patience: 10
+        mode: min
+        verbose: true
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 1
+
+# Model configuration (class registered in CLI, just specify __init__ params)
+model:
+  n_chans: 129
+  n_outputs: 1
+  n_times: 200
+  sfreq: 100
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 2  # Must match trainer.max_epochs
+
+# Data configuration (mini overrides)
+data:
+  data_dir: ${oc.env:EEG2025_DATA_ROOT,data/mini}
+  releases:
+    - R5  # Mini dataset only has R5
+  batch_size: 64  # Smaller batch for mini
+  num_workers: 4  # Fewer workers for mini
+  excluded_subjects:
+    - NDARWV769JM7
+    - NDARME789TD2
+    - NDARUA442ZVF
+    - NDARJP304NK1
+    - NDARTY128YLU
+    - NDARDW550GU6
+    - NDARLD243KRE
+    - NDARUJ292JXV
+    - NDARBA381JGH
+  shift_after_stim: 0.5
+  window_len: 2.0
+  use_mini: true  # Mini flag
+  cache_dir: null
+  val_frac: 0.1
+  test_frac: 0.1
+  seed: 2025
+  sfreq: 100
+  epoch_len_s: 2.0
+  anchor: stimulus_anchor

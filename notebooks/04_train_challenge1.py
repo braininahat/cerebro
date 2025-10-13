@@ -95,19 +95,19 @@ SHIFT_AFTER_STIM = 0.5  # Start window 0.5s after stimulus
 WINDOW_LEN = 2.0
 
 # Training parameters
-BATCH_SIZE = 2048
+BATCH_SIZE = 512
 EPOCHS = 2 if USE_MINI else 1000
 LR = 1e-4  # Will be overridden by LR finder
 WEIGHT_DECAY = 1e-5
 EARLY_STOPPING_PATIENCE = 10
-PRECISION = "bf16-mixed"  # Options: "32" (full), "16-mixed" (fast), "bf16-mixed" (stable+fast, requires Ampere+)
+PRECISION = "32"  # Options: "32" (full), "16-mixed" (fast), "bf16-mixed" (stable+fast, requires Ampere+)
 
 # Model architecture parameters
 N_CHANS = 129  # HBN dataset channel count
 N_OUTPUTS = 1  # Regression output
 
 # LR Finder parameters
-LR_FINDER_MIN_LR = 1e-5
+LR_FINDER_MIN_LR = 1e-7
 LR_FINDER_MAX_LR = 1e-1
 LR_FINDER_NUM_TRAINING = 100
 LR_FINDER_MODE = "exponential"
@@ -131,7 +131,7 @@ RICH_MARKUP = True
 RICH_MODEL_SUMMARY_MAX_DEPTH = 1  # Layer nesting depth (0=off, 1=default, 2+=deeper)
 
 # Hyperparameter tuning switches
-RUN_LR_FINDER = True
+RUN_LR_FINDER = False
 RUN_BATCH_SIZE_FINDER = False
 
 # Splits
