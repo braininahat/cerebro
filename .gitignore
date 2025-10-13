@@ -226,3 +226,6 @@ response_time_distribution.png
 *.ckpt
 *.pkl
 *.zip
+outputs/
+*/outputs/
+wandb/

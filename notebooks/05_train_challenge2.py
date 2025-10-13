@@ -48,9 +48,12 @@ L.seed_everything(42)
 print("Trainer will auto-detect available accelerator (GPU/CPU/TPU/MPS)")
 
 # %% Configuration
+# Anchor paths to repo root for consistent output location
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 # Load data paths from environment
 load_dotenv()
-DATA_ROOT = Path(os.getenv("EEG2025_DATA_ROOT", "../data")).resolve()
+DATA_ROOT = Path(os.getenv("EEG2025_DATA_ROOT", str(REPO_ROOT / "data"))).resolve()
 MINI_DIR = (DATA_ROOT / "mini").resolve()
 FULL_DIR = (DATA_ROOT / "full").resolve()
 
@@ -94,8 +97,9 @@ VAL_FRAC = 0.1
 TEST_FRAC = 0.1
 SEED = 2025
 
-# Output
-OUTPUT_DIR = Path("outputs/challenge2")
+# Output (anchored to repo root for consistent location)
+OUTPUT_ROOT = REPO_ROOT / "outputs"
+OUTPUT_DIR = OUTPUT_ROOT / "challenge2"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 print(f"\nConfiguration:")
