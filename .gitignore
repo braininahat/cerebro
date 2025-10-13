@@ -223,3 +223,6 @@ data/
 .vscode/
 .python-version
 response_time_distribution.png
+*.ckpt
+*.pkl
+*.zip

@@ -1,0 +1,32 @@
+# @package _global_
+
+# Experiment: Multitask fine-tuning after contrastive pretraining
+# Usage: python scripts/train.py experiment=multitask_finetune training.pretrained_checkpoint=outputs/.../best.pt
+
+defaults:
+  - override /data: hbn
+  - override /model: eegnex
+  - override /training: multitask
+
+# Experiment metadata
+experiment_name: multitask_finetune
+
+# Data overrides (need both C1 and C2 data)
+data:
+  challenge: multitask  # Load both Challenge1 and Challenge2 datasets
+  batch_size: 128
+
+# Model overrides
+model:
+  n_outputs: null  # Will use dual heads (defined in model code)
+
+# Training overrides
+training:
+  pretrained_checkpoint: null  # MUST be provided via command line
+  freeze_encoder_epochs: 5
+  epochs: 50
+
+# Wandb
+wandb:
+  tags: [multitask, finetune, pretrained, challenge1, challenge2]
+  notes: "Multitask fine-tuning on C1+C2 after movie contrastive pretraining"

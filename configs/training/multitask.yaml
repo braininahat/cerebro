@@ -1,0 +1,60 @@
+# Multitask fine-tuning configuration
+# @package training
+
+name: multitask
+
+# Pretrained checkpoint to load
+pretrained_checkpoint: null  # Path to pretrained encoder
+
+# Freeze encoder initially
+freeze_encoder_epochs: 5  # Freeze for first N epochs, then fine-tune end-to-end
+
+# Optimizer
+optimizer:
+  name: AdamW
+  lr: 0.0001  # Lower LR for fine-tuning
+  weight_decay: 0.00001
+  betas: [0.9, 0.999]
+
+# Learning rate scheduler
+scheduler:
+  name: CosineAnnealingLR
+  T_max: ${..epochs}
+  eta_min: 0.000001
+
+# Training parameters
+epochs: 50  # Fewer epochs for fine-tuning
+early_stopping:
+  enabled: true
+  patience: 10
+  min_delta: 0.0001
+  monitor: val_overall_score  # Overall score (0.3*C1 + 0.7*C2)
+  mode: min
+
+# Task-specific loss weights
+loss:
+  challenge1:
+    name: MSE
+    weight: 0.3  # Match competition weights
+  challenge2:
+    name: MAE  # L1 loss for p_factor
+    weight: 0.7
+
+# Training strategy
+strategy: alternating  # alternating, weighted, or gradient_balancing
+# alternating: alternate batches between C1 and C2
+# weighted: combined loss with weights
+# gradient_balancing: balance gradient magnitudes
+
+# Validation
+val_every_n_epochs: 1
+save_top_k: 3
+
+# Gradient clipping
+gradient_clip_val: 1.0
+
+# Mixed precision
+use_amp: true
+
+# Logging
+log_every_n_steps: 10

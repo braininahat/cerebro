@@ -1,0 +1,23 @@
+# EEGNeX model configuration
+# @package model
+
+name: eegnex
+type: braindecode  # Use pre-implemented braindecode model
+
+# Architecture parameters (for braindecode.models.EEGNeX)
+n_chans: ${data.n_chans}  # 129
+n_outputs: 1  # Regression: single output
+n_times: ${data.n_times}  # 200 samples
+sfreq: ${data.sfreq}  # 100 Hz
+
+# Model-specific hyperparameters
+# (Using EEGNeX defaults, can override if needed)
+# drop_prob: 0.5
+# add_log_softmax: false  # Not needed for regression
+
+# For contrastive learning (add projection head)
+contrastive:
+  enabled: false
+  projection_dim: 128
+  projection_hidden_dim: 256
+  projection_layers: 2

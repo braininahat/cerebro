@@ -1,0 +1,34 @@
+# @package _global_
+
+# Experiment: Movie contrastive pretraining
+# Usage: python scripts/train.py experiment=movie_pretrain
+
+defaults:
+  - override /data: hbn
+  - override /model: contrastive
+  - override /training: contrastive
+
+# Experiment metadata
+experiment_name: movie_contrastive_pretrain
+
+# Data overrides for movie tasks
+data:
+  challenge: movies  # Load MoviePairDataset
+  batch_size: 256  # Larger batch for contrastive learning
+  num_workers: 8
+
+# Model overrides
+model:
+  encoder:
+    name: eegnex
+  temperature: 0.07
+
+# Training overrides
+training:
+  epochs: 50
+  num_negatives: 256
+
+# Wandb
+wandb:
+  tags: [pretraining, contrastive, movies, infonce]
+  notes: "Contrastive pretraining on movie watching data (same movie = positive, different movie = negative)"

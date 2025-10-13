@@ -1,0 +1,44 @@
+# Supervised training configuration
+# @package training
+
+name: supervised
+
+# Optimizer
+optimizer:
+  name: AdamW
+  lr: 0.001
+  weight_decay: 0.00001
+  betas: [0.9, 0.999]
+
+# Learning rate scheduler
+scheduler:
+  name: CosineAnnealingLR
+  T_max: ${..epochs}
+  eta_min: 0.00001
+
+# Training parameters
+epochs: 100
+early_stopping:
+  enabled: true
+  patience: 10
+  min_delta: 0.0001
+  monitor: val_nrmse  # Validation NRMSE
+  mode: min
+
+# Loss function
+loss:
+  name: MSE  # Mean Squared Error for Challenge 1
+  # Use MAE (Mean Absolute Error) for Challenge 2
+
+# Validation
+val_every_n_epochs: 1
+save_top_k: 3  # Save top 3 checkpoints
+
+# Gradient clipping
+gradient_clip_val: 1.0
+
+# Mixed precision training
+use_amp: true  # Automatic mixed precision for faster training
+
+# Logging
+log_every_n_steps: 10

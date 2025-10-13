@@ -1,174 +1,345 @@
-# Cerebro: EEG2025 Challenge Toolkit
+# cerebro
 
-Cerebro packages the official EEG Foundation start kits plus local tooling for the NeurIPS 2025 EEG2025 competition. The start kits are the primary source of truth for the two tasks:
+Competition submission for the NeurIPS 2025 EEG Foundation Challenge: From Cross-Task to Cross-Subject EEG Decoding.
 
-- **Challenge 1 – Cross-Task Transfer Learning**: predict response time (seconds) from 2 s stimulus-locked segments of the Contrast Change Detection (CCD) task.
-- **Challenge 2 – Psychopathology Prediction**: predict the subject-level p-factor score from EEG recordings (example pipeline illustrated on CCD data).
+## Competition Overview
 
-All baseline code, datasets, and evaluation conventions originate from the start kit repository (`startkit/README.md`, `startkit/challenge_1.py`, `startkit/challenge_2.py`). The additional modules under `src/cerebro/` and the benchmark notebooks extend those references with reusable helpers and experiment scripts.
+The challenge addresses fundamental problems in EEG decoding across tasks and subjects using the Healthy Brain Network (HBN) dataset with 3,000+ participants and 129-channel recordings at 100 Hz.
+
+**Challenge 1 - Response Time Prediction (30% weight)**: Predict response time (RT) from EEG recordings in the Contrast Change Detection (CCD) task. Models receive 2-second EEG windows (0.5-2.5s after stimulus onset, 129 channels, 100Hz) and must predict how quickly subjects responded to contrast changes.
+
+**Challenge 2 - P-Factor Prediction (70% weight)**: Predict the externalizing psychopathology factor (p_factor) from EEG recordings. Models can use data from any task (CCD, movies, resting state, etc.) to predict this trait-level score reflecting behavioral and emotional dysregulation.
+
+Final score combines both challenges: **S_overall = 0.3 × NRMSE_C1 + 0.7 × NRMSE_C2**
+
+Evaluation metric: Normalized Root Mean Squared Error (NRMSE) normalized by standard deviation of targets.
+
+## Approach
+
+### Phase 1: Supervised Baselines (Days 1-4)
+
+Establish baseline performance using standard EEG models from braindecode:
+- **EEGNeX**: Efficient ConvNet architecture for EEG
+- **SignalJEPA**: Joint-embedding predictive architecture baseline
+
+Direct supervised training on each challenge independently provides lower bounds and validates data pipeline correctness.
+
+### Phase 2: Movie Contrastive Pretraining (Days 5-7)
+
+**Key insight**: Multiple subjects view identical video clips (DespicableMe, ThePresent, etc.), producing temporally aligned neural responses. We leverage this natural synchronization for cross-subject representation learning.
+
+**Contrastive learning strategy**:
+- **Positive pairs**: Same movie clip, same timestamp, different subjects → should produce similar representations
+- **Negative pairs**: Different movie clips (any subjects/timestamps) → should produce dissimilar representations
+- **InfoNCE loss**: Learns encoder that makes positive pairs similar while pushing apart negatives
+
+This pretraining addresses the core challenge: learning subject-invariant, stimulus-sensitive representations without task labels. The encoder captures shared neural patterns across individuals responding to identical stimuli.
+
+**Multitask fine-tuning**: After pretraining, we add task-specific heads for both challenges (RT prediction + p_factor regression) and fine-tune jointly. Shared encoder benefits from both tasks' training signals.
+
+### Phase 3: Architecture Exploration (Days 8-9, if time permits)
+
+If movie contrastive pretraining beats baselines:
+- **Multi-scale temporal processing**: SlowFast architecture with dual pathways for different frequency bands (fast: beta/gamma 100ms windows, slow: delta/theta/alpha 5s windows)
+- **Hierarchical spatial aggregation**: Regional tokens (frontal/parietal/temporal/occipital) capturing anatomical organization
+- **Efficient sequence modeling**: Mamba state-space models for long-range dependencies in continuous recordings
+
+Priority: working submission over architectural complexity. Advanced architectures only if core approach succeeds.
 
 ## Repository Structure
 
+**Design philosophy**: Modular src/ directory for organization, but NOT packaged as installable library. Run scripts from root with `PYTHONPATH=. python scripts/train.py` for fast iteration.
+
 ```
-startkit/              # Official challenge notebooks & scripts (authoritative reference)
-src/cerebro/           # Shared data, preprocessing, model, metric, and training utilities
-notebooks/             # Local experiments (EDA, benchmark sweeps, data inspection)
-weights/               # Saved checkpoints (git-ignored)
-wandb/                 # Local W&B run artifacts (git-ignored)
-AGENTS.md              # Contributor guide for coding agents
-CLAUDE.md              # Claude-specific workflow tips (mirrors AGENTS)
-README.md              # This document
-gpt_roadmap.md         # High-level roadmap for custom model development
+cerebro/
+├── pyproject.toml                # uv dependency management
+├── README.md
+├── .env                          # Paths, API keys (gitignored)
+│
+├── notebooks/                    # Jupytext .py format (# %%), executable in VSCode
+│   ├── 00_download_all_data.py       # Download R1-R5 via EEGChallengeDataset
+│   ├── 01_explore_hbn_structure.py   # BIDS structure, events, participants.tsv
+│   ├── 02_understand_startkit.py     # Work through challenge_1.py, challenge_2.py
+│   ├── 03_challenge1_baseline.py     # EEGNeX for RT prediction
+│   ├── 04_challenge2_baseline.py     # EEGNeX for p_factor prediction
+│   ├── 05_movie_contrastive_data.py  # Explore movies, create positive/negative pairs
+│   ├── 06_movie_pretrain.py          # Contrastive pretraining loop
+│   └── 07_multitask_finetune.py      # Joint C1+C2 fine-tuning
+│
+├── src/
+│   ├── data/
+│   │   ├── challenge1.py         # Challenge1Dataset: CCD windows + RT labels
+│   │   ├── challenge2.py         # Challenge2Dataset: multi-task windows + p_factor
+│   │   ├── movies.py             # MoviePairDataset: contrastive pairs from videos
+│   │   ├── preprocessing.py      # annotate_trials_with_target, windowing utils
+│   │   └── augmentation.py       # Time jitter, amplitude scaling
+│   │
+│   ├── models/
+│   │   ├── encoders.py           # Wrap braindecode models (EEGNeX, SignalJEPA)
+│   │   ├── projector.py          # MLP projection head for contrastive learning
+│   │   ├── heads.py              # RegressionHead for C1/C2 predictions
+│   │   └── multitask.py          # MultitaskModel: shared encoder + dual heads
+│   │
+│   ├── training/
+│   │   ├── supervised.py         # SupervisedTrainer: single task training loop
+│   │   ├── contrastive.py        # ContrastiveTrainer: InfoNCE loss, pair sampling
+│   │   ├── multitask.py          # MultitaskTrainer: joint C1+C2 optimization
+│   │   └── metrics.py            # NRMSE calculation, local scoring wrapper
+│   │
+│   ├── evaluation/
+│   │   ├── local_scoring.py      # Adapted from startkit/local_scoring.py
+│   │   └── submission_wrapper.py # Convert checkpoint → Submission class format
+│   │
+│   └── utils/
+│       ├── checkpoint.py         # save_checkpoint(), load_checkpoint()
+│       └── config.py             # Config dataclasses (if needed beyond Hydra)
+│
+├── configs/                      # Hydra configuration files
+│   ├── config.yaml              # Base: seed, device, paths, wandb
+│   ├── data/
+│   │   └── hbn.yaml             # cache_dir, releases, batch_size, num_workers
+│   ├── model/
+│   │   ├── eegnex.yaml          # n_chans, n_times, sfreq, n_outputs
+│   │   ├── jepa.yaml            # SignalJEPA configuration
+│   │   └── contrastive.yaml     # encoder config + projection_dim, temperature
+│   ├── training/
+│   │   ├── supervised.yaml      # lr, weight_decay, epochs, early_stopping
+│   │   ├── contrastive.yaml     # lr, temperature, epochs
+│   │   └── multitask.yaml       # loss_weights, lr, freeze_encoder_epochs
+│   └── experiment/              # Composed experiment configs
+│       ├── baseline_eegnex_c1.yaml
+│       ├── baseline_eegnex_c2.yaml
+│       ├── movie_pretrain.yaml
+│       └── multitask_finetune.yaml
+│
+├── scripts/
+│   ├── train.py                 # Main training entry (Hydra-decorated)
+│   ├── evaluate.py              # Run local_scoring on checkpoint
+│   └── package_submission.py    # Create submission.zip
+│
+├── startkit/                    # Original competition startkit (reference)
+├── data/full/ds005505-bdf/     # HBN BIDS data (gitignored)
+└── outputs/                     # Checkpoints, logs, wandb (gitignored)
 ```
 
-## Data Access & Preparation
+## Timeline & Milestones (10 Days)
 
-The examples follow the start kit convention of caching mini releases (100 Hz, 129 channels) with `EEGChallengeDataset`. Update the cache path to suit your environment and keep it configurable (e.g., via `DATA_DIR` or an env var).
+**Days 1-2: Foundation & Data Understanding**
+- Download all HBN releases (R1-R5) using `EEGChallengeDataset` API
+- Explore BIDS structure, participants.tsv, event annotations
+- Work through startkit code cell-by-cell in notebooks
+- Set up local scoring pipeline
 
-### Configuring the Data Cache
+**Days 3-4: Supervised Baselines**
+- Implement Challenge1Dataset (CCD windows + RT labels)
+- Implement Challenge2Dataset (multi-task windows + p_factor labels)
+- Train EEGNeX baselines for both challenges
+- Establish baseline NRMSE scores via local evaluation
+- Integrate wandb logging
 
-Set `EEG2025_DATA_DIR` to the directory where releases should be cached. If unset, Cerebro defaults to `<repo>/data`.
+**Days 5-7: Movie Contrastive Pretraining**
+- Implement MoviePairDataset (positive/negative pairs)
+- Train contrastive encoder with InfoNCE loss
+- Implement multitask fine-tuning (shared encoder, dual heads)
+- Evaluate: does it beat supervised baselines?
+
+**Days 8-9: Iteration & Architecture Exploration** (if movie approach works)
+- Hyperparameter tuning via wandb sweeps
+- Try SignalJEPA, spatial hierarchies, SlowFast (if time permits)
+- Experiment with different loss weights, temperatures
+
+**Day 10: Final Submission**
+- Select best checkpoint via local scoring
+- Package submission.zip following competition format
+- Test with `local_scoring.py --fast-dev-run`
+- Submit to competition platform
+
+## Setup
+
+Install dependencies using uv:
 
 ```bash
-export EEG2025_DATA_DIR=~/mne_data/eeg2025_competition
+cd cerebro
+uv sync
 ```
 
-The start kit scripts accept the same directory when run from this repository (they create it if missing).
-
-### Downloading Mini Releases
+Create `.env` file for paths:
 
 ```bash
-pip install -r startkit/requirements.txt
-uv run python scripts/download_all_releases.py  # caches all tasks + releases (mini + full)
+echo "DATA_DIR=/home/varun/repos/cerebro/data/full" > .env
+echo "WANDB_API_KEY=your_key_here" >> .env
 ```
 
-Use `--skip-full` or `--skip-mini` if you only need one variant, or `--releases` / `--tasks`
-to limit scope during quick smoke runs. Set `EEG2025_DATA_DIR` (or pass
-`--data-root`) before running; for a repo-local cache, point both to `data/`
-and add the environment variable to a `.env` file so `uv run` picks it up
-automatically. Add `--workers 4` (for example) to parallelise release/task
-downloads, set `--dataset-workers` to throttle per-dataset decompression
-(default `-1` uses all cores), and pass `--materialize-raw` to pre-fetch the
-actual BDF files so later training runs stay fully offline.
+## Data Download
 
-To switch JEPA pretraining to the full BIDS releases, set
-`training.dataset_variant = "full"` in `fm/config/pretrain_jepa.toml` (or provide
-`--dataset-variant full` on the CLI) after caching the full releases with the
-download helper.
+Use EEGChallengeDataset API (handles caching automatically):
 
-For faster start-up on the full dataset, pre-slice windows once:
+```python
+# In notebooks/00_download_all_data.py
+from eegdash import EEGChallengeDataset
+
+for release in ["R1", "R2", "R3", "R4", "R5"]:
+    dataset = EEGChallengeDataset(
+        release=release,
+        task="contrastChangeDetection",  # Or any task
+        cache_dir="data/full",
+        mini=False  # Download full dataset
+    )
+```
+
+## Running Experiments
+
+All experiments use Hydra for configuration management. Run from repository root:
+
+**Train supervised baseline:**
+```bash
+uv run python scripts/train.py experiment=baseline_eegnex_c1
+uv run python scripts/train.py experiment=baseline_eegnex_c2
+```
+
+**Train contrastive pretraining:**
+```bash
+uv run python scripts/train.py experiment=movie_pretrain
+```
+
+**Fine-tune multitask:**
+```bash
+uv run python scripts/train.py experiment=multitask_finetune \
+  training.pretrained_checkpoint=outputs/movie_pretrain/best.pt
+```
+
+**Override config values:**
+```bash
+uv run python scripts/train.py experiment=baseline_eegnex_c1 \
+  training.lr=0.0001 data.batch_size=256
+```
+
+## Local Evaluation
+
+Critical for rapid iteration before submitting:
 
 ```bash
-uv run python scripts/cache_windows.py --dataset-variant full --releases R1 R2 R3 R4 R6 R7 R8 R9 R10 R11 --tasks RestingState surroundSupp contrastChangeDetection
+# Evaluate checkpoint on R5 dataset (same as competition)
+uv run python scripts/evaluate.py \
+  checkpoint=outputs/baseline_eegnex_c1/best.pt
+
+# Fast dev run (single subject, quick validation)
+uv run python scripts/evaluate.py \
+  checkpoint=outputs/baseline_eegnex_c1/best.pt \
+  --fast-dev-run
 ```
 
-This writes tensors under `data/cached_windows/full/…`. Future JEPA runs reuse them automatically.
-
-All mini releases are mutually exclusive sets of 20 subjects. Use the following exclusion list before splitting by subject:
-
+Output:
 ```
-NDARWV769JM7, NDARME789TD2, NDARUA442ZVF, NDARJP304NK1,
-NDARTY128YLU, NDARDW550GU6, NDARLD243KRE, NDARUJ292JXV, NDARBA381JGH
+Challenge 1 NRMSE: 0.8234
+Challenge 2 NRMSE: 0.9112
+Overall Score: 0.8850
 ```
 
-### Challenge Windowing Rules
+## Creating Submission
 
-- **Challenge 1**: 2 s windows, sampled 0.5 s after the stimulus anchor; stride = 1 s; target = `rt_from_stimulus` (response time).
-- **Challenge 2**: 4 s windows with a 2 s stride, followed by random 2 s crops during training; target = subject-level `p_factor`.
-
-Both scripts rely on `EEGDash` metadata to inject annotations (`annotate_trials_with_target`, `add_aux_anchors`, `add_extras_columns`). Refer to `startkit/challenge_1.py` and `startkit/challenge_2.py` for end-to-end examples.
-
-## Baseline Workflows from the Start Kits
-
-| Challenge | Entry Point | Model | Loss | Notes |
-|-----------|-------------|-------|------|-------|
-| 1 | `startkit/challenge_1.py` | Braindecode `EEGNeX` | MSE | Subject-wise train/val/test split, early stopping on validation RMSE |
-| 2 | `startkit/challenge_2.py` | Braindecode `EEGNeX` | L1 | Random crops per window; trains for one epoch as illustration |
-
-The `startkit/submission.py` template shows how organisers expect weights and inference hooks to be packaged for final submission.
-
-## Local Experimentation
-
-### Benchmark Sweep (`notebooks/002_benchmark.py`)
-
-This script orchestrates Weights & Biases sweeps over the Braindecode model zoo using model-specific defaults. It mirrors the Challenge 1 baseline pipeline while logging additional metrics (per-epoch timing, parameter counts, artifact uploads).
+Package checkpoint for competition submission:
 
 ```bash
-uv run python notebooks/002_benchmark.py                 # run comparison sweep (default)
-uv run python notebooks/002_benchmark.py --show-configs  # list available sweep presets
-uv run python notebooks/002_benchmark.py --test --model EEGNetv4
+uv run python scripts/package_submission.py \
+  checkpoint=outputs/multitask_finetune/best.pt \
+  output=submission.zip
 ```
 
-Metrics logged per run include train/val/test loss, RMSE, MAE, learning rate, timing, and best-epoch checkpoints stored in `weights/`.
-
-### Pretraining Utilities
-
-Use `src/cerebro/pretraining.py:create_pretraining_dataloader` to sample random crops across passive tasks for self-supervised objectives. The helper now supports multi-view sampling (`views=2`) so the JEPA trainer receives paired crops. It expects releases cached via `scripts/download_all_releases.py`.
-
-Foundation code lives under `fm/`: datamodules for pretraining, JEPA (`SignalJEPA`) and masked-model encoders (`fm/models`), loss helpers (`fm/tasks`), and default configs (`fm/config/`). Validation splits are optional via `val_fraction` and JEPA runs now log both train and validation loss with Rich progress bars. Use `scripts/cache_windows.py` to cache fixed-length windows for full releases so training spins up immediately.
-
-Kick off multitask JEPA pretraining with:
-
+Test locally before submitting:
 ```bash
-uv run python scripts/train_pretrain_jepa.py --max-steps 200
+uv run python startkit/local_scoring.py \
+  --submission-zip submission.zip \
+  --data-dir data/full \
+  --output-dir outputs/test_submission \
+  --fast-dev-run
 ```
 
-The script reads `fm/config/pretrain_jepa.toml` (tasks, releases, optimiser, logging cadence) and writes resolved configs plus checkpoints to `weights/pretrain_jepa/`. Override any field via CLI flags (e.g., `--epochs`, `--releases R1 R2 R3`, `--device cpu`, `--val-fraction 0.1`, `--dataset-variant full`). Enable W&B logging in the config and pass `--materialize-raw` to the download helper first to avoid lazy fetches. To pre-slice windows ahead of time (reducing startup latency), run `uv run python scripts/cache_windows.py --dataset-variant full` and the trainer will reuse the saved tensors automatically.
+## Key Dependencies
 
-Masked autoencoder pretraining (time/channel masking) is available via:
+Core libraries (managed via `pyproject.toml`):
 
-```bash
-uv run python scripts/train_masked_model.py --max-steps 200
-```
+- **eegdash** (0.3.8+): Competition-specific HBN data loader with `EEGChallengeDataset`
+- **braindecode** (1.2.0+): EEG models (EEGNeX, SignalJEPA) and preprocessing
+- **MNE-Python**: Signal processing, BIDS support, Raw data handling
+- **PyTorch** (2.2.2+): Deep learning framework, automatic differentiation
+- **Hydra**: Hierarchical configuration composition and command-line overrides
+- **wandb**: Experiment tracking, hyperparameter sweeps, model checkpointing
+- **jupytext**: Notebook-as-code (.py format with # %% cells)
 
-Defaults live in `fm/config/masked_autoencoder.toml`. The loader returns masked windows alongside the originals; the loss is only computed on masked positions. Tweak `time_mask_fraction`, `channel_mask_fraction`, and `dataset_variant` in the config or via CLI.
+Install all with: `uv sync`
 
-For quick linear probes using the frozen encoder, run:
+## Configuration Management with Hydra
 
-```bash
-uv run python scripts/evaluate_jepa_linear.py --checkpoint weights/pretrain_jepa/checkpoint_epoch_005.pt --release R5
-```
+Hydra enables clean experiment management through composition:
 
-This trains a ridge regression head on CCD windows split subject-wise (as in the start kit) and reports RMSE/MAE on validation and test splits.
+**Base configs** (`configs/config.yaml`, `data/hbn.yaml`, `model/eegnex.yaml`):
+- Define reusable building blocks
+- Version-controlled defaults
+- Override via command line
 
-See `docs/task_metadata/` for per-task annotation timelines and `docs/pretraining_tasks/` for detailed objective diagrams.
+**Experiment configs** (`configs/experiment/`):
+- Compose base configs
+- Specify complete experimental setups
+- Example: `baseline_eegnex_c1.yaml` combines data/hbn + model/eegnex + training/supervised
 
-Key protocol cues discovered so far: `surroundSupp` annotations expose stimulus conditions and contrast levels for flicker-aligned contrastive learning; `contrastChangeDetection` includes trial targets, button presses, and feedback (smiley/sad) for readiness and ErrP-style objectives; movie runs only expose start/stop markers so align positives by absolute time since `video_start`.
+**Benefits**:
+- No code changes to try new architectures/hyperparameters
+- Auto-generated output directories with timestamps
+- Config saved with each checkpoint for reproducibility
+- Easy sweeps: `hydra --multirun training.lr=0.001,0.0001,0.00001`
 
-### Data Exploration (`notebooks/001_eda.py`, `notebooks/003_dataset_dataloader.py`)
+## Design Principles (10-Day Constraints)
 
-- `001_eda.py` reproduces the start kit Challenge 1 workflow with additional visualisation hooks.
-- `003_dataset_dataloader.py` inspects the structure of full CCD releases (R1–R11) and documents open questions about pooling across tasks.
+**Priority 1: Working submission**
+- Supervised baselines first (safety net)
+- Test local scoring early and often
+- Checkpoint after every milestone
 
-These notebooks currently target Challenge 1; extending them to load p-factor labels will be the first step toward richer Challenge 2 experiments.
+**Priority 2: Fast iteration**
+- src/ modules but no packaging overhead
+- Aggressive caching of preprocessed data
+- Start with mini=True, scale to full dataset once working
 
-## Development Workflow
+**Priority 3: Reproducibility**
+- Git commit after each working state
+- wandb logs everything (loss, NRMSE, hyperparameters)
+- Hydra saves full config with checkpoints
 
-1. **Environment setup**
-   - `uv pip install -e .` to install Cerebro utilities in editable mode.
-   - `uv pip install -r startkit/requirements.txt` for the official dependencies.
-   - Use `uv run python <script>` when executing notebooks or scripts to ensure a consistent environment (see `CLAUDE.md`).
-2. **Formatting & linting**
-   - `make format` or `black --check . && isort --check .` before committing.
-3. **Testing**
-   - `pytest -q tests/` (add tests alongside new utilities under `src/cerebro/`).
+**Non-priorities** (unless time permits):
+- Extensive unit tests (focus on integration tests)
+- Distributed training (single GPU sufficient)
+- Complex preprocessing (use braindecode/eegdash defaults)
+- Custom architectures (use braindecode models first)
 
-## Challenge Metrics & Evaluation
+**Code style**:
+- Type hints for public functions
+- Docstrings for non-obvious logic
+- Notebooks for exploration, src/ for reusable code
+- Configuration as documentation
 
-- **Challenge 1**: MAE (40 %), R² (20 %), AUC-ROC (30 %), Balanced Accuracy (10 %). Baseline pipelines use MAE/RMSE for monitoring; add classification heads if you extend to success-rate prediction.
-- **Challenge 2**: Concordance Correlation Coefficient (50 %), RMSE (30 %), Spearman correlation (20 %). The start kit example focuses on p-factor only; extend it to additional CBCL scores as needed.
+## References
 
-When reporting results, keep Release 5 as a validation/test hold-out and avoid data leakage across subjects.
+**Dataset**:
+- HBN-EEG Dataset: Shirazi et al., bioRxiv 2024. DOI: 10.1101/2024.10.03.615261
+- Healthy Brain Network: Alexander et al., Scientific Data 2017. DOI: 10.1038/sdata.2017.181
 
-## Roadmap
+**Competition**:
+- EEG Foundation Challenge, NeurIPS 2025: https://eeg2025.github.io
 
-`gpt_roadmap.md` outlines the next phase: move from the provided baselines toward a foundation model that pre-trains on passive tasks, then fine-tunes for Challenge 1. Review and update that file as plans evolve; once a solid Challenge 1 pipeline is in place, expand to Challenge 2 and optional reinforcement-learning enhancements.
+**Architecture foundations**:
+- EEGNeX: Chen et al., 2024
+- SignalJEPA: (Foundation model for EEG from braindecode)
+- Mamba: Gu & Dao, 2024. State-space models for sequence modeling
+- SlowFast: Feichtenhofer et al., ICCV 2019. Multi-scale temporal modeling
 
-## Additional Resources
+**Self-supervised learning**:
+- SimCLR: Chen et al., ICML 2020. Contrastive learning framework
+- InfoNCE: Oord et al., 2018. Noise-contrastive estimation
+- JEPA: LeCun, 2022. Joint-embedding predictive architectures
 
-- [EEG Foundation Challenge website](https://eeg2025.github.io)
-- [EEGDash documentation](https://eeglab.org/EEGDash/overview.html)
-- [Braindecode model catalogue](https://braindecode.org/stable/models/models_table.html)
-- [Dataset download guide](https://eeg2025.github.io/data/#downloading-the-data)
-
-For submission packaging requirements, consult `startkit/submission.py` and follow the organisers’ instructions for checkpoint naming and zipped deliverables.
+**Tools**:
+- braindecode: Schirrmeister et al., 2017. Deep learning for EEG
+- MNE-Python: Gramfort et al., 2013. MEG/EEG analysis in Python
+- eegdash: HBN competition data loader
+- Hydra: Facebook Research. Configuration management

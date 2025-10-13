@@ -4,111 +4,569 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This repository contains code for the EEG2025 NeurIPS Challenge: "From Cross-Task to Cross-Subject EEG Decoding". The project focuses on developing EEG decoders that can transfer knowledge across cognitive tasks and generalize across subjects using the HBN-EEG dataset (3000+ participants, 6 cognitive tasks).
+Competition submission for NeurIPS 2025 EEG Foundation Challenge with a 10-day development timeline. Two regression tasks: Challenge 1 (30% weight) predicts response time from Contrast Change Detection task EEG; Challenge 2 (70% weight) predicts p_factor (externalizing psychopathology) from multi-task EEG. Overall score: 0.3 × NRMSE_C1 + 0.7 × NRMSE_C2.
 
-## Common Commands
+**Phased approach**: Days 1-4 supervised baselines (safety net) → Days 5-7 movie contrastive pretraining + multitask finetuning → Days 8-9 architecture iteration (only if contrastive beats baseline) → Day 10 submission.
 
-### Running Python Scripts
-```bash
-# Always use uv to run Python scripts
-uv run python script_name.py
+## Memory-First Workflow
 
-# Download mini datasets (already completed - 34.71 GB in eeg_mini_datasets/)
-uv run python download_mini_parallel.py
+**CRITICAL**: Always consult the memory graph before investigating anything. Memory persists across sessions and accumulates project knowledge over time.
 
-# Analyze subject distribution across datasets
-uv run python analyze_subject_distribution.py
+### Workflow
 
-# Analyze task completion per subject
-uv run python analyze_tasks_per_subject.py
+```
+┌─────────────────────┐
+│  Question/Task      │
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│  Search Memory      │  ← mcp__memory__search_nodes
+└──────────┬──────────┘
+           │
+     ┌─────┴─────┐
+     │           │
+  Found?      Not Found?
+     │           │
+     ▼           ▼
+ Use Info    Investigate
+     │        (Read/Grep/
+     │         Notebooks)
+     │           │
+     └─────┬─────┘
+           │
+           ▼
+┌─────────────────────┐
+│  Capture Findings   │  ← create_entities, add_observations, create_relations
+└─────────────────────┘
 ```
 
-### Data Access
-```bash
-# List mini dataset contents
-ls eeg_mini_datasets/R*_mini_L100/
+### When to Consult Memory
 
-# Check AWS S3 bucket contents (public, no credentials needed)
-aws s3 ls s3://nmdatasets/NeurIPS25/ --no-sign-request
+**Always start by searching memory for**:
+- "How does [component] work?"
+- "Where is [function/class] defined?"
+- "What are the differences between Challenge 1 and Challenge 2?"
+- "What optimizer/loss/scheduler does [experiment] use?"
+- "Why was [decision] made?"
+- "What are the known issues with [component]?"
 
-# Count .set files in a dataset
-find eeg_mini_datasets/R1_mini_L100 -name "*.set" | wc -l
+**Examples**:
+```python
+# Question: "How does Challenge 1 windowing work?"
+search_nodes(query="Challenge 1 windowing pipeline stimulus")
+
+# Question: "What optimizer does movie_pretrain use?"
+search_nodes(query="movie_pretrain optimizer AdamW")
+
+# Question: "Where is NRMSE calculated?"
+search_nodes(query="NRMSE metric calculation local_scoring")
+
+# Question: "What are the movie tasks?"
+search_nodes(query="movie tasks DespicableMe")
 ```
 
-## Architecture Overview
+### Investigation Flow
 
-### Data Pipeline
-1. **Data Download**: Scripts fetch EEG data from AWS S3 (`s3://nmdatasets/NeurIPS25/`)
-2. **Data Analysis**: Scripts analyze subject distribution and task completion
-3. **Model Development**: (To be implemented) Using braindecode/EEGDash for EEG processing
+1. **Search memory first**: Use `search_nodes` with relevant keywords
+2. **If found**: Use the information, cross-reference with code if needed
+3. **If not found**: Investigate using Read/Grep/Glob/notebooks
+4. **Capture findings**: ALWAYS update memory with what you learned
 
-### Directory Structure
-- `eeg_mini_datasets/`: Downloaded mini datasets (R1-R11, 100Hz, ~3-4GB each)
-- `eeg2025.github.io/`: Challenge website documentation (git submodule)
-- `downsample-datasets/`: MATLAB/Python scripts for downsampling to 100Hz (git submodule)
-- `*.csv`: Analysis outputs (subject distributions, task completions)
-- `*.json`: Metadata and analysis results
+### What to Capture
 
-### Key Data Formats
-- **EEG Data**: EEGLAB .set files (without .fdt for mini datasets)
-- **Events**: .tsv files with onset, duration, value, event_code, feedback columns
-- **Metadata**: .json files with task descriptions and EEG parameters
-- **Participants**: .tsv with demographics and psychopathology scores
+**Always capture**:
+- **Bug root causes + fixes**: "Bug in DatasetWrapper when recordings <4s: filters out after windowing instead of before"
+- **Design decisions**: "Use AdamW over Adamax for supervised training because of better weight decay handling"
+- **Implementation details**: "Challenge 1 uses stimulus-locked windows via create_windows_from_events with offset=0.5s"
+- **Configuration meanings**: "freeze_encoder_epochs=5 means encoder weights frozen for first 5 epochs, then fine-tuned end-to-end"
+- **Gotchas**: "DatasetWrapper random crop needs seed parameter for reproducibility across workers"
+- **Relationships**: "movie_pretrain uses InfoNCE loss" / "MultitaskModel requires pretrained_checkpoint parameter"
+- **Timeline insights**: "Days 5-7 conditional on movie contrastive beating baseline"
 
-## Challenge Requirements
+**Don't capture**:
+- Vague descriptions: "model uses some optimizer" (too vague)
+- Obvious facts: "Python uses indentation" (not project-specific)
+- Temporary notes: "TODO: check this later" (not persistent knowledge)
 
-### Challenge 1: Cross-Task Transfer Learning (40% final score)
-- **Input**: 2-second pre-trial EEG epochs from Contrast Change Detection (CCD) + full Surround Suppression (SuS) data
-- **Targets**: Response time (regression) + Success rate (classification)
-- **Metrics**: MAE (40%), R² (20%), AUC-ROC (30%), Balanced Accuracy (10%)
+### Entity Types
 
-### Challenge 2: Psychopathology Prediction (60% final score)
-- **Input**: All available EEG tasks (minimum 15 minutes per subject)
-- **Targets**: 4 continuous scores (p-factor, internalizing, externalizing, attention)
-- **Metrics**: CCC (50%), RMSE (30%), Spearman correlation (20%)
+Use these `entityType` values for consistency:
 
-### Constraints
-- Models must run on single GPU with 20GB memory at inference
-- Data downsampled to 100Hz, filtered 0.5-50Hz for evaluation
-- Code submission competition (not results submission)
+- **project** - Overall codebase (cerebro)
+- **competition** - External challenges (NeurIPS 2025 EEG Foundation Challenge)
+- **task** - Challenge tasks (Challenge 1, Challenge 2)
+- **model** - Neural architectures (EEGNeX, SignalJEPA, MultitaskModel)
+- **architecture** - Design patterns (SlowFast, Mamba)
+- **function** - Specific functions (annotate_trials_with_target, create_windows_from_events)
+- **class** - Python classes (DatasetWrapper, Submission)
+- **experiment** - Configured experiments (baseline_eegnex_c1, movie_pretrain, multitask_finetune)
+- **training_strategy** - Training approaches (Movie Contrastive Pretraining, supervised learning)
+- **dataset** - Data sources (HBN-EEG Dataset)
+- **eeg_task** - Recording paradigms (contrastChangeDetection, Movie Tasks)
+- **api** - External interfaces (EEGChallengeDataset)
+- **library** - External dependencies (braindecode, eegdash, PyTorch, MNE-Python)
+- **tool** - Development tools (uv, wandb, Hydra)
+- **loss_function** - Loss functions (InfoNCE, MSE, MAE)
+- **metric** - Evaluation metrics (NRMSE)
+- **optimizer** - Optimizers (AdamW, Adamax)
+- **scheduler** - LR schedulers (CosineAnnealingLR, CosineAnnealingWarmRestarts)
+- **code_module** - Source directories (src/data, src/models, src/training, src/evaluation, notebooks, configs)
+- **configuration** - Config files (configs/*)
+- **reference_code** - Starter code (startkit)
+- **script** - Executable scripts (local_scoring, train.py)
+- **directory** - File system directories (weights directory)
+- **timeline_phase** - Development phases (Days 1-4, Days 5-7, Days 8-9, Day 10)
+- **person** - Project contributors (Varun)
+- **framework** - Conceptual frameworks (SimCLR, JEPA)
+- **infrastructure** - System components (Hydra Configuration System)
+
+### Relation Types
+
+Use these `relationType` values for clarity:
+
+- **uses** / **uses_tool** / **uses_model** / **uses_optimizer** / **uses_scheduler** / **uses_loss** / **uses_dataset**
+- **implements** / **implemented_in**
+- **depends_on** / **required_for**
+- **part_of** / **part_of_phase** / **phase_of**
+- **from_library** / **provides**
+- **targets** / **solves** / **evaluates**
+- **loads** / **loaded_by**
+- **adapts_from** / **replicates**
+- **prototypes_for**
+- **configures** / **manages**
+- **submits_to** / **provided_by**
+- **developed_by**
+- **alternative_to**
+- **pretrains**
+- **follows**
+- **inspired** / **based_on**
+- **should_be_adapted_to**
+- **wraps_output_of**
+- **loss_function_for**
+- **calculates**
+- **framework_for**
+- **baseline_for**
+- **explored_in_phase**
+
+### Memory Operations (MCP Tools)
+
+```python
+# Search for existing knowledge
+mcp__memory__search_nodes(query="relevant keywords")
+mcp__memory__open_nodes(names=["entity_name"])
+
+# Create new knowledge
+mcp__memory__create_entities(entities=[{
+    "name": "Entity Name",
+    "entityType": "appropriate_type",
+    "observations": [
+        "Specific observation 1 with details",
+        "Specific observation 2 with measurements/parameters",
+        "Gotcha: Known issue and workaround"
+    ]
+}])
+
+# Add to existing knowledge
+mcp__memory__add_observations(observations=[{
+    "entityName": "Existing Entity",
+    "contents": [
+        "New insight discovered during debugging",
+        "Configuration change: what + why"
+    ]
+}])
+
+# Connect knowledge
+mcp__memory__create_relations(relations=[{
+    "from": "Source Entity",
+    "to": "Target Entity",
+    "relationType": "appropriate_relation"
+}])
+```
+
+### Mandatory Capture Scenarios
+
+**ALWAYS update memory after**:
+
+1. **Resolving bugs**: Capture root cause, symptoms, and fix as observations
+2. **Making design decisions**: Capture what was chosen, why, and alternatives considered
+3. **Discovering gotchas**: Capture the issue and workaround
+4. **Implementing features**: Capture relationships between new and existing components
+5. **Changing configs**: Capture what changed, why, and expected impact
+6. **Learning from startkit**: Capture pipeline differences, parameter meanings, function purposes
+7. **Debugging failed experiments**: Capture what failed, why, and resolution
+
+### Why This Matters (10-Day Timeline)
+
+- **No repeated work**: Past investigations immediately accessible
+- **Faster debugging**: Known issues and fixes in memory
+- **Design consistency**: Previous decisions inform current choices
+- **Session continuity**: Pick up exactly where you left off
+- **Living documentation**: Memory graph becomes paper/future work foundation
+
+**Memory is not optional—it's a productivity multiplier for time-constrained work.**
+
+## Documentation Lookup with Context7
+
+When memory doesn't have the answer and you need library documentation, use **Context7 MCP tools** before diving into source code.
+
+### When to Use Context7
+
+**Use after checking memory for**:
+- API documentation (function signatures, parameters, return types)
+- Usage examples and best practices
+- Configuration options for models/optimizers/schedulers
+- Understanding library-specific concepts
+
+**Priority**: Memory (fastest) → Context7 Docs (authoritative) → Source Code (detailed but slow)
+
+### Libraries in This Project
+
+**Core dependencies with Context7 support**:
+- **braindecode** - EEG models (EEGNeX, SignalJEPA), preprocessing utilities
+- **PyTorch** - torch.optim (AdamW, Adamax), torch.nn (losses, layers), DataLoader
+- **MNE-Python** - Raw data handling, BIDS format, preprocessing pipelines
+
+### Two-Step Workflow
+
+```python
+# Step 1: Resolve library name to Context7 ID
+mcp__context7__resolve_library_id(libraryName="package_name")
+# Returns: {library_id: "/org/project", ...}
+
+# Step 2: Get focused documentation
+mcp__context7__get_library_docs(
+    context7CompatibleLibraryID="/org/project",
+    topic="specific topic or function",  # Narrows results
+    tokens=3000  # Amount of context (default: 5000)
+)
+```
+
+### Examples
+
+**Example 1: Understanding EEGNeX parameters**
+```python
+# Question: "What parameters does EEGNeX.forward() expect?"
+mcp__context7__resolve_library_id(libraryName="braindecode")
+# → {library_id: "/braindecode/braindecode"}
+
+mcp__context7__get_library_docs(
+    context7CompatibleLibraryID="/braindecode/braindecode",
+    topic="EEGNeX model initialization parameters",
+    tokens=3000
+)
+
+# After reading docs, capture in memory:
+mcp__memory__add_observations(observations=[{
+    "entityName": "EEGNeX",
+    "contents": [
+        "Input shape: (batch_size, n_chans, n_times) - e.g. (128, 129, 200)",
+        "n_chans parameter: number of EEG channels (129 for HBN)",
+        "n_times parameter: window length in samples (200 = 2s at 100Hz)",
+        "sfreq parameter: sampling frequency for temporal convolutions (100 Hz)",
+        "n_outputs parameter: 1 for regression (RT or p_factor prediction)",
+        "Returns: (batch_size, n_outputs) tensor"
+    ]
+}])
+```
+
+**Example 2: Configuring AdamW optimizer**
+```python
+# Question: "How does weight_decay work in AdamW vs Adam?"
+mcp__context7__resolve_library_id(libraryName="torch")
+
+mcp__context7__get_library_docs(
+    context7CompatibleLibraryID="/pytorch/pytorch",
+    topic="AdamW optimizer weight decay decoupled",
+    tokens=2000
+)
+
+# Capture insight:
+mcp__memory__add_observations(observations=[{
+    "entityName": "AdamW",
+    "contents": [
+        "Decoupled weight decay: applied directly to weights, not gradients (unlike Adam)",
+        "Better for fine-tuning: weight_decay=0.01 typical for transfer learning",
+        "Supervised training uses weight_decay=0.00001, contrastive uses 0.0001"
+    ]
+}])
+```
+
+**Example 3: Loading BIDS data with MNE**
+```python
+# Question: "How to read BIDS EEG data with MNE?"
+mcp__context7__resolve_library_id(libraryName="mne")
+
+mcp__context7__get_library_docs(
+    context7CompatibleLibraryID="/mne-tools/mne-python",
+    topic="read_raw_bids BIDS dataset",
+    tokens=2500
+)
+```
+
+### Parameters
+
+- **topic** (optional): Focus documentation on specific area
+  - More specific = more relevant results
+  - Examples: "EEGNeX forward pass", "AdamW weight decay", "BIDS read_raw"
+
+- **tokens** (optional, default: 5000): Amount of documentation to retrieve
+  - More tokens = more context but slower
+  - Typical range: 2000-5000 for focused queries
+
+### After Getting Documentation
+
+**ALWAYS capture relevant findings in memory**:
+
+```python
+# Pattern: Create entities for new concepts
+mcp__memory__create_entities(entities=[{
+    "name": "discovered_concept",
+    "entityType": "appropriate_type",
+    "observations": ["Key insight from docs"]
+}])
+
+# Pattern: Add to existing entities
+mcp__memory__add_observations(observations=[{
+    "entityName": "existing_entity",
+    "contents": [
+        "Parameter meaning from docs",
+        "Gotcha discovered: specific edge case behavior"
+    ]
+}])
+```
+
+### Tips
+
+- **Start specific**: Use focused topics instead of broad queries
+- **Verify with code**: Cross-reference documentation with actual usage in codebase
+- **Adjust tokens**: Start with 3000, increase if incomplete, decrease if too verbose
+- **Don't repeat**: Once captured in memory, never look up again
+- **Prefer Context7 over web search**: More structured, contains code examples
+
+### Integration with Memory Workflow
+
+```
+Question
+    ↓
+Search Memory (mcp__memory__search_nodes)
+    ↓ not found?
+Context7 Docs (mcp__context7__*)
+    ↓ still unclear?
+Read Source Code (Read/Grep/Glob)
+    ↓ always
+Capture in Memory (mcp__memory__add_observations)
+```
+
+**The goal**: Build memory graph so comprehensive that Context7 lookups become rare.
+
+## Running Code
+
+This is NOT an installable package. Always use `uv run` to execute Python code:
+
+```bash
+# Training (uses Hydra config composition)
+uv run python scripts/train.py experiment=baseline_eegnex_c1
+uv run python scripts/train.py experiment=movie_pretrain
+uv run python scripts/train.py experiment=multitask_finetune training.pretrained_checkpoint=outputs/.../best.pt
+
+# Override config values
+uv run python scripts/train.py experiment=baseline_eegnex_c1 training.lr=0.0001 data.batch_size=256
+
+# Local evaluation (critical for iteration)
+uv run python scripts/evaluate.py checkpoint=outputs/.../best.pt
+uv run python scripts/evaluate.py checkpoint=outputs/.../best.pt --fast-dev-run
+
+# Package submission
+uv run python scripts/package_submission.py checkpoint=outputs/.../best.pt output=submission.zip
+
+# Test submission locally before uploading
+uv run python startkit/local_scoring.py --submission-zip submission.zip --data-dir data/full --output-dir outputs/test --fast-dev-run
+```
+
+## Critical Data Pipeline Differences
+
+### Challenge 1 (Response Time Prediction)
+**Input**: Contrast Change Detection task only
+**Windowing**: Stimulus-locked windows [stim + 0.5s, stim + 2.5s] → (129, 200)
+**Label**: `rt_from_stimulus` from `annotate_trials_with_target` (per-trial)
+**Loss**: MSE
+**Key functions**: `annotate_trials_with_target`, `add_aux_anchors`, `create_windows_from_events`, `add_extras_columns`
+
+### Challenge 2 (P-Factor Prediction)
+**Input**: Any task (CCD, RestingState, movies, surroundSupp, etc.)
+**Windowing**: Fixed 4s windows, 2s stride → random 2s crops via `DatasetWrapper` → (129, 200)
+**Label**: `externalizing` field from participants.tsv (per-subject, constant across windows)
+**Loss**: MAE/L1
+**Key difference**: DatasetWrapper provides data augmentation through random cropping
+
+### Movie Contrastive Pretraining
+**Input**: 4 movie tasks (DespicableMe, ThePresent, DiaryOfAWimpyKid, FunwithFractals)
+- **Note**: All 4 movies available in ALL releases including R5 (verified empirically)
+**Windowing**: 2s sliding windows (configurable stride: 1s for overlap or 2s for non-overlapping)
+**Positive pairs**: (subject_i[movie_A, t], subject_j[movie_A, t]) - exact same movie and timestamp, different subjects
+**Negative pairs**: Different movies (any subjects/timestamps)
+**Loss**: InfoNCE with temperature scaling
+**Alignment strategy**: Perfect temporal alignment (no time binning) to preserve inter-subject correlation (ISC) precision
+
+## Architecture Patterns
+
+### Config Composition (Hydra)
+Configs are composed from base modules:
+- `configs/config.yaml`: Global settings (seed, device, paths, wandb)
+- `configs/data/hbn.yaml`: Dataset parameters, windowing specs, excluded subjects
+- `configs/model/*.yaml`: Model architectures (eegnex, jepa, contrastive)
+- `configs/training/*.yaml`: Training loops (supervised, contrastive, multitask)
+- `configs/experiment/*.yaml`: Complete experiments composing above configs
+
+Experiment configs use `defaults` to inherit and `@package _global_` to override at root level.
+
+### Module Organization
+**src/data/**: Dataset classes replicating startkit pipelines exactly
+- `challenge1.py`: Implements annotate→filter→window→label pipeline
+- `challenge2.py`: Implements filter→window→wrap pipeline with DatasetWrapper
+- `movies.py`: Implements positive/negative pair creation for contrastive learning
+
+**src/models/**: Model wrappers around braindecode implementations
+- `encoders.py`: Wraps braindecode.models (EEGNeX, SignalJEPA)
+- `projector.py`: MLP projection head for contrastive learning
+- `heads.py`: Regression heads for C1/C2
+- `multitask.py`: Shared encoder + dual heads architecture
+
+**src/training/**: Training loops with different objectives
+- `supervised.py`: Single-task MSE/MAE training
+- `contrastive.py`: InfoNCE loss with pair sampling
+- `multitask.py`: Joint C1+C2 optimization with frozen encoder phase
+
+**src/evaluation/**: Local scoring before submission
+- `local_scoring.py`: Adapted from startkit, runs full evaluation pipeline
+- `submission_wrapper.py`: Converts checkpoint to Submission class format expected by competition
+
+## Startkit Integration
+
+The `startkit/` directory contains reference implementations that MUST be replicated exactly:
+- `challenge_1.py`: Shows exact preprocessing for Challenge 1 (lines 144-193: annotate→windows→labels)
+- `challenge_2.py`: Shows exact preprocessing for Challenge 2 (lines 231-259: filter→windows→wrap)
+- `local_scoring.py`: Defines evaluation protocol (lines 76-114: NRMSE calculation, 107-115: overall score)
+- `submission.py`: Shows required Submission class interface with `get_model_challenge_1()` and `get_model_challenge_2()`
+
+**Critical**: Submission must be single-level zip (NO folder) containing submission.py + weights files.
 
 ## Data Specifications
 
-### EEG Recording
-- 128-channel Magstim EGI system
-- Reference: Cz electrode
-- Sampling: 100Hz (downsampled from 500Hz)
-- Filtering: 0.5-50Hz bandpass
+**HBN-EEG Dataset**:
+- **11 releases total**: ds005505-bdf (R1) through ds005516-bdf (R11)
+  - R1: ds005505-bdf
+  - R2: ds005506-bdf
+  - R3: ds005507-bdf
+  - R4: ds005508-bdf
+  - **R5: ds005509-bdf (COMPETITION VALIDATION SET - NEVER TRAIN ON THIS)**
+  - R6: ds005510-bdf
+  - R7: ds005511-bdf
+  - R8: ds005512-bdf
+  - R9: ds005514-bdf (note: ds005513 does not exist)
+  - R10: ds005515-bdf
+  - R11: ds005516-bdf
+- **Training data**: R1-R4, R6-R11 (10 releases)
+- **Competition validation data**: R5 only (held out, provides leaderboard feedback)
+- 129 channels (including reference Cz), 100 Hz sampling
+- 9 excluded subjects (listed in configs/data/hbn.yaml under challenge1.excluded_subjects)
 
-### Tasks
-**Passive**: Resting State, Surround Suppression, Movie Watching (4 films)
-**Active**: Contrast Change Detection (3 runs), Sequence Learning (6/8 target), Symbol Search
+**Download**: Use `EEGChallengeDataset` from eegdash library (handles caching automatically)
 
-### Available Features
-- Demographics: age, sex, handedness (EHQ score -100 to +100)
-- Psychopathology: p_factor, attention, internalizing, externalizing (from CBCL)
-- Task availability: Boolean flags for each task/run
+**participants.tsv**: Contains p_factor, age, sex, task availability flags. Note: some subjects have `n/a` for all factor scores.
 
-## Key Scripts Purpose
+**Important**: The startkit uses `mini=True` with `release="R5"` for quick demos/tutorials only. For actual training, use `mini=False` (or omit mini parameter) with `release` in ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"].
 
-- `find_complete_subjects.py`: Identifies subjects present across multiple datasets (found: none overlap)
-- `analyze_subject_distribution.py`: Creates distribution matrix of subjects across datasets
-- `analyze_tasks_per_subject.py`: Analyzes task completion rates per subject
-- `download_mini_parallel.py`: Parallel download of mini datasets from S3 (5 workers, ~280 Mbps)
-- `download_eeg_data.py`: Downloads specific subjects using EEGDash API
+## Competition Data Strategy
 
-## Important Libraries
+### Prototyping Phase (Days 1-9)
 
-- **braindecode**: Deep learning for EEG data (main framework)
-- **EEGDash**: EEG data loading and API access
-- **MNE-Python**: EEG/MEG analysis (via braindecode)
-- **MOABB**: Mother of All BCI Benchmarks (benchmarking tools)
+**Goal**: Architecture selection, hyperparameter tuning, feature engineering
 
-## Dataset Facts
+**Data splits**:
+- **Train**: Subset of {R1-R4, R6-R11} split at **subject level** (e.g., 80% of subjects)
+- **Val**: Held-out subjects from {R1-R4, R6-R11} (e.g., 20% of subjects)
+- **Test**: R5 (treated as external test, checked sparingly)
 
-- 11 mini datasets (R1-R11) with 20 subjects each
-- No subjects appear in multiple datasets (completely disjoint)
-- Each subject has 220-240 .set files across all tasks
-- Total downloaded: 34.71 GB for all mini datasets
-- Participants.tsv contains target labels for both challenges
-- Before web search consult @knowledge_base.md, only searching the web if not already documented and document findings in that case. Also document whatever we learn experimentally along the way.
+**Workflow**:
+1. Split training releases at subject level to prevent data leakage
+2. Use local validation for rapid iteration and hyperparameter tuning
+3. Minimize R5 checks to avoid overfitting to leaderboard signal
+4. Treat R5 as external "test" for architecture/hyperparameter selection
+
+**Why subject-level splits?**
+- Same subject may have multiple recordings across different tasks
+- Window-level or recording-level splits risk data leakage
+- Model could memorize subject-specific EEG patterns rather than task patterns
+
+### Final Runs Phase (Day 10)
+
+**Goal**: Maximum performance for competition leaderboard
+
+**Data splits**:
+- **Train**: ALL subjects from {R1-R4, R6-R11} (no validation split)
+- **Val/Test**: R5 (final submission to competition)
+
+**Workflow**:
+1. Architecture and hyperparameters are locked (no more tuning)
+2. Train on 100% of available training data to maximize model capacity
+3. Submit final predictions on R5 for leaderboard evaluation
+4. No local validation (all data used for training)
+
+**Why this approach?**
+- Standard competition pattern (Kaggle, NeurIPS, etc.)
+- Maximizes training data when decisions are finalized
+- Prevents leaderboard overfitting during development
+- Local validation eliminates need for frequent R5 checks
+
+**Critical**: R5 is a competition validation set that provides leaderboard feedback, NOT a traditional test set. Never train on R5 under any circumstances.
+
+## Development Workflow
+
+1. **Start with mini=True**: Fast prototyping on small dataset
+2. **Test local scoring early**: `uv run python scripts/evaluate.py --fast-dev-run` after every change
+3. **Use notebooks for exploration**: Jupytext .py format (# %%) in notebooks/
+4. **Hydra outputs**: Auto-generates timestamped directories in outputs/
+5. **Wandb integration**: All experiments logged (set WANDB_API_KEY in .env)
+6. **Git commits**: After each working milestone
+
+## Priority Guidelines (10-Day Timeline)
+
+**Must have**:
+- Working supervised baselines (C1 + C2)
+- Local scoring integration
+- Submission packaging
+
+**Should have**:
+- Movie contrastive pretraining
+- Multitask fine-tuning
+- Wandb tracking
+
+**Nice to have** (only if time permits):
+- SignalJEPA baseline
+- Spatial/temporal hierarchies
+- Hyperparameter sweeps
+- MOABB data integration
+
+## Key Design Decisions
+
+1. **No packaging overhead**: Run with `uv run` for fast iteration without installation
+2. **Config-driven experiments**: Change hyperparameters via Hydra, not code
+3. **Aggressive caching**: EEGChallengeDataset caches downloads, preprocessed data should be cached
+4. **Baselines first**: Supervised training is safety net before trying contrastive learning
+5. **Local scoring critical**: Test with `uv run python startkit/local_scoring.py` before submitting to competition
+
+## User Preferences (from ~/.claude/CLAUDE.md)
+
+- Prefer editing existing files over creating new ones
+- Use `uv run python ...` instead of `python ...`
+- Prefer github MCP to git commands (but avoid in this workflow due to speed)
+- Never add or remove packages
+- Always use `uv run ...`
+- Functional style over classes
+- Implement prototypes as notebooks (.py with #%% for VSCode)
+- Ask when faced with design choices (user has PhD)
+- Verify assumptions before internalizing
+- Don't pollute repo with throwaway code
+- Questions are just questions - don't infer intent to act

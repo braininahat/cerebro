@@ -1,0 +1,36 @@
+# Base configuration for EEG Foundation Challenge
+# Use with: python scripts/train.py experiment=baseline_eegnex_c1
+
+defaults:
+  - data: hbn
+  - model: eegnex
+  - training: supervised
+  - _self_
+
+# Global settings
+seed: 42
+device: cuda
+
+# Paths
+data_dir: ${oc.env:DATA_DIR,data/full}
+output_dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# Weights & Biases
+wandb:
+  project: eeg-foundation-challenge
+  entity: null  # Set to your wandb username/team
+  mode: online  # online, offline, or disabled
+  tags: []
+  notes: ""
+
+# Reproducibility
+deterministic: true
+benchmark: false  # Set to true for performance, false for reproducibility
+
+# Hydra settings
+hydra:
+  run:
+    dir: ${output_dir}
+  sweep:
+    dir: outputs/sweeps/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
