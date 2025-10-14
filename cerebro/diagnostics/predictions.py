@@ -102,7 +102,9 @@ def compute_baseline_scores(predictions: np.ndarray, targets: np.ndarray) -> dic
 
     # Naive mean baseline (always predict mean)
     naive_mean_rmse = np.sqrt(np.mean((targets - target_mean) ** 2))
-    naive_mean_nrmse = naive_mean_rmse / target_std if target_std > 0 else naive_mean_rmse
+    naive_mean_nrmse = (
+        naive_mean_rmse / target_std if target_std > 0 else naive_mean_rmse
+    )
 
     # Naive median baseline (always predict median)
     naive_median_rmse = np.sqrt(np.mean((targets - target_median) ** 2))
@@ -115,7 +117,11 @@ def compute_baseline_scores(predictions: np.ndarray, targets: np.ndarray) -> dic
     model_nrmse = model_rmse / target_std if target_std > 0 else model_rmse
 
     # Improvement over mean baseline
-    improvement = (naive_mean_nrmse - model_nrmse) / naive_mean_nrmse if naive_mean_nrmse > 0 else 0.0
+    improvement = (
+        (naive_mean_nrmse - model_nrmse) / naive_mean_nrmse
+        if naive_mean_nrmse > 0
+        else 0.0
+    )
 
     return {
         "naive_mean_rmse": float(naive_mean_rmse),

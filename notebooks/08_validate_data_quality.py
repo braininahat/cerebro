@@ -14,9 +14,10 @@
 # %% Setup
 import sys
 from pathlib import Path
-import torch
-import numpy as np
+
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
 from scipy.stats import ks_2samp
 
 # Add cerebro to path
@@ -37,7 +38,7 @@ print("=" * 60)
 print("\n📊 Loading data...")
 
 datamodule = Challenge1DataModule(
-    data_dir=REPO_ROOT / "data" / "full",
+    data_dir=REPO_ROOT / "data",
     releases=["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"],
     batch_size=512,
     num_workers=8,
@@ -49,7 +50,9 @@ datamodule.setup(stage="fit")
 
 print(f"✓ Train windows: {len(datamodule.train_set)}")
 print(f"✓ Val windows: {len(datamodule.val_set)}")
-print(f"✓ Test windows: {len(datamodule.test_set) if hasattr(datamodule, 'test_set') else 'N/A'}")
+print(
+    f"✓ Test windows: {len(datamodule.test_set) if hasattr(datamodule, 'test_set') else 'N/A'}"
+)
 
 # %% Subject leakage detection
 print("\n" + "=" * 60)
@@ -63,9 +66,9 @@ def extract_subjects(dataset):
     Uses get_metadata() to properly extract HBN subject IDs (e.g., "NDARWV769JM7")
     from the metadata DataFrame, not dataset indices.
     """
-    if hasattr(dataset, 'get_metadata'):
+    if hasattr(dataset, "get_metadata"):
         metadata = dataset.get_metadata()
-        if 'subject' in metadata.columns:
+        if "subject" in metadata.columns:
             return metadata["subject"].unique().tolist()
 
     # Fallback: shouldn't reach here with braindecode datasets
@@ -77,7 +80,7 @@ val_subjects = set(extract_subjects(datamodule.val_set))
 
 # Test set might not exist yet (created during test time)
 test_subjects = set()
-if hasattr(datamodule, 'test_set') and datamodule.test_set is not None:
+if hasattr(datamodule, "test_set") and datamodule.test_set is not None:
     test_subjects = set(extract_subjects(datamodule.test_set))
 
 print(f"Train subjects: {len(train_subjects)}")
@@ -90,7 +93,9 @@ train_val_overlap = train_subjects & val_subjects
 print(f"\nChecking for overlap...")
 
 if len(train_val_overlap) > 0:
-    print(f"❌ LEAKAGE DETECTED: {len(train_val_overlap)} subjects in BOTH train AND val!")
+    print(
+        f"❌ LEAKAGE DETECTED: {len(train_val_overlap)} subjects in BOTH train AND val!"
+    )
     print(f"   Overlapping subjects: {sorted(list(train_val_overlap))[:10]}...")
     raise ValueError("Subject leakage detected! Fix data splits before training.")
 else:
@@ -124,9 +129,9 @@ def extract_labels(dataset):
     Uses get_metadata() to extract 'target' column (response time labels)
     from the metadata DataFrame.
     """
-    if hasattr(dataset, 'get_metadata'):
+    if hasattr(dataset, "get_metadata"):
         metadata = dataset.get_metadata()
-        if 'target' in metadata.columns:
+        if "target" in metadata.columns:
             return metadata["target"].values
     return np.array([])
 
@@ -140,7 +145,9 @@ print(f"Val labels: {len(val_labels)} samples")
 # Kolmogorov-Smirnov test (null hypothesis: same distribution)
 stat, pval = ks_2samp(train_labels, val_labels)
 
-print(f"\nTrain label stats: mean={train_labels.mean():.3f}s, std={train_labels.std():.3f}s")
+print(
+    f"\nTrain label stats: mean={train_labels.mean():.3f}s, std={train_labels.std():.3f}s"
+)
 print(f"Val label stats:   mean={val_labels.mean():.3f}s, std={val_labels.std():.3f}s")
 print(f"KS test statistic: {stat:.4f}")
 print(f"KS test p-value: {pval:.4f}")
@@ -156,33 +163,152 @@ fig = plt.figure(figsize=(14, 5))
 
 # Histogram comparison
 ax1 = plt.subplot(1, 2, 1)
-ax1.hist([train_labels, val_labels], bins=50, label=['Train', 'Val'], alpha=0.7,
-         color=['#2E86AB', '#A23B72'])
-ax1.axvline(train_labels.mean(), color='#2E86AB', linestyle='--', linewidth=2,
-            label=f'Train mean: {train_labels.mean():.2f}s')
-ax1.axvline(val_labels.mean(), color='#A23B72', linestyle='--', linewidth=2,
-            label=f'Val mean: {val_labels.mean():.2f}s')
-ax1.set_xlabel('Response Time (s)', fontsize=11)
-ax1.set_ylabel('Count', fontsize=11)
-ax1.set_title(f'Label Distribution (KS p={pval:.4f})', fontsize=13, fontweight='bold')
+ax1.hist(
+    [train_labels, val_labels],
+    bins=50,
+    label=["Train", "Val"],
+    alpha=0.7,
+    color=["#2E86AB", "#A23B72"],
+)
+ax1.axvline(
+    train_labels.mean(),
+    color="#2E86AB",
+    linestyle="--",
+    linewidth=2,
+    label=f"Train mean: {train_labels.mean():.2f}s",
+)
+ax1.axvline(
+    val_labels.mean(),
+    color="#A23B72",
+    linestyle="--",
+    linewidth=2,
+    label=f"Val mean: {val_labels.mean():.2f}s",
+)
+ax1.set_xlabel("Response Time (s)", fontsize=11)
+ax1.set_ylabel("Count", fontsize=11)
+ax1.set_title(f"Label Distribution (KS p={pval:.4f})", fontsize=13, fontweight="bold")
 ax1.legend(fontsize=9)
 ax1.grid(alpha=0.3)
 
 # Q-Q plot (check if val labels are normally distributed)
 ax2 = plt.subplot(1, 2, 2)
 from scipy.stats import probplot
+
 probplot(val_labels, dist="norm", plot=ax2)
-ax2.set_title('Q-Q Plot: Val Labels vs Normal Distribution', fontsize=13, fontweight='bold')
+ax2.set_title(
+    "Q-Q Plot: Val Labels vs Normal Distribution", fontsize=13, fontweight="bold"
+)
 ax2.grid(alpha=0.3)
 
 plt.tight_layout()
 plot_path = OUTPUT_DIR / "data_validation_labels.png"
-plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+plt.savefig(plot_path, dpi=150, bbox_inches="tight")
 print(f"\n✓ Saved: {plot_path}")
+
+# %% R5 Test Set Validation
+print("\n" + "=" * 60)
+print("3. R5 TEST SET VALIDATION")
+print("=" * 60)
+
+print("\n📊 Loading R5 test set...")
+print("(This validates R5 as test set matches local_scoring.py)")
+
+# Create datamodule with R5 test
+datamodule_r5 = Challenge1DataModule(
+    data_dir=REPO_ROOT / "data",
+    releases=["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"],
+    batch_size=512,
+    num_workers=8,
+    use_mini=False,
+    mode="dev",
+    test_on_r5=True,  # Use R5 as test set
+    seed=2025,
+)
+
+datamodule_r5.setup(stage="fit")
+
+# Extract R5 test subjects
+r5_test_subjects = set(extract_subjects(datamodule_r5.test_set))
+r5_test_labels = extract_labels(datamodule_r5.test_set)
+
+print(f"\n✓ R5 test windows: {len(datamodule_r5.test_set)}")
+print(f"✓ R5 test subjects: {len(r5_test_subjects)}")
+
+# CRITICAL: Check for overlap between training releases and R5
+print(f"\nChecking for overlap between training releases and R5...")
+train_r5_overlap = train_subjects & r5_test_subjects
+
+if len(train_r5_overlap) > 0:
+    print(
+        f"❌ LEAKAGE DETECTED: {len(train_r5_overlap)} subjects in BOTH training releases AND R5!"
+    )
+    print(f"   Overlapping subjects: {sorted(list(train_r5_overlap))[:10]}...")
+    raise ValueError("R5 contamination detected! R5 should be completely held out.")
+else:
+    print("✓ No overlap between training releases and R5")
+
+# Compare label distributions
+print(f"\nComparing label distributions (training releases vs R5)...")
+print(
+    f"  Training releases: mean={train_labels.mean():.3f}s, std={train_labels.std():.3f}s"
+)
+print(f"  R5 test set:       mean={r5_test_labels.mean():.3f}s, std={r5_test_labels.std():.3f}s")
+
+# KS test for distribution shift
+r5_stat, r5_pval = ks_2samp(train_labels, r5_test_labels)
+print(f"  KS statistic: {r5_stat:.4f}")
+print(f"  KS p-value: {r5_pval:.4f}")
+
+if r5_pval < 0.05:
+    print(
+        "  ⚠️  WARNING: R5 distribution differs from training releases (p < 0.05)"
+    )
+    print("     This is expected - R5 may have different subject characteristics")
+else:
+    print("  ✓ R5 distribution similar to training releases (p ≥ 0.05)")
+
+# Visualize R5 vs training
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.hist(
+    [train_labels, r5_test_labels],
+    bins=50,
+    label=["Training Releases (R1-R4, R6-R11)", "R5 Test Set"],
+    alpha=0.7,
+    color=["#2E86AB", "#E63946"],
+)
+ax.axvline(
+    train_labels.mean(),
+    color="#2E86AB",
+    linestyle="--",
+    linewidth=2,
+    label=f"Train mean: {train_labels.mean():.2f}s",
+)
+ax.axvline(
+    r5_test_labels.mean(),
+    color="#E63946",
+    linestyle="--",
+    linewidth=2,
+    label=f"R5 mean: {r5_test_labels.mean():.2f}s",
+)
+ax.set_xlabel("Response Time (s)", fontsize=11)
+ax.set_ylabel("Count", fontsize=11)
+ax.set_title(
+    f"Training vs R5 Distribution (KS p={r5_pval:.4f})",
+    fontsize=13,
+    fontweight="bold",
+)
+ax.legend(fontsize=9)
+ax.grid(alpha=0.3)
+plt.tight_layout()
+plot_path = OUTPUT_DIR / "data_validation_r5_comparison.png"
+plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+print(f"\n✓ Saved: {plot_path}")
+
+print("\n✅ R5 validation check PASSED")
 
 # %% Input data quality
 print("\n" + "=" * 60)
-print("3. INPUT DATA QUALITY")
+print("4. INPUT DATA QUALITY")
 print("=" * 60)
 
 print("Loading a batch of training data...")
@@ -197,7 +323,7 @@ print(f"  - Time samples: {X.shape[2]} (= 2.0s at 100Hz)")
 
 # Per-channel statistics
 channel_means = X.mean(dim=(0, 2))  # (129,) - average over batch and time
-channel_stds = X.std(dim=(0, 2))    # (129,)
+channel_stds = X.std(dim=(0, 2))  # (129,)
 
 # Detect issues
 flat_channels = (channel_stds < 0.01).sum().item()
@@ -231,34 +357,47 @@ fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 # Per-channel means
 ax = axes[0]
 channel_means_np = channel_means.numpy()
-bars = ax.bar(range(129), channel_means_np, color='#2E86AB', edgecolor='black', linewidth=0.3)
-ax.axhline(0, color='red', linestyle='--', linewidth=1, alpha=0.7, label='Expected: 0')
-ax.set_xlabel('Channel Index', fontsize=11)
-ax.set_ylabel('Mean', fontsize=11)
-ax.set_title('Per-Channel Mean (should be ≈ 0)', fontsize=13, fontweight='bold')
+bars = ax.bar(
+    range(129), channel_means_np, color="#2E86AB", edgecolor="black", linewidth=0.3
+)
+ax.axhline(0, color="red", linestyle="--", linewidth=1, alpha=0.7, label="Expected: 0")
+ax.set_xlabel("Channel Index", fontsize=11)
+ax.set_ylabel("Mean", fontsize=11)
+ax.set_title("Per-Channel Mean (should be ≈ 0)", fontsize=13, fontweight="bold")
 ax.legend(fontsize=9)
-ax.grid(alpha=0.3, axis='y')
+ax.grid(alpha=0.3, axis="y")
 
 # Per-channel stds
 ax = axes[1]
 channel_stds_np = channel_stds.numpy()
-bars = ax.bar(range(129), channel_stds_np, color='#06D6A0', edgecolor='black', linewidth=0.3)
-ax.axhline(1.0, color='red', linestyle='--', linewidth=1, alpha=0.7, label='Expected: 1')
-ax.axhline(0.01, color='orange', linestyle='--', linewidth=1, alpha=0.7, label='Flat threshold: 0.01')
-ax.set_xlabel('Channel Index', fontsize=11)
-ax.set_ylabel('Std', fontsize=11)
-ax.set_title('Per-Channel Std (should be ≈ 1)', fontsize=13, fontweight='bold')
+bars = ax.bar(
+    range(129), channel_stds_np, color="#06D6A0", edgecolor="black", linewidth=0.3
+)
+ax.axhline(
+    1.0, color="red", linestyle="--", linewidth=1, alpha=0.7, label="Expected: 1"
+)
+ax.axhline(
+    0.01,
+    color="orange",
+    linestyle="--",
+    linewidth=1,
+    alpha=0.7,
+    label="Flat threshold: 0.01",
+)
+ax.set_xlabel("Channel Index", fontsize=11)
+ax.set_ylabel("Std", fontsize=11)
+ax.set_title("Per-Channel Std (should be ≈ 1)", fontsize=13, fontweight="bold")
 ax.legend(fontsize=9)
-ax.grid(alpha=0.3, axis='y')
+ax.grid(alpha=0.3, axis="y")
 
 plt.tight_layout()
 plot_path = OUTPUT_DIR / "data_validation_channels.png"
-plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+plt.savefig(plot_path, dpi=150, bbox_inches="tight")
 print(f"\n✓ Saved: {plot_path}")
 
 # %% NaN/Inf detection
 print("\n" + "=" * 60)
-print("4. NaN/Inf DETECTION")
+print("5. NaN/Inf DETECTION")
 print("=" * 60)
 
 nan_count = torch.isnan(X).sum().item()
@@ -280,7 +419,7 @@ print("✓ No NaN/Inf values detected")
 
 # %% Value range check
 print("\n" + "=" * 60)
-print("5. VALUE RANGE CHECK")
+print("6. VALUE RANGE CHECK")
 print("=" * 60)
 
 min_val = X.min().item()
@@ -302,7 +441,7 @@ else:
     print("✓ Value range looks reasonable for standardized data")
 
 # Count extreme outliers
-extreme_outlier_count = ((X.abs() > 5).sum().item())
+extreme_outlier_count = (X.abs() > 5).sum().item()
 extreme_outlier_pct = (extreme_outlier_count / X.numel()) * 100
 
 print(f"\nExtreme outliers (|value| > 5σ):")
@@ -332,11 +471,12 @@ validation_results = {
 print("\nChecklist:")
 for check, passed in validation_results.items():
     status = "✓" if passed else "⚠️ "
-    print(f"  {status} {check.replace('_', ' ').title()}: {'PASS' if passed else 'WARN'}")
+    print(
+        f"  {status} {check.replace('_', ' ').title()}: {'PASS' if passed else 'WARN'}"
+    )
 
 all_critical_passed = (
-    validation_results["subject_leakage"] and
-    validation_results["no_nan_inf"]
+    validation_results["subject_leakage"] and validation_results["no_nan_inf"]
 )
 
 all_passed = all(validation_results.values())

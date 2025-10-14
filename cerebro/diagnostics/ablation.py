@@ -4,11 +4,12 @@ Performs systematic feature ablation to determine which channels and
 time windows are critical for model predictions.
 """
 
+from typing import Dict, List, Tuple
+
 import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from typing import Dict, List, Tuple
 
 
 def ablate_channels(
@@ -86,9 +87,9 @@ def ablate_channels(
             elif ablation_strategy == "random":
                 ch_std = samples_ablated[:, ch_idx, :].std()
                 ch_mean = samples_ablated[:, ch_idx, :].mean()
-                samples_ablated[:, ch_idx, :] = torch.randn_like(
-                    samples_ablated[:, ch_idx, :]
-                ) * ch_std + ch_mean
+                samples_ablated[:, ch_idx, :] = (
+                    torch.randn_like(samples_ablated[:, ch_idx, :]) * ch_std + ch_mean
+                )
             else:
                 raise ValueError(f"Unknown ablation strategy: {ablation_strategy}")
 
@@ -202,9 +203,11 @@ def ablate_temporal_windows(
             elif ablation_strategy == "random":
                 window_std = samples_ablated[:, :, start_idx:end_idx].std()
                 window_mean = samples_ablated[:, :, start_idx:end_idx].mean()
-                samples_ablated[:, :, start_idx:end_idx] = torch.randn_like(
-                    samples_ablated[:, :, start_idx:end_idx]
-                ) * window_std + window_mean
+                samples_ablated[:, :, start_idx:end_idx] = (
+                    torch.randn_like(samples_ablated[:, :, start_idx:end_idx])
+                    * window_std
+                    + window_mean
+                )
             else:
                 raise ValueError(f"Unknown ablation strategy: {ablation_strategy}")
 
@@ -264,6 +267,7 @@ def interpret_channel_importance(
     Returns:
         Interpretation string
     """
+
     # Categorize channels by region (simplified mapping)
     def get_region(ch_idx: int) -> str:
         if ch_idx <= 40:
@@ -286,7 +290,9 @@ def interpret_channel_importance(
     for i, ch_idx in enumerate(most_important_channels, 1):
         region = get_region(ch_idx)
         importance = channel_importance[ch_idx]
-        interpretation += f"  {i}. Channel {ch_idx} ({region}): ΔNRMSE = {importance:.4f}\n"
+        interpretation += (
+            f"  {i}. Channel {ch_idx} ({region}): ΔNRMSE = {importance:.4f}\n"
+        )
 
     interpretation += f"\nRegion distribution in top 10:\n"
     for region, count in region_counts.items():
@@ -295,9 +301,13 @@ def interpret_channel_importance(
     # Neuroscience interpretation
     interpretation += "\nNeuroscience Interpretation:\n"
     if region_counts["Parietal"] >= 5:
-        interpretation += "✓ Model relies on parietal channels (expected for RT/decision tasks).\n"
+        interpretation += (
+            "✓ Model relies on parietal channels (expected for RT/decision tasks).\n"
+        )
     elif region_counts["Frontal"] >= 5:
-        interpretation += "⚠ Model relies on frontal channels (unusual for RT prediction).\n"
+        interpretation += (
+            "⚠ Model relies on frontal channels (unusual for RT prediction).\n"
+        )
     else:
         interpretation += "~ Model uses mixed regions (no clear spatial focus).\n"
 
@@ -328,7 +338,9 @@ def interpret_temporal_importance(
         Interpretation string
     """
     interpretation = "Temporal Window Importance Analysis:\n\n"
-    interpretation += f"Most critical window: {most_important_time_sec:.2f}s post-stimulus\n"
+    interpretation += (
+        f"Most critical window: {most_important_time_sec:.2f}s post-stimulus\n"
+    )
 
     # Find top 3 windows
     top_indices = np.argsort(window_importance)[-3:][::-1]
@@ -353,7 +365,9 @@ def interpret_temporal_importance(
     importance_std = np.std(window_importance)
     importance_mean = np.mean(window_importance)
     if importance_mean > 0 and importance_std / importance_mean < 0.3:
-        interpretation += "⚠ Temporal importance is relatively uniform (no clear critical window).\n"
+        interpretation += (
+            "⚠ Temporal importance is relatively uniform (no clear critical window).\n"
+        )
     else:
         interpretation += "✓ Model shows clear temporal selectivity (specific windows are critical).\n"
 

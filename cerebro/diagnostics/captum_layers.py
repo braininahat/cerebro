@@ -11,6 +11,20 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 
+class SqueezeOutputWrapper(nn.Module):
+    """Wraps a model to squeeze (batch, 1) outputs to (batch) for Captum."""
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        out = self.model(x)
+        # Squeeze last dim if shape is (batch, 1)
+        if out.dim() == 2 and out.shape[-1] == 1:
+            return out.squeeze(-1)
+        return out
+
+
 def detect_conv_layers(model: nn.Module) -> list[str]:
     """Auto-detect convolutional layers in model.
 
@@ -80,8 +94,13 @@ def compute_layer_gradcam(
             - most_important_layer: str - layer with highest aggregate importance
     """
     model.eval()
+    model = model.to(device)
 
-    # Auto-detect conv layers if not specified
+    # Wrap model to squeeze outputs for Captum
+    wrapped_model = SqueezeOutputWrapper(model).to(device)
+    wrapped_model.eval()
+
+    # Auto-detect conv layers if not specified (from original model)
     if target_layers is None:
         target_layers = detect_conv_layers(model)
         if not target_layers:
@@ -108,13 +127,14 @@ def compute_layer_gradcam(
 
     for layer_name in target_layers:
         try:
-            layer = get_layer_by_name(model, layer_name)
+            # Get layer from wrapped model's inner model
+            layer = get_layer_by_name(wrapped_model.model, layer_name)
         except AttributeError:
             print(f"Warning: Layer '{layer_name}' not found, skipping")
             continue
 
         # Initialize GradCAM for this layer
-        gradcam = LayerGradCam(model, layer)
+        gradcam = LayerGradCam(wrapped_model, layer)
 
         # Compute attributions (batched for memory)
         attributions_list = []
@@ -124,10 +144,9 @@ def compute_layer_gradcam(
             end_idx = min(i + batch_size, num_samples)
             batch_samples = samples[i:end_idx]
 
-            # GradCAM requires target class index (for regression, use target=None)
+            # Forward func handles output squeezing, no target needed
             batch_attr = gradcam.attribute(
                 batch_samples,
-                target=None,  # For regression
             )
 
             attributions_list.append(batch_attr.detach().cpu())
@@ -155,7 +174,9 @@ def compute_layer_gradcam(
     }
 
 
-def interpret_layer_hierarchy(layer_importance: dict[str, float], layer_shapes: dict[str, tuple]) -> str:
+def interpret_layer_hierarchy(
+    layer_importance: dict[str, float], layer_shapes: dict[str, tuple]
+) -> str:
     """Interprets layer importance hierarchy for neuroscience plausibility.
 
     Args:
@@ -183,17 +204,11 @@ def interpret_layer_hierarchy(layer_importance: dict[str, float], layer_shapes: 
         late_importance = layer_importance[layer_names[-1]]
 
         if late_importance > early_importance * 1.5:
-            interpretation += (
-                "\n✓ Late layers have higher importance (hierarchical feature learning detected)."
-            )
+            interpretation += "\n✓ Late layers have higher importance (hierarchical feature learning detected)."
         elif late_importance < early_importance * 0.5:
-            interpretation += (
-                "\n⚠ Early layers dominate (model may not be learning hierarchical features)."
-            )
+            interpretation += "\n⚠ Early layers dominate (model may not be learning hierarchical features)."
         else:
-            interpretation += (
-                "\n~ Importance distributed across layers (mixed hierarchical learning)."
-            )
+            interpretation += "\n~ Importance distributed across layers (mixed hierarchical learning)."
 
     # Check if importance is uniform (no clear hierarchy)
     importances = list(layer_importance.values())

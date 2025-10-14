@@ -10,8 +10,8 @@ from typing import Any
 
 import wandb
 from lightning import LightningModule, Trainer
-from lightning.pytorch.tuner import Tuner
 from lightning.pytorch.core.datamodule import LightningDataModule
+from lightning.pytorch.tuner import Tuner
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +50,9 @@ def run_lr_finder(
         >>> suggested_lr = run_lr_finder(trainer, model, datamodule)
         >>> model.hparams.lr = suggested_lr
     """
-    logger.info("\n" + "="*60)
+    logger.info("\n" + "=" * 60)
     logger.info("[bold]Running learning rate finder...[/bold]")
-    logger.info("="*60)
+    logger.info("=" * 60)
 
     # Capture original LR before lr_find modifies it
     original_lr = model.hparams.lr
@@ -67,7 +67,7 @@ def run_lr_finder(
         max_lr=max_lr,
         num_training=num_training,
         mode=mode,
-        attr_name="lr"  # Update model.lr (or model.hparams.lr)
+        attr_name="lr",  # Update model.lr (or model.hparams.lr)
     )
 
     # Get suggestion
@@ -88,7 +88,9 @@ def run_lr_finder(
 
         # Upload to wandb if logger provided
         if wandb_logger is not None:
-            wandb_logger.experiment.log({"lr_finder_plot": wandb.Image(str(lr_plot_path))})
+            wandb_logger.experiment.log(
+                {"lr_finder_plot": wandb.Image(str(lr_plot_path))}
+            )
             logger.info("[green]LR finder plot uploaded to wandb[/green]")
 
     # Update model hyperparameter
@@ -128,9 +130,9 @@ def run_batch_size_finder(
         >>> optimal_bs = run_batch_size_finder(trainer, model, datamodule)
         >>> # datamodule.batch_size automatically updated
     """
-    logger.info("\n" + "="*60)
+    logger.info("\n" + "=" * 60)
     logger.info("[bold]Running batch size scaler...[/bold]")
-    logger.info("="*60)
+    logger.info("=" * 60)
 
     original_batch_size = datamodule.batch_size
     logger.info(f"[yellow]Original batch size:[/yellow] {original_batch_size}")
@@ -144,7 +146,7 @@ def run_batch_size_finder(
         mode=mode,
         steps_per_trial=steps_per_trial,
         init_val=init_val,
-        max_trials=max_trials  # Caps at init_val * 2^max_trials
+        max_trials=max_trials,  # Caps at init_val * 2^max_trials
     )
 
     new_batch_size = datamodule.batch_size

@@ -20,35 +20,44 @@
 # - **Alternating batches**: CombinedLoader cycles between C1 and C2
 # - **Competition metric**: Overall score matches leaderboard (30% C1 + 70% C2)
 
+import math
+import os
+import random
+import warnings
+
 # %% Setup and imports
 from pathlib import Path
-import os
-import math
-import random
-import torch
-import warnings
+
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
-from lightning.pytorch.loggers import WandbLogger
-from lightning.pytorch.utilities import CombinedLoader
-from torch.utils.data import DataLoader
-from braindecode.models import EEGNeX
+import torch
 from braindecode.datasets import BaseConcatDataset, BaseDataset, EEGWindowsDataset
-from braindecode.preprocessing import preprocess, Preprocessor, create_windows_from_events, create_fixed_length_windows
+from braindecode.models import EEGNeX
+from braindecode.preprocessing import (
+    Preprocessor,
+    create_fixed_length_windows,
+    create_windows_from_events,
+    preprocess,
+)
+from dotenv import load_dotenv
 from eegdash.dataset import EEGChallengeDataset
 from eegdash.hbn.windows import (
-    annotate_trials_with_target,
     add_aux_anchors,
     add_extras_columns,
+    annotate_trials_with_target,
     keep_only_recordings_with,
 )
+from joblib import Parallel, delayed
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.utilities import CombinedLoader
 from sklearn.model_selection import train_test_split
 from sklearn.utils import check_random_state
-from joblib import Parallel, delayed
-from dotenv import load_dotenv
+from torch.utils.data import DataLoader
 
 # Suppress EEGChallengeDataset warning
-warnings.filterwarnings("ignore", category=UserWarning, module="eegdash.dataset.dataset")
+warnings.filterwarnings(
+    "ignore", category=UserWarning, module="eegdash.dataset.dataset"
+)
 
 # Reproducibility
 L.seed_everything(42)
@@ -69,12 +78,23 @@ FULL_DIR = (DATA_ROOT / "full").resolve()
 # Data settings
 USE_MINI = False  # Set to True for quick testing
 DATA_DIR = MINI_DIR if USE_MINI else FULL_DIR
-RELEASES = ["R5"] if USE_MINI else ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
+RELEASES = (
+    ["R5"]
+    if USE_MINI
+    else ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
+)
 
 # Excluded subjects
 EXCLUDED_SUBJECTS = [
-    "NDARWV769JM7", "NDARME789TD2", "NDARUA442ZVF", "NDARJP304NK1",
-    "NDARTY128YLU", "NDARDW550GU6", "NDARLD243KRE", "NDARUJ292JXV", "NDARBA381JGH"
+    "NDARWV769JM7",
+    "NDARME789TD2",
+    "NDARUA442ZVF",
+    "NDARJP304NK1",
+    "NDARTY128YLU",
+    "NDARDW550GU6",
+    "NDARLD243KRE",
+    "NDARUJ292JXV",
+    "NDARBA381JGH",
 ]
 
 # Windowing parameters
@@ -131,9 +151,9 @@ print(f"  Batch size: {BATCH_SIZE}")
 print(f"  Competition weights: C1={WEIGHT_C1}, C2={WEIGHT_C2}")
 
 # %% Load Challenge 1 data (CCD task)
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("LOADING CHALLENGE 1 DATA")
-print("="*60)
+print("=" * 60)
 
 # Load CCD task
 c1_datasets_list = []
@@ -144,7 +164,15 @@ for release in RELEASES:
         release=release,
         cache_dir=DATA_DIR,
         mini=USE_MINI,
-        description_fields=["subject", "session", "run", "task", "age", "sex", "p_factor"],
+        description_fields=[
+            "subject",
+            "session",
+            "run",
+            "task",
+            "age",
+            "sex",
+            "p_factor",
+        ],
     )
     c1_datasets_list.append(dataset)
 
@@ -186,16 +214,23 @@ c1_windows = add_extras_columns(
     c1_windows,
     dataset_ccd,
     desc=ANCHOR,
-    keys=("target", "rt_from_stimulus", "rt_from_trialstart",
-          "stimulus_onset", "response_onset", "correct", "response_type")
+    keys=(
+        "target",
+        "rt_from_stimulus",
+        "rt_from_trialstart",
+        "stimulus_onset",
+        "response_onset",
+        "correct",
+        "response_type",
+    ),
 )
 
 print(f"C1 windows: {len(c1_windows)}")
 
 # %% Load Challenge 2 data (multi-task)
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("LOADING CHALLENGE 2 DATA")
-print("="*60)
+print("=" * 60)
 
 # Load all tasks
 c2_datasets_list = []
@@ -208,7 +243,15 @@ for release in RELEASES:
                 release=release,
                 cache_dir=DATA_DIR,
                 mini=USE_MINI,
-                description_fields=["subject", "session", "run", "task", "age", "sex", "p_factor"],
+                description_fields=[
+                    "subject",
+                    "session",
+                    "run",
+                    "task",
+                    "age",
+                    "sex",
+                    "p_factor",
+                ],
             )
             c2_datasets_list.append(dataset)
         except Exception as e:
@@ -226,7 +269,8 @@ raws_c2 = Parallel(n_jobs=os.cpu_count())(
 
 # Filter
 c2_filtered = [
-    ds for ds in c2_all_datasets.datasets
+    ds
+    for ds in c2_all_datasets.datasets
     if ds.description.subject not in EXCLUDED_SUBJECTS
     and ds.raw.n_times >= WINDOW_SIZE_S * SFREQ
     and len(ds.raw.ch_names) == 129
@@ -243,6 +287,7 @@ c2_windows = create_fixed_length_windows(
     drop_last_window=True,
     preload=True,
 )
+
 
 # Wrap with DatasetWrapper
 class DatasetWrapper(BaseDataset):
@@ -278,59 +323,99 @@ class DatasetWrapper(BaseDataset):
 
         return X, target, (i_window_in_trial, i_start_crop, i_stop_crop), infos
 
+
 c2_windows = BaseConcatDataset(
-    [DatasetWrapper(ds, crop_size_samples=int(CROP_SIZE_S * SFREQ), seed=SEED + i)
-     for i, ds in enumerate(c2_windows.datasets)]
+    [
+        DatasetWrapper(ds, crop_size_samples=int(CROP_SIZE_S * SFREQ), seed=SEED + i)
+        for i, ds in enumerate(c2_windows.datasets)
+    ]
 )
 
 print(f"C2 windows: {len(c2_windows)}")
 
 # %% Split data at subject level
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("SPLITTING DATA")
-print("="*60)
+print("=" * 60)
 
 # C1 splits
 c1_metadata = c1_windows.get_metadata()
 c1_subjects = [s for s in c1_metadata["subject"].unique() if s not in EXCLUDED_SUBJECTS]
 c1_train_subj, c1_valid_test_subj = train_test_split(
-    c1_subjects, test_size=(VAL_FRAC + TEST_FRAC), random_state=check_random_state(SEED), shuffle=True
+    c1_subjects,
+    test_size=(VAL_FRAC + TEST_FRAC),
+    random_state=check_random_state(SEED),
+    shuffle=True,
 )
 c1_valid_subj, c1_test_subj = train_test_split(
-    c1_valid_test_subj, test_size=TEST_FRAC / (VAL_FRAC + TEST_FRAC),
-    random_state=check_random_state(SEED + 1), shuffle=True
+    c1_valid_test_subj,
+    test_size=TEST_FRAC / (VAL_FRAC + TEST_FRAC),
+    random_state=check_random_state(SEED + 1),
+    shuffle=True,
 )
 
 c1_subject_split = c1_windows.split("subject")
-c1_train_set = BaseConcatDataset([c1_subject_split[s] for s in c1_train_subj if s in c1_subject_split])
-c1_val_set = BaseConcatDataset([c1_subject_split[s] for s in c1_valid_subj if s in c1_subject_split])
-c1_test_set = BaseConcatDataset([c1_subject_split[s] for s in c1_test_subj if s in c1_subject_split])
+c1_train_set = BaseConcatDataset(
+    [c1_subject_split[s] for s in c1_train_subj if s in c1_subject_split]
+)
+c1_val_set = BaseConcatDataset(
+    [c1_subject_split[s] for s in c1_valid_subj if s in c1_subject_split]
+)
+c1_test_set = BaseConcatDataset(
+    [c1_subject_split[s] for s in c1_test_subj if s in c1_subject_split]
+)
 
-print(f"C1 splits: Train={len(c1_train_set)}, Val={len(c1_val_set)}, Test={len(c1_test_set)}")
+print(
+    f"C1 splits: Train={len(c1_train_set)}, Val={len(c1_val_set)}, Test={len(c1_test_set)}"
+)
 
 # C2 splits
 c2_metadata = c2_windows.get_metadata()
 c2_subjects = c2_metadata["subject"].unique()
 c2_train_subj, c2_valid_test_subj = train_test_split(
-    c2_subjects, test_size=(VAL_FRAC + TEST_FRAC), random_state=check_random_state(SEED), shuffle=True
+    c2_subjects,
+    test_size=(VAL_FRAC + TEST_FRAC),
+    random_state=check_random_state(SEED),
+    shuffle=True,
 )
 c2_valid_subj, c2_test_subj = train_test_split(
-    c2_valid_test_subj, test_size=TEST_FRAC / (VAL_FRAC + TEST_FRAC),
-    random_state=check_random_state(SEED + 1), shuffle=True
+    c2_valid_test_subj,
+    test_size=TEST_FRAC / (VAL_FRAC + TEST_FRAC),
+    random_state=check_random_state(SEED + 1),
+    shuffle=True,
 )
 
 c2_subject_split = c2_windows.split("subject")
-c2_train_set = BaseConcatDataset([c2_subject_split[s] for s in c2_train_subj if s in c2_subject_split])
-c2_val_set = BaseConcatDataset([c2_subject_split[s] for s in c2_valid_subj if s in c2_subject_split])
-c2_test_set = BaseConcatDataset([c2_subject_split[s] for s in c2_test_subj if s in c2_subject_split])
+c2_train_set = BaseConcatDataset(
+    [c2_subject_split[s] for s in c2_train_subj if s in c2_subject_split]
+)
+c2_val_set = BaseConcatDataset(
+    [c2_subject_split[s] for s in c2_valid_subj if s in c2_subject_split]
+)
+c2_test_set = BaseConcatDataset(
+    [c2_subject_split[s] for s in c2_test_subj if s in c2_subject_split]
+)
 
-print(f"C2 splits: Train={len(c2_train_set)}, Val={len(c2_val_set)}, Test={len(c2_test_set)}")
+print(
+    f"C2 splits: Train={len(c2_train_set)}, Val={len(c2_val_set)}, Test={len(c2_test_set)}"
+)
+
 
 # %% Define MultitaskDataModule
 class MultitaskDataModule(L.LightningDataModule):
     """DataModule for multitask training with CombinedLoader"""
 
-    def __init__(self, c1_train, c1_val, c1_test, c2_train, c2_val, c2_test, batch_size=128, num_workers=0):
+    def __init__(
+        self,
+        c1_train,
+        c1_val,
+        c1_test,
+        c2_train,
+        c2_val,
+        c2_test,
+        batch_size=128,
+        num_workers=0,
+    ):
         super().__init__()
         self.c1_train = c1_train
         self.c1_val = c1_val
@@ -359,29 +444,42 @@ class MultitaskDataModule(L.LightningDataModule):
         )
 
         # CombinedLoader alternates batches and cycles shorter dataset
-        return CombinedLoader(
-            {"c1": c1_loader, "c2": c2_loader},
-            mode="max_size_cycle"
-        )
+        return CombinedLoader({"c1": c1_loader, "c2": c2_loader}, mode="max_size_cycle")
 
     def val_dataloader(self):
         # Return list of loaders for separate validation
-        c1_loader = DataLoader(self.c1_val, batch_size=self.batch_size, num_workers=self.num_workers)
-        c2_loader = DataLoader(self.c2_val, batch_size=self.batch_size, num_workers=self.num_workers)
+        c1_loader = DataLoader(
+            self.c1_val, batch_size=self.batch_size, num_workers=self.num_workers
+        )
+        c2_loader = DataLoader(
+            self.c2_val, batch_size=self.batch_size, num_workers=self.num_workers
+        )
         return [c1_loader, c2_loader]
 
     def test_dataloader(self):
         # Return list of loaders for separate testing
-        c1_loader = DataLoader(self.c1_test, batch_size=self.batch_size, num_workers=self.num_workers)
-        c2_loader = DataLoader(self.c2_test, batch_size=self.batch_size, num_workers=self.num_workers)
+        c1_loader = DataLoader(
+            self.c1_test, batch_size=self.batch_size, num_workers=self.num_workers
+        )
+        c2_loader = DataLoader(
+            self.c2_test, batch_size=self.batch_size, num_workers=self.num_workers
+        )
         return [c1_loader, c2_loader]
+
 
 # %% Define MultitaskModule
 class MultitaskModule(L.LightningModule):
     """Multitask module: shared encoder + dual heads for C1 and C2"""
 
-    def __init__(self, lr=1e-4, weight_decay=1e-5, freeze_encoder_epochs=5, epochs=50,
-                 weight_c1=0.3, weight_c2=0.7):
+    def __init__(
+        self,
+        lr=1e-4,
+        weight_decay=1e-5,
+        freeze_encoder_epochs=5,
+        epochs=50,
+        weight_c1=0.3,
+        weight_c2=0.7,
+    ):
         super().__init__()
         self.save_hyperparameters()
 
@@ -492,7 +590,9 @@ class MultitaskModule(L.LightningModule):
         nrmse_c2 = rmse_c2 / torch.std(all_targets_c2)
 
         # Overall score (competition metric)
-        overall_score = self.hparams.weight_c1 * nrmse_c1 + self.hparams.weight_c2 * nrmse_c2
+        overall_score = (
+            self.hparams.weight_c1 * nrmse_c1 + self.hparams.weight_c2 * nrmse_c2
+        )
 
         # Log
         self.log("val_nrmse_c1", nrmse_c1, prog_bar=False)
@@ -521,10 +621,11 @@ class MultitaskModule(L.LightningModule):
         )
         return [optimizer], [scheduler]
 
+
 # %% Setup callbacks and logger
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("SETUP TRAINING")
-print("="*60)
+print("=" * 60)
 
 checkpoint_callback = ModelCheckpoint(
     dirpath=OUTPUT_DIR / "checkpoints",
@@ -582,7 +683,7 @@ print(f"  Total parameters: {sum(p.numel() for p in model.parameters()):,}")
 trainer = L.Trainer(
     max_epochs=EPOCHS,
     accelerator="auto",  # Auto-detect best available hardware
-    devices=1,           # Use single device
+    devices=1,  # Use single device
     callbacks=[checkpoint_callback, early_stop_callback],
     logger=wandb_logger,
     gradient_clip_val=1.0,
@@ -597,12 +698,12 @@ print(f"  Freeze encoder: {FREEZE_ENCODER_EPOCHS} epochs")
 print(f"  Accelerator: auto-detected ({trainer.accelerator.__class__.__name__})")
 
 # %% Train model
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("TRAINING")
-print("="*60)
+print("=" * 60)
 print("NOTE: Encoder is frozen for first 5 epochs (only heads trained)")
 print("      Encoder unfreezes at epoch 5 for end-to-end fine-tuning")
-print("="*60 + "\n")
+print("=" * 60 + "\n")
 
 trainer.fit(model, datamodule)
 
@@ -611,9 +712,9 @@ print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
 print(f"Best val overall score: {checkpoint_callback.best_model_score:.6f}")
 
 # %% Save weights for submission
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("SAVING FOR SUBMISSION")
-print("="*60)
+print("=" * 60)
 
 # Load best checkpoint
 best_model = MultitaskModule.load_from_checkpoint(checkpoint_callback.best_model_path)
@@ -645,23 +746,29 @@ weights_c1_path = OUTPUT_DIR / "weights_challenge_1.pt"
 weights_c2_path = OUTPUT_DIR / "weights_challenge_2.pt"
 
 # Save as dict with encoder + head
-torch.save({
-    'encoder': best_model.encoder.state_dict(),
-    'head': best_model.head_c1.state_dict(),
-}, weights_c1_path)
+torch.save(
+    {
+        "encoder": best_model.encoder.state_dict(),
+        "head": best_model.head_c1.state_dict(),
+    },
+    weights_c1_path,
+)
 
-torch.save({
-    'encoder': best_model.encoder.state_dict(),
-    'head': best_model.head_c2.state_dict(),
-}, weights_c2_path)
+torch.save(
+    {
+        "encoder": best_model.encoder.state_dict(),
+        "head": best_model.head_c2.state_dict(),
+    },
+    weights_c2_path,
+)
 
 print(f"Combined weights C1: {weights_c1_path}")
 print(f"Combined weights C2: {weights_c2_path}")
 
 # %% Summary
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("SUMMARY")
-print("="*60)
+print("=" * 60)
 print(f"Experiment: Multitask (Shared Encoder + Dual Heads)")
 print(f"Data: {len(RELEASES)} releases, {'mini' if USE_MINI else 'full'} dataset")
 print(f"C1 training windows: {len(c1_train_set)}")
@@ -674,6 +781,6 @@ print(f"  - {encoder_path} (encoder only)")
 print(f"  - {head_c1_path} (C1 head only)")
 print(f"  - {head_c2_path} (C2 head only)")
 print(f"Checkpoints: {OUTPUT_DIR / 'checkpoints'}")
-print("="*60)
+print("=" * 60)
 print("\nNOTE: submission.py needs to be updated to load encoder + head architecture")
 print("      See OUTPUT_DIR for saved model components")

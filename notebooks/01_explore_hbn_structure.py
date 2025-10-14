@@ -32,8 +32,8 @@ import json
 
 # %%
 import os
-from pathlib import Path
 import warnings
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import mne
@@ -44,10 +44,12 @@ from dotenv import load_dotenv
 from eegdash import EEGChallengeDataset
 
 # Suppress EEGChallengeDataset warning
-warnings.filterwarnings("ignore", category=UserWarning, module="eegdash.dataset.dataset")
+warnings.filterwarnings(
+    "ignore", category=UserWarning, module="eegdash.dataset.dataset"
+)
 
 load_dotenv()
-DATA_DIR = Path(os.getenv("DATA_DIR", "data/full"))
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 
 # Set plotting style
 sns.set_style("whitegrid")

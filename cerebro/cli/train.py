@@ -33,13 +33,15 @@ import torch
 from lightning.pytorch.cli import LightningCLI
 
 # Enable Tensor Cores on RTX 4090 for faster matmul operations
-torch.set_float32_matmul_precision('high')  # Trades minimal precision for 30-50% speedup
+torch.set_float32_matmul_precision(
+    "high"
+)  # Trades minimal precision for 30-50% speedup
 
 # Import modules to register with CLI
 from cerebro.data.challenge1 import Challenge1DataModule
 from cerebro.models.challenge1 import Challenge1Module
 from cerebro.utils.logging import setup_logging
-from cerebro.utils.tuning import run_lr_finder, run_batch_size_finder
+from cerebro.utils.tuning import run_batch_size_finder, run_lr_finder
 
 logger = logging.getLogger(__name__)
 
@@ -85,12 +87,15 @@ class CerebroCLI(LightningCLI):
             for callback in trainer_cfg["callbacks"]:
                 class_path = callback.get("class_path", "")
                 if "ModelCheckpoint" in class_path:
-                    if hasattr(callback, "init_args") and "dirpath" in callback.init_args:
+                    if (
+                        hasattr(callback, "init_args")
+                        and "dirpath" in callback.init_args
+                    ):
                         base_dir = callback.init_args["dirpath"]
                         # Replace outputs/challenge1 with outputs/challenge1/TIMESTAMP
                         callback.init_args["dirpath"] = base_dir.replace(
                             "outputs/challenge1",
-                            f"outputs/challenge1/{self.run_timestamp}"
+                            f"outputs/challenge1/{self.run_timestamp}",
                         )
 
     def add_arguments_to_parser(self, parser):
@@ -104,49 +109,43 @@ class CerebroCLI(LightningCLI):
             "--run_lr_finder",
             type=bool,
             default=False,
-            help="Run learning rate finder before training"
+            help="Run learning rate finder before training",
         )
         parser.add_argument(
             "--run_batch_size_finder",
             type=bool,
             default=False,
-            help="Run batch size finder before training"
+            help="Run batch size finder before training",
         )
         parser.add_argument(
-            "--lr_finder_min",
-            type=float,
-            default=1e-8,
-            help="Minimum LR for finder"
+            "--lr_finder_min", type=float, default=1e-8, help="Minimum LR for finder"
         )
         parser.add_argument(
-            "--lr_finder_max",
-            type=float,
-            default=1e-1,
-            help="Maximum LR for finder"
+            "--lr_finder_max", type=float, default=1e-1, help="Maximum LR for finder"
         )
         parser.add_argument(
             "--lr_finder_num_training",
             type=int,
             default=200,
-            help="Number of training steps for LR finder"
+            help="Number of training steps for LR finder",
         )
         parser.add_argument(
             "--bs_finder_mode",
             type=str,
             default="power",
-            help="Batch size finder mode (power or binsearch)"
+            help="Batch size finder mode (power or binsearch)",
         )
         parser.add_argument(
             "--bs_finder_init_val",
             type=int,
             default=32,
-            help="Initial batch size for finder"
+            help="Initial batch size for finder",
         )
         parser.add_argument(
             "--bs_finder_max_trials",
             type=int,
             default=6,
-            help="Maximum trials for batch size finder"
+            help="Maximum trials for batch size finder",
         )
 
     def before_fit(self):
@@ -167,7 +166,10 @@ class CerebroCLI(LightningCLI):
     def _setup_logging(self):
         """Setup Rich logging to console and file."""
         # Get output directory from trainer logger
-        if hasattr(self.trainer.logger, "save_dir") and self.trainer.logger.save_dir is not None:
+        if (
+            hasattr(self.trainer.logger, "save_dir")
+            and self.trainer.logger.save_dir is not None
+        ):
             log_dir = Path(self.trainer.logger.save_dir)
         else:
             # Fallback to outputs directory
@@ -215,35 +217,37 @@ class CerebroCLI(LightningCLI):
             "num_releases": len(data_hparams.releases),
             "use_mini": data_hparams.use_mini,
             "excluded_subjects": data_hparams.excluded_subjects,
-
             # Windowing parameters
             "epoch_len_s": data_hparams.epoch_len_s,
             "sfreq": data_hparams.sfreq,
             "anchor": data_hparams.anchor,
             "shift_after_stim": data_hparams.shift_after_stim,
             "window_len": data_hparams.window_len,
-
             # Training parameters
             "batch_size": data_hparams.batch_size,
             "epochs": self.trainer.max_epochs,
             "lr": model_hparams.lr,
             "weight_decay": model_hparams.weight_decay,
             "precision": str(self.trainer.precision),
-
             # Hyperparameter tuning switches
             "run_lr_finder": self.config["fit"].get("run_lr_finder", False),
-            "run_batch_size_finder": self.config["fit"].get("run_batch_size_finder", False),
-
+            "run_batch_size_finder": self.config["fit"].get(
+                "run_batch_size_finder", False
+            ),
             # Splits
             "val_frac": data_hparams.val_frac,
             "test_frac": data_hparams.test_frac,
             "seed": data_hparams.seed,
-
             # Dataset sizes (will be populated after setup)
-            "num_train_windows": len(self.datamodule.train_set) if self.datamodule.train_set else 0,
-            "num_val_windows": len(self.datamodule.val_set) if self.datamodule.val_set else 0,
-            "num_test_windows": len(self.datamodule.test_set) if self.datamodule.test_set else 0,
-
+            "num_train_windows": (
+                len(self.datamodule.train_set) if self.datamodule.train_set else 0
+            ),
+            "num_val_windows": (
+                len(self.datamodule.val_set) if self.datamodule.val_set else 0
+            ),
+            "num_test_windows": (
+                len(self.datamodule.test_set) if self.datamodule.test_set else 0
+            ),
             # Model architecture
             "model_class": model_hparams.model_class,  # Architecture choice (EEGNeX, SignalJEPA_PreLocal, etc.)
             "model_kwargs": model_hparams.model_kwargs,  # Model-specific hyperparameters
@@ -255,11 +259,15 @@ class CerebroCLI(LightningCLI):
 
         # Upload to wandb (only if experiment is initialized)
         try:
-            if hasattr(wandb_logger.experiment, 'config') and hasattr(wandb_logger.experiment.config, 'update'):
+            if hasattr(wandb_logger.experiment, "config") and hasattr(
+                wandb_logger.experiment.config, "update"
+            ):
                 wandb_logger.experiment.config.update(config_dict)
                 logger.info("[green]Configuration uploaded to wandb[/green]")
             else:
-                logger.info("[yellow]Wandb config upload skipped (offline/fast_dev_run mode)[/yellow]")
+                logger.info(
+                    "[yellow]Wandb config upload skipped (offline/fast_dev_run mode)[/yellow]"
+                )
         except Exception as e:
             logger.warning(f"[yellow]Could not upload config to wandb: {e}[/yellow]")
 
@@ -293,11 +301,13 @@ class CerebroCLI(LightningCLI):
 
         # Log to wandb
         if wandb_logger is not None:
-            wandb_logger.experiment.config.update({
-                "lr_finder_enabled": True,
-                "lr_original": self.config["fit"]["model"]["lr"],
-                "lr_suggested": suggested_lr,
-            })
+            wandb_logger.experiment.config.update(
+                {
+                    "lr_finder_enabled": True,
+                    "lr_original": self.config["fit"]["model"]["lr"],
+                    "lr_suggested": suggested_lr,
+                }
+            )
 
     def _run_batch_size_finder(self):
         """Run batch size finder."""
@@ -321,11 +331,13 @@ class CerebroCLI(LightningCLI):
                 break
 
         if wandb_logger is not None:
-            wandb_logger.experiment.config.update({
-                "batch_size_finder_enabled": True,
-                "batch_size_original": original_bs,
-                "batch_size_optimal": optimal_bs,
-            })
+            wandb_logger.experiment.config.update(
+                {
+                    "batch_size_finder_enabled": True,
+                    "batch_size_original": original_bs,
+                    "batch_size_optimal": optimal_bs,
+                }
+            )
 
 
 def cli_main():

@@ -5,11 +5,12 @@ contrastive learning objectives.
 """
 
 from typing import Literal, Optional
+
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
 from braindecode.datasets import BaseConcatDataset
+from torch.utils.data import Dataset
 
 
 class ContrastivePairDataset(Dataset):
@@ -46,8 +47,10 @@ class ContrastivePairDataset(Dataset):
     def __init__(
         self,
         windows_ds: BaseConcatDataset,
-        pos_strategy: Literal['same_movie_time'] = 'same_movie_time',
-        neg_strategy: Literal['diff_movie_mixed', 'diff_movie_same_subj', 'diff_movie_diff_subj'] = 'diff_movie_mixed',
+        pos_strategy: Literal["same_movie_time"] = "same_movie_time",
+        neg_strategy: Literal[
+            "diff_movie_mixed", "diff_movie_same_subj", "diff_movie_diff_subj"
+        ] = "diff_movie_mixed",
         return_triplets: bool = True,
         random_state: Optional[int] = None,
     ):
@@ -61,7 +64,7 @@ class ContrastivePairDataset(Dataset):
         self.metadata = windows_ds.get_metadata().reset_index(drop=True)
 
         # Validate required columns
-        required_cols = ['movie_id', 'time_bin', 'subject_id']
+        required_cols = ["movie_id", "time_bin", "subject_id"]
         missing = [c for c in required_cols if c not in self.metadata.columns]
         if missing:
             raise ValueError(f"Metadata missing required columns: {missing}")
@@ -71,15 +74,15 @@ class ContrastivePairDataset(Dataset):
 
         # Precompute movie-wise indices for fast negative sampling
         self.movie_indices = {
-            movie: self.metadata[self.metadata['movie_id'] == movie].index.tolist()
-            for movie in self.metadata['movie_id'].unique()
+            movie: self.metadata[self.metadata["movie_id"] == movie].index.tolist()
+            for movie in self.metadata["movie_id"].unique()
         }
 
     def _build_positive_groups(self):
         """Build lookup table for positive pair sampling."""
         # Group by (movie, time_bin) and get indices where multiple subjects exist
-        grouped = self.metadata.groupby(['movie_id', 'time_bin']).apply(
-            lambda g: g.index.tolist() if g['subject_id'].nunique() > 1 else []
+        grouped = self.metadata.groupby(["movie_id", "time_bin"]).apply(
+            lambda g: g.index.tolist() if g["subject_id"].nunique() > 1 else []
         )
 
         # Filter out empty groups
@@ -121,12 +124,13 @@ class ContrastivePairDataset(Dataset):
         candidate_indices = self.pos_pair_groups[group_key]
 
         # Get anchor subject
-        anchor_subject = self.metadata.loc[anchor_idx, 'subject_id']
+        anchor_subject = self.metadata.loc[anchor_idx, "subject_id"]
 
         # Filter to different subjects
         different_subject_indices = [
-            idx for idx in candidate_indices
-            if self.metadata.loc[idx, 'subject_id'] != anchor_subject
+            idx
+            for idx in candidate_indices
+            if self.metadata.loc[idx, "subject_id"] != anchor_subject
         ]
 
         if len(different_subject_indices) == 0:
@@ -150,8 +154,8 @@ class ContrastivePairDataset(Dataset):
         int
             Index of negative window (different movie).
         """
-        anchor_movie = self.metadata.loc[anchor_idx, 'movie_id']
-        anchor_subject = self.metadata.loc[anchor_idx, 'subject_id']
+        anchor_movie = self.metadata.loc[anchor_idx, "movie_id"]
+        anchor_subject = self.metadata.loc[anchor_idx, "subject_id"]
 
         # Get all movies except anchor's movie
         other_movies = [m for m in self.movie_indices.keys() if m != anchor_movie]
@@ -164,21 +168,23 @@ class ContrastivePairDataset(Dataset):
         neg_candidates = self.movie_indices[neg_movie]
 
         # Apply subject constraint based on strategy
-        if self.neg_strategy == 'diff_movie_same_subj':
+        if self.neg_strategy == "diff_movie_same_subj":
             # Filter to same subject
             neg_candidates = [
-                idx for idx in neg_candidates
-                if self.metadata.loc[idx, 'subject_id'] == anchor_subject
+                idx
+                for idx in neg_candidates
+                if self.metadata.loc[idx, "subject_id"] == anchor_subject
             ]
             if len(neg_candidates) == 0:
                 # Fallback: if subject didn't watch this movie, use any
                 neg_candidates = self.movie_indices[neg_movie]
 
-        elif self.neg_strategy == 'diff_movie_diff_subj':
+        elif self.neg_strategy == "diff_movie_diff_subj":
             # Filter to different subject
             neg_candidates = [
-                idx for idx in neg_candidates
-                if self.metadata.loc[idx, 'subject_id'] != anchor_subject
+                idx
+                for idx in neg_candidates
+                if self.metadata.loc[idx, "subject_id"] != anchor_subject
             ]
             if len(neg_candidates) == 0:
                 # Fallback: use any
@@ -254,11 +260,11 @@ class ContrastivePairDataset(Dataset):
             - pos_groups: Number of (movie, time_bin) groups with 2+ subjects
         """
         return {
-            'total_windows': len(self.metadata),
-            'valid_anchors': len(self.window_to_group),
-            'movies': self.metadata['movie_id'].nunique(),
-            'subjects': self.metadata['subject_id'].nunique(),
-            'pos_groups': len(self.pos_pair_groups),
+            "total_windows": len(self.metadata),
+            "valid_anchors": len(self.window_to_group),
+            "movies": self.metadata["movie_id"].nunique(),
+            "subjects": self.metadata["subject_id"].nunique(),
+            "pos_groups": len(self.pos_pair_groups),
         }
 
 

@@ -104,13 +104,15 @@ def analyze_failure_modes(
 
     # 1. Top-K worst predictions
     worst_indices = np.argsort(errors)[-top_k:][::-1]
-    top_k_df = pd.DataFrame({
-        "sample_idx": worst_indices,
-        "prediction": predictions[worst_indices],
-        "target": targets[worst_indices],
-        "error": errors[worst_indices],
-        "squared_error": squared_errors[worst_indices],
-    })
+    top_k_df = pd.DataFrame(
+        {
+            "sample_idx": worst_indices,
+            "prediction": predictions[worst_indices],
+            "target": targets[worst_indices],
+            "error": errors[worst_indices],
+            "squared_error": squared_errors[worst_indices],
+        }
+    )
 
     logger.info(f"\n[bold]Top 10 worst predictions:[/bold]")
     logger.info(top_k_df.head(10).to_string())
@@ -151,7 +153,7 @@ def analyze_failure_modes(
             for m in all_metadata:
                 if isinstance(m, dict):
                     metadata_list.append(pd.DataFrame([m]))
-                elif hasattr(m, '__iter__'):
+                elif hasattr(m, "__iter__"):
                     metadata_list.append(pd.DataFrame(m))
 
             if metadata_list:
@@ -163,14 +165,18 @@ def analyze_failure_modes(
 
                     for key in metadata_keys:
                         if key in metadata_df.columns:
-                            error_by_metadata[key] = metadata_df.groupby(key)["error"].agg(
-                                ["mean", "std", "count"]
-                            ).sort_values("mean", ascending=False)
+                            error_by_metadata[key] = (
+                                metadata_df.groupby(key)["error"]
+                                .agg(["mean", "std", "count"])
+                                .sort_values("mean", ascending=False)
+                            )
 
                             logger.info(f"\n[bold]Error by {key}:[/bold]")
                             logger.info(error_by_metadata[key].head(10).to_string())
                 else:
-                    logger.warning(f"⚠️  Metadata length ({len(metadata_df)}) doesn't match errors ({len(errors)}). Skipping metadata analysis.")
+                    logger.warning(
+                        f"⚠️  Metadata length ({len(metadata_df)}) doesn't match errors ({len(errors)}). Skipping metadata analysis."
+                    )
         except Exception as e:
             logger.warning(f"⚠️  Could not process metadata: {e}")
 
@@ -220,13 +226,17 @@ def analyze_spatial_error_patterns(
     # Per-channel correlation with error
     channel_error_corr = np.zeros(n_channels)
     for ch in range(n_channels):
-        ch_features = np.abs(inputs[:, ch, :]).mean(axis=1)  # (N,) - mean amplitude per sample
+        ch_features = np.abs(inputs[:, ch, :]).mean(
+            axis=1
+        )  # (N,) - mean amplitude per sample
         channel_error_corr[ch], _ = stats.pearsonr(ch_features, errors)
 
     return {
         "channel_amplitudes": channel_amps,
         "channel_error_correlation": channel_error_corr,
-        "top_error_correlated_channels": np.argsort(np.abs(channel_error_corr))[-10:][::-1],
+        "top_error_correlated_channels": np.argsort(np.abs(channel_error_corr))[-10:][
+            ::-1
+        ],
     }
 
 
@@ -251,7 +261,9 @@ def analyze_temporal_error_patterns(
     # Per-timepoint correlation with error
     time_error_corr = np.zeros(n_times)
     for t in range(n_times):
-        t_features = np.abs(inputs[:, :, t]).mean(axis=1)  # (N,) - mean amplitude per sample
+        t_features = np.abs(inputs[:, :, t]).mean(
+            axis=1
+        )  # (N,) - mean amplitude per sample
         time_error_corr[t], _ = stats.pearsonr(t_features, errors)
 
     return {
@@ -290,33 +302,55 @@ def plot_failure_modes(
 
     # Histogram
     ax = axes[0]
-    ax.hist(errors, bins=50, color='#2E86AB', alpha=0.7, edgecolor='black')
-    ax.axvline(errors.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {errors.mean():.3f}')
-    ax.axvline(np.median(errors), color='orange', linestyle='--', linewidth=2, label=f'Median: {np.median(errors):.3f}')
-    ax.set_xlabel('Absolute Error', fontsize=12)
-    ax.set_ylabel('Count', fontsize=12)
-    ax.set_title('Error Distribution', fontsize=14, fontweight='bold')
+    ax.hist(errors, bins=50, color="#2E86AB", alpha=0.7, edgecolor="black")
+    ax.axvline(
+        errors.mean(),
+        color="red",
+        linestyle="--",
+        linewidth=2,
+        label=f"Mean: {errors.mean():.3f}",
+    )
+    ax.axvline(
+        np.median(errors),
+        color="orange",
+        linestyle="--",
+        linewidth=2,
+        label=f"Median: {np.median(errors):.3f}",
+    )
+    ax.set_xlabel("Absolute Error", fontsize=12)
+    ax.set_ylabel("Count", fontsize=12)
+    ax.set_title("Error Distribution", fontsize=14, fontweight="bold")
     ax.legend()
     ax.grid(alpha=0.3)
 
     # Q-Q plot
     ax = axes[1]
     stats.probplot(errors, dist="norm", plot=ax)
-    ax.set_title('Q-Q Plot: Errors vs Normal Distribution', fontsize=14, fontweight='bold')
+    ax.set_title(
+        "Q-Q Plot: Errors vs Normal Distribution", fontsize=14, fontweight="bold"
+    )
     ax.grid(alpha=0.3)
 
     # Prediction vs Target scatter
     ax = axes[2]
-    ax.scatter(targets, predictions, alpha=0.3, s=10, color='#2E86AB')
-    ax.plot([targets.min(), targets.max()], [targets.min(), targets.max()], 'r--', linewidth=2, label='Perfect prediction')
-    ax.set_xlabel('Target', fontsize=12)
-    ax.set_ylabel('Prediction', fontsize=12)
-    ax.set_title('Prediction vs Target', fontsize=14, fontweight='bold')
+    ax.scatter(targets, predictions, alpha=0.3, s=10, color="#2E86AB")
+    ax.plot(
+        [targets.min(), targets.max()],
+        [targets.min(), targets.max()],
+        "r--",
+        linewidth=2,
+        label="Perfect prediction",
+    )
+    ax.set_xlabel("Target", fontsize=12)
+    ax.set_ylabel("Prediction", fontsize=12)
+    ax.set_title("Prediction vs Target", fontsize=14, fontweight="bold")
     ax.legend()
     ax.grid(alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_dir / "failure_error_distribution.png", dpi=150, bbox_inches='tight')
+    plt.savefig(
+        output_dir / "failure_error_distribution.png", dpi=150, bbox_inches="tight"
+    )
     plt.close()
 
     # Plot 2: Spatial error patterns
@@ -324,30 +358,38 @@ def plot_failure_modes(
 
     # Channel amplitudes
     ax = axes[0]
-    ax.bar(range(len(spatial_patterns["channel_amplitudes"])),
-           spatial_patterns["channel_amplitudes"],
-           color='#2E86AB', alpha=0.7, edgecolor='black')
-    ax.set_xlabel('Channel Index', fontsize=12)
-    ax.set_ylabel('Mean Amplitude', fontsize=12)
-    ax.set_title('Per-Channel Mean Amplitude', fontsize=14, fontweight='bold')
+    ax.bar(
+        range(len(spatial_patterns["channel_amplitudes"])),
+        spatial_patterns["channel_amplitudes"],
+        color="#2E86AB",
+        alpha=0.7,
+        edgecolor="black",
+    )
+    ax.set_xlabel("Channel Index", fontsize=12)
+    ax.set_ylabel("Mean Amplitude", fontsize=12)
+    ax.set_title("Per-Channel Mean Amplitude", fontsize=14, fontweight="bold")
     ax.grid(alpha=0.3)
 
     # Channel error correlation
     ax = axes[1]
     corr = spatial_patterns["channel_error_correlation"]
-    colors = ['red' if abs(c) > 0.1 else '#2E86AB' for c in corr]
-    ax.bar(range(len(corr)), corr, color=colors, alpha=0.7, edgecolor='black')
-    ax.axhline(0, color='black', linewidth=1)
-    ax.axhline(0.1, color='red', linestyle='--', linewidth=1, label='|r| = 0.1 threshold')
-    ax.axhline(-0.1, color='red', linestyle='--', linewidth=1)
-    ax.set_xlabel('Channel Index', fontsize=12)
-    ax.set_ylabel('Correlation with Error', fontsize=12)
-    ax.set_title('Channel-Error Correlation', fontsize=14, fontweight='bold')
+    colors = ["red" if abs(c) > 0.1 else "#2E86AB" for c in corr]
+    ax.bar(range(len(corr)), corr, color=colors, alpha=0.7, edgecolor="black")
+    ax.axhline(0, color="black", linewidth=1)
+    ax.axhline(
+        0.1, color="red", linestyle="--", linewidth=1, label="|r| = 0.1 threshold"
+    )
+    ax.axhline(-0.1, color="red", linestyle="--", linewidth=1)
+    ax.set_xlabel("Channel Index", fontsize=12)
+    ax.set_ylabel("Correlation with Error", fontsize=12)
+    ax.set_title("Channel-Error Correlation", fontsize=14, fontweight="bold")
     ax.legend()
     ax.grid(alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_dir / "failure_spatial_patterns.png", dpi=150, bbox_inches='tight')
+    plt.savefig(
+        output_dir / "failure_spatial_patterns.png", dpi=150, bbox_inches="tight"
+    )
     plt.close()
 
     # Plot 3: Temporal error patterns
@@ -355,27 +397,31 @@ def plot_failure_modes(
 
     # Timepoint amplitudes
     ax = axes[0]
-    ax.plot(temporal_patterns["time_amplitudes"], color='#2E86AB', linewidth=2)
-    ax.set_xlabel('Time Sample', fontsize=12)
-    ax.set_ylabel('Mean Amplitude', fontsize=12)
-    ax.set_title('Temporal Mean Amplitude', fontsize=14, fontweight='bold')
+    ax.plot(temporal_patterns["time_amplitudes"], color="#2E86AB", linewidth=2)
+    ax.set_xlabel("Time Sample", fontsize=12)
+    ax.set_ylabel("Mean Amplitude", fontsize=12)
+    ax.set_title("Temporal Mean Amplitude", fontsize=14, fontweight="bold")
     ax.grid(alpha=0.3)
 
     # Timepoint error correlation
     ax = axes[1]
     corr = temporal_patterns["time_error_correlation"]
-    ax.plot(corr, color='#2E86AB', linewidth=2)
-    ax.axhline(0, color='black', linewidth=1)
-    ax.axhline(0.1, color='red', linestyle='--', linewidth=1, label='|r| = 0.1 threshold')
-    ax.axhline(-0.1, color='red', linestyle='--', linewidth=1)
-    ax.set_xlabel('Time Sample', fontsize=12)
-    ax.set_ylabel('Correlation with Error', fontsize=12)
-    ax.set_title('Temporal-Error Correlation', fontsize=14, fontweight='bold')
+    ax.plot(corr, color="#2E86AB", linewidth=2)
+    ax.axhline(0, color="black", linewidth=1)
+    ax.axhline(
+        0.1, color="red", linestyle="--", linewidth=1, label="|r| = 0.1 threshold"
+    )
+    ax.axhline(-0.1, color="red", linestyle="--", linewidth=1)
+    ax.set_xlabel("Time Sample", fontsize=12)
+    ax.set_ylabel("Correlation with Error", fontsize=12)
+    ax.set_title("Temporal-Error Correlation", fontsize=14, fontweight="bold")
     ax.legend()
     ax.grid(alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_dir / "failure_temporal_patterns.png", dpi=150, bbox_inches='tight')
+    plt.savefig(
+        output_dir / "failure_temporal_patterns.png", dpi=150, bbox_inches="tight"
+    )
     plt.close()
 
     # Plot 4: Top-K worst predictions
@@ -384,18 +430,34 @@ def plot_failure_modes(
     x = np.arange(len(top_20))
     width = 0.35
 
-    ax.bar(x - width/2, top_20["prediction"], width, label='Prediction', color='#2E86AB', alpha=0.7)
-    ax.bar(x + width/2, top_20["target"], width, label='Target', color='#A23B72', alpha=0.7)
-    ax.set_xlabel('Sample Rank (worst → best)', fontsize=12)
-    ax.set_ylabel('Value', fontsize=12)
-    ax.set_title('Top 20 Worst Predictions', fontsize=14, fontweight='bold')
+    ax.bar(
+        x - width / 2,
+        top_20["prediction"],
+        width,
+        label="Prediction",
+        color="#2E86AB",
+        alpha=0.7,
+    )
+    ax.bar(
+        x + width / 2,
+        top_20["target"],
+        width,
+        label="Target",
+        color="#A23B72",
+        alpha=0.7,
+    )
+    ax.set_xlabel("Sample Rank (worst → best)", fontsize=12)
+    ax.set_ylabel("Value", fontsize=12)
+    ax.set_title("Top 20 Worst Predictions", fontsize=14, fontweight="bold")
     ax.set_xticks(x)
     ax.set_xticklabels(range(1, 21))
     ax.legend()
-    ax.grid(alpha=0.3, axis='y')
+    ax.grid(alpha=0.3, axis="y")
 
     plt.tight_layout()
-    plt.savefig(output_dir / "failure_top20_predictions.png", dpi=150, bbox_inches='tight')
+    plt.savefig(
+        output_dir / "failure_top20_predictions.png", dpi=150, bbox_inches="tight"
+    )
     plt.close()
 
     # Plot 5: Error by metadata (if available)
@@ -407,16 +469,24 @@ def plot_failure_modes(
 
         for ax, (key, stats_df) in zip(axes, error_by_metadata.items()):
             top_10 = stats_df.head(10)
-            ax.barh(range(len(top_10)), top_10["mean"], xerr=top_10["std"],
-                   color='#2E86AB', alpha=0.7, edgecolor='black')
+            ax.barh(
+                range(len(top_10)),
+                top_10["mean"],
+                xerr=top_10["std"],
+                color="#2E86AB",
+                alpha=0.7,
+                edgecolor="black",
+            )
             ax.set_yticks(range(len(top_10)))
             ax.set_yticklabels([str(idx)[:20] for idx in top_10.index])
-            ax.set_xlabel('Mean Error', fontsize=12)
-            ax.set_title(f'Top 10 by {key}', fontsize=14, fontweight='bold')
-            ax.grid(alpha=0.3, axis='x')
+            ax.set_xlabel("Mean Error", fontsize=12)
+            ax.set_title(f"Top 10 by {key}", fontsize=14, fontweight="bold")
+            ax.grid(alpha=0.3, axis="x")
 
         plt.tight_layout()
-        plt.savefig(output_dir / "failure_error_by_metadata.png", dpi=150, bbox_inches='tight')
+        plt.savefig(
+            output_dir / "failure_error_by_metadata.png", dpi=150, bbox_inches="tight"
+        )
         plt.close()
 
     logger.info(f"Saved 5 failure mode plots to {output_dir}")

@@ -7,7 +7,22 @@ which spatiotemporal regions of the EEG signal the model attends to.
 import numpy as np
 import torch
 from captum.attr import IntegratedGradients
+from torch import nn
 from torch.utils.data import DataLoader
+
+
+class SqueezeOutputWrapper(nn.Module):
+    """Wraps a model to squeeze (batch, 1) outputs to (batch) for Captum."""
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        out = self.model(x)
+        # Squeeze last dim if shape is (batch, 1)
+        if out.dim() == 2 and out.shape[-1] == 1:
+            return out.squeeze(-1)
+        return out
 
 
 def compute_integrated_gradients(
@@ -48,9 +63,14 @@ def compute_integrated_gradients(
             - peak_time_sec: float - peak time in seconds post-stimulus
     """
     model.eval()
+    model = model.to(device)
+
+    # Wrap model to squeeze outputs for Captum
+    wrapped_model = SqueezeOutputWrapper(model).to(device)
+    wrapped_model.eval()
 
     # Initialize Integrated Gradients
-    ig = IntegratedGradients(model)
+    ig = IntegratedGradients(wrapped_model)
 
     # Collect samples
     samples = []
@@ -96,11 +116,11 @@ def compute_integrated_gradients(
         batch_baseline = baseline[i:end_idx]
 
         # Compute IG for this batch
+        # For scalar regression outputs, don't specify target - let Captum auto-detect
         batch_attr = ig.attribute(
             batch_samples,
             baselines=batch_baseline,
             n_steps=n_steps,
-            internal_batch_size=8,  # Further batch internally
         )
 
         attributions_list.append(batch_attr.detach().cpu())
@@ -111,7 +131,9 @@ def compute_integrated_gradients(
             predictions_list.append(batch_pred.cpu())
 
     # Concatenate results
-    attributions = torch.cat(attributions_list, dim=0).numpy()  # (num_samples, 129, 200)
+    attributions = torch.cat(
+        attributions_list, dim=0
+    ).numpy()  # (num_samples, 129, 200)
     predictions = torch.cat(predictions_list, dim=0).numpy().squeeze()  # (num_samples,)
     targets_np = targets.cpu().numpy().squeeze()  # (num_samples,)
 
@@ -145,7 +167,9 @@ def compute_integrated_gradients(
     }
 
 
-def interpret_temporal_pattern(peak_time_sec: float, temporal_profile: np.ndarray) -> str:
+def interpret_temporal_pattern(
+    peak_time_sec: float, temporal_profile: np.ndarray
+) -> str:
     """Interprets temporal attribution pattern for neuroscience plausibility.
 
     Args:
@@ -216,7 +240,9 @@ def interpret_spatial_pattern(
     if parietal_count >= top_k // 2:
         interpretation += "✓ Model prioritizes parietal channels (expected for attention/decision tasks)."
     elif frontal_count >= top_k // 2:
-        interpretation += "⚠ Model prioritizes frontal channels (unusual for RT prediction)."
+        interpretation += (
+            "⚠ Model prioritizes frontal channels (unusual for RT prediction)."
+        )
     else:
         interpretation += "⚠ No clear spatial pattern detected. Model may not be learning spatial structure."
 

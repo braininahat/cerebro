@@ -7,6 +7,7 @@ logging across CLI and notebook environments.
 import logging
 import re
 from pathlib import Path
+
 from rich.console import Console
 from rich.logging import RichHandler
 
@@ -18,7 +19,7 @@ class PlainFormatter(logging.Formatter):
         # Create copy to avoid mutating original record
         record = logging.makeLogRecord(record.__dict__)
         # Strip Rich markup tags: [bold], [/bold], [green], etc.
-        record.msg = re.sub(r'\[/?[^\]]+\]', '', str(record.msg))
+        record.msg = re.sub(r"\[/?[^\]]+\]", "", str(record.msg))
         return super().format(record)
 
 
@@ -56,10 +57,7 @@ def setup_logging(
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Configure Rich handler for console
-    rich_handler = RichHandler(
-        rich_tracebacks=rich_tracebacks,
-        markup=rich_markup
-    )
+    rich_handler = RichHandler(rich_tracebacks=rich_tracebacks, markup=rich_markup)
 
     # Configure file handler with plain formatting
     file_handler = logging.FileHandler(log_file, mode=log_file_mode)

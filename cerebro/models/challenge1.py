@@ -74,21 +74,23 @@ class Challenge1Module(L.LightningModule):
         # Model instantiation (factory pattern)
         if model_class == "EEGNeX":
             from braindecode.models import EEGNeX
+
             self.model = EEGNeX(
                 n_chans=n_chans,
                 n_outputs=n_outputs,
                 n_times=n_times,
                 sfreq=sfreq,
-                **model_kwargs
+                **model_kwargs,
             )
         elif model_class == "SignalJEPA_PreLocal":
             from braindecode.models import SignalJEPA_PreLocal
+
             self.model = SignalJEPA_PreLocal(
                 n_chans=n_chans,
                 n_outputs=n_outputs,
                 n_times=n_times,
                 sfreq=sfreq,
-                **model_kwargs
+                **model_kwargs,
             )
         else:
             raise ValueError(

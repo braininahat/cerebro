@@ -3,15 +3,18 @@
 Tests IG and GradCAM diagnostics on a trained checkpoint.
 """
 
-import torch
 from pathlib import Path
-from cerebro.models.challenge1 import Challenge1Module
+
+import torch
+
 from cerebro.data.challenge1 import Challenge1DataModule
+from cerebro.models.challenge1 import Challenge1Module
 
 # Configuration
 CHECKPOINT_PATH = "outputs/challenge1/20251013_181025/checkpoints/challenge1-epoch=16-val_nrmse=1.0007.ckpt"
-DATA_DIR = Path("data/full")
+DATA_DIR = Path("data")
 NUM_SAMPLES = 100
+
 
 def main():
     print("=" * 60)
@@ -48,8 +51,8 @@ def main():
 
     from cerebro.diagnostics.captum_attributions import (
         compute_integrated_gradients,
-        interpret_temporal_pattern,
         interpret_spatial_pattern,
+        interpret_temporal_pattern,
     )
 
     print(f"Computing IG for {NUM_SAMPLES} samples...")
@@ -116,17 +119,14 @@ def main():
 
     print(f"\n🏆 Layer importance ranking:")
     sorted_layers = sorted(
-        gradcam_results["layer_importance"].items(),
-        key=lambda x: x[1],
-        reverse=True
+        gradcam_results["layer_importance"].items(), key=lambda x: x[1], reverse=True
     )
     for i, (layer_name, importance) in enumerate(sorted_layers[:5], 1):
         print(f"  {i}. {layer_name}: {importance:.6f}")
 
     print(f"\n🔍 Layer hierarchy interpretation:")
     hierarchy_interp = interpret_layer_hierarchy(
-        gradcam_results["layer_importance"],
-        gradcam_results["layer_shapes"]
+        gradcam_results["layer_importance"], gradcam_results["layer_shapes"]
     )
     print(hierarchy_interp)
 

@@ -107,9 +107,9 @@ model:
 
 # Data configuration: MINI DATASET
 data:
-  data_dir: ${oc.env:EEG2025_DATA_ROOT,data/mini}  # Mini dataset directory
+  data_dir: ${oc.env:EEG2025_DATA_ROOT,data}  # Single directory for both mini and full
   releases:
-    - R5  # Mini dataset uses R5 only
+    - R1  # Mini prototyping with R1 (NOT R5!)
   batch_size: 512
   num_workers: 8
   excluded_subjects:

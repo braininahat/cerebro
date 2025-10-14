@@ -23,44 +23,59 @@
 # - **Loss**: MSE vs MAE
 # - **Label**: rt_from_stimulus (per-trial) vs externalizing (per-subject)
 
-# %% Setup and imports
-from pathlib import Path
-import os
-import torch
-import warnings
-import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, TQDMProgressBar, RichModelSummary
-from lightning.pytorch.loggers import WandbLogger
-from torch.utils.data import DataLoader
-import wandb
-from braindecode.models import SignalJEPA_PreLocal
-from braindecode.datasets import BaseConcatDataset
-from braindecode.preprocessing import preprocess, Preprocessor, create_windows_from_events
-from eegdash.dataset import EEGChallengeDataset
-from eegdash.hbn.windows import (
-    annotate_trials_with_target,
-    add_aux_anchors,
-    add_extras_columns,
-    keep_only_recordings_with,
-)
-from sklearn.model_selection import train_test_split
-from sklearn.utils import check_random_state
-from joblib import Parallel, delayed
-from dotenv import load_dotenv
-import pickle
-from rich.console import Console
-from rich.logging import RichHandler
 import logging
+import os
+import pickle
+import warnings
 from datetime import datetime
 
+# %% Setup and imports
+from pathlib import Path
+
+import lightning as L
+import torch
+import wandb
+from braindecode.datasets import BaseConcatDataset
+from braindecode.models import SignalJEPA_PreLocal
+from braindecode.preprocessing import (
+    Preprocessor,
+    create_windows_from_events,
+    preprocess,
+)
+from dotenv import load_dotenv
+from eegdash.dataset import EEGChallengeDataset
+from eegdash.hbn.windows import (
+    add_aux_anchors,
+    add_extras_columns,
+    annotate_trials_with_target,
+    keep_only_recordings_with,
+)
+from joblib import Parallel, delayed
+from lightning.pytorch.callbacks import (
+    EarlyStopping,
+    ModelCheckpoint,
+    RichModelSummary,
+    TQDMProgressBar,
+)
+from lightning.pytorch.loggers import WandbLogger
+from rich.console import Console
+from rich.logging import RichHandler
+from sklearn.model_selection import train_test_split
+from sklearn.utils import check_random_state
+from torch.utils.data import DataLoader
+
 # Suppress EEGChallengeDataset warning
-warnings.filterwarnings("ignore", category=UserWarning, module="eegdash.dataset.dataset")
+warnings.filterwarnings(
+    "ignore", category=UserWarning, module="eegdash.dataset.dataset"
+)
 
 # Capture other warnings to log
 logging.captureWarnings(True)
 
 # Enable Tensor Cores on RTX 4090 for faster matmul operations
-torch.set_float32_matmul_precision('high')  # Trades minimal precision for 30-50% speedup
+torch.set_float32_matmul_precision(
+    "high"
+)  # Trades minimal precision for 30-50% speedup
 
 # Reproducibility
 L.seed_everything(42)
@@ -75,8 +90,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Load data paths from environment
 load_dotenv()
 DATA_ROOT = Path(os.getenv("EEG2025_DATA_ROOT", str(REPO_ROOT / "data"))).resolve()
-MINI_DIR = (DATA_ROOT / "mini").resolve()
-FULL_DIR = (DATA_ROOT / "full").resolve()
 
 # Load wandb config from environment
 WANDB_TEAM = os.getenv("WANDB_TEAM", "ubcse-eeg2025")
@@ -84,13 +97,31 @@ WANDB_PROJECT = os.getenv("WANDB_PROJECT", "eeg2025")
 
 # Data settings
 USE_MINI = False  # Set to True for quick testing
-DATA_DIR = MINI_DIR if USE_MINI else FULL_DIR
-RELEASES = ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]  # Always use full release list
+# Mini and full releases stored in same directory (mini releases have -mini suffix)
+RELEASES = [
+    "R1",
+    "R2",
+    "R3",
+    "R4",
+    "R6",
+    "R7",
+    "R8",
+    "R9",
+    "R10",
+    "R11",
+]  # Always use full release list
 
 # Excluded subjects (from startkit)
 EXCLUDED_SUBJECTS = [
-    "NDARWV769JM7", "NDARME789TD2", "NDARUA442ZVF", "NDARJP304NK1",
-    "NDARTY128YLU", "NDARDW550GU6", "NDARLD243KRE", "NDARUJ292JXV", "NDARBA381JGH"
+    "NDARWV769JM7",
+    "NDARME789TD2",
+    "NDARUA442ZVF",
+    "NDARJP304NK1",
+    "NDARTY128YLU",
+    "NDARDW550GU6",
+    "NDARLD243KRE",
+    "NDARUJ292JXV",
+    "NDARBA381JGH",
 ]
 
 # Windowing parameters
@@ -160,22 +191,23 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 # Setup logging to file and console
 log_file = LOG_DIR / f"train_{'mini' if USE_MINI else 'full'}.log"
 
+
 # Custom formatter to strip Rich markup from file logs
 class PlainFormatter(logging.Formatter):
     """Formatter that strips Rich markup tags for clean file output"""
+
     def format(self, record):
         # Create copy to avoid mutating original record
         record = logging.makeLogRecord(record.__dict__)
         # Strip Rich markup tags: [bold], [/bold], [green], etc.
         import re
-        record.msg = re.sub(r'\[/?[^\]]+\]', '', str(record.msg))
+
+        record.msg = re.sub(r"\[/?[^\]]+\]", "", str(record.msg))
         return super().format(record)
 
+
 # Configure logging with Rich handler for console + file handler
-rich_handler = RichHandler(
-    rich_tracebacks=RICH_TRACEBACKS,
-    markup=RICH_MARKUP
-)
+rich_handler = RichHandler(rich_tracebacks=RICH_TRACEBACKS, markup=RICH_MARKUP)
 
 file_handler = logging.FileHandler(log_file, mode=LOG_FILE_MODE)
 file_handler.setFormatter(PlainFormatter(LOG_FORMAT))
@@ -197,7 +229,7 @@ logger = logging.getLogger(LOGGER_NAME)
 # Log configuration
 logger.info(f"[bold green]Logging to:[/bold green] {log_file}")
 logger.info(f"\n[bold]Configuration:[/bold]")
-logger.info(f"  Data: {DATA_DIR}")
+logger.info(f"  Data: {DATA_ROOT}")
 logger.info(f"  Releases: {RELEASES}")
 logger.info(f"  Mini mode: {USE_MINI}")
 logger.info(f"  Epochs: {EPOCHS}")
@@ -212,18 +244,18 @@ cache_path = CACHE_DIR / cache_key
 
 # Try loading from cache first
 if cache_path.exists():
-    logger.info("\n" + "="*60)
+    logger.info("\n" + "=" * 60)
     logger.info("[bold cyan]LOADING FROM CACHE[/bold cyan]")
-    logger.info("="*60)
+    logger.info("=" * 60)
     logger.info(f"[green]✓[/green] Loading cached windows from: {cache_key}")
     with open(cache_path, "rb") as f:
         single_windows = pickle.load(f)
     logger.info(f"[green]✓[/green] Loaded {len(single_windows)} windows from cache")
 else:
     # Cache miss - run full pipeline
-    logger.info("\n" + "="*60)
+    logger.info("\n" + "=" * 60)
     logger.info("[bold cyan]LOADING DATA[/bold cyan]")
-    logger.info("="*60)
+    logger.info("=" * 60)
 
     # Load all releases
     all_datasets_list = []
@@ -232,10 +264,16 @@ else:
         dataset = EEGChallengeDataset(
             task="contrastChangeDetection",
             release=release,
-            cache_dir=DATA_DIR,
+            cache_dir=DATA_ROOT,
             mini=USE_MINI,
             description_fields=[
-                "subject", "session", "run", "task", "age", "sex", "p_factor",
+                "subject",
+                "session",
+                "run",
+                "task",
+                "age",
+                "sex",
+                "p_factor",
             ],
         )
         all_datasets_list.append(dataset)
@@ -252,9 +290,9 @@ else:
     logger.info("[green]Done loading raw data[/green]")
 
     # %% Preprocess: Annotate trials with target RT
-    logger.info("\n" + "="*60)
+    logger.info("\n" + "=" * 60)
     logger.info("[bold cyan]PREPROCESSING[/bold cyan]")
-    logger.info("="*60)
+    logger.info("=" * 60)
 
     # Apply preprocessing transformations
     transformation_offline = [
@@ -274,14 +312,18 @@ else:
 
     # Keep only recordings with stimulus anchors
     dataset_ccd = keep_only_recordings_with(ANCHOR, dataset_ccd)
-    logger.info(f"[bold]Recordings with stimulus anchors:[/bold] {len(dataset_ccd.datasets)}")
+    logger.info(
+        f"[bold]Recordings with stimulus anchors:[/bold] {len(dataset_ccd.datasets)}"
+    )
 
     # %% Create stimulus-locked windows
-    logger.info("\n" + "="*60)
+    logger.info("\n" + "=" * 60)
     logger.info("[bold cyan]CREATING WINDOWS[/bold cyan]")
-    logger.info("="*60)
+    logger.info("=" * 60)
 
-    logger.info(f"Window: [{SHIFT_AFTER_STIM}s, {SHIFT_AFTER_STIM + WINDOW_LEN}s] relative to stimulus")
+    logger.info(
+        f"Window: [{SHIFT_AFTER_STIM}s, {SHIFT_AFTER_STIM + WINDOW_LEN}s] relative to stimulus"
+    )
     logger.info(f"Window length: {WINDOW_LEN}s ({int(WINDOW_LEN * SFREQ)} samples)")
 
     # Create single-interval windows (stim-locked, long enough to include the response)
@@ -302,21 +344,32 @@ else:
         single_windows,
         dataset_ccd,
         desc=ANCHOR,
-        keys=("target", "rt_from_stimulus", "rt_from_trialstart",
-              "stimulus_onset", "response_onset", "correct", "response_type")
+        keys=(
+            "target",
+            "rt_from_stimulus",
+            "rt_from_trialstart",
+            "stimulus_onset",
+            "response_onset",
+            "correct",
+            "response_type",
+        ),
     )
 
     # Save to cache
     logger.info(f"[yellow]⚠[/yellow] Caching windows to: {cache_key}")
     with open(cache_path, "wb") as f:
         pickle.dump(single_windows, f)
-    logger.info(f"[yellow]⚠[/yellow] Delete cache if windowing params change: rm {cache_path}")
+    logger.info(
+        f"[yellow]⚠[/yellow] Delete cache if windowing params change: rm {cache_path}"
+    )
 
 # %% Inspect metadata
 metadata = single_windows.get_metadata()
 logger.info(f"\n[bold]Metadata columns:[/bold] {len(list(metadata.columns))} columns")
 logger.info(f"\n[bold]Sample metadata:[/bold]")
-logger.info(metadata[["subject", "target", "rt_from_stimulus", "correct"]].head().to_string())
+logger.info(
+    metadata[["subject", "target", "rt_from_stimulus", "correct"]].head().to_string()
+)
 
 # RT distribution statistics
 logger.info(f"\n[bold]Response Time Statistics:[/bold]")
@@ -326,9 +379,9 @@ logger.info(f"  Min: {metadata['target'].min():.4f}s")
 logger.info(f"  Max: {metadata['target'].max():.4f}s")
 
 # %% Split data at subject level
-logger.info("\n" + "="*60)
+logger.info("\n" + "=" * 60)
 logger.info("[bold cyan]SPLITTING DATA[/bold cyan]")
-logger.info("="*60)
+logger.info("=" * 60)
 
 subjects = metadata["subject"].unique()
 subjects = [s for s in subjects if s not in EXCLUDED_SUBJECTS]
@@ -339,7 +392,7 @@ train_subj, valid_test_subj = train_test_split(
     subjects,
     test_size=(VAL_FRAC + TEST_FRAC),
     random_state=check_random_state(SEED),
-    shuffle=True
+    shuffle=True,
 )
 
 # Split: val / test
@@ -347,7 +400,7 @@ valid_subj, test_subj = train_test_split(
     valid_test_subj,
     test_size=TEST_FRAC / (VAL_FRAC + TEST_FRAC),
     random_state=check_random_state(SEED + 1),
-    shuffle=True
+    shuffle=True,
 )
 
 # Sanity check
@@ -359,14 +412,21 @@ logger.info(f"Test subjects: {len(test_subj)}")
 
 # Create splits
 subject_split = single_windows.split("subject")
-train_set = BaseConcatDataset([subject_split[s] for s in train_subj if s in subject_split])
-val_set = BaseConcatDataset([subject_split[s] for s in valid_subj if s in subject_split])
-test_set = BaseConcatDataset([subject_split[s] for s in test_subj if s in subject_split])
+train_set = BaseConcatDataset(
+    [subject_split[s] for s in train_subj if s in subject_split]
+)
+val_set = BaseConcatDataset(
+    [subject_split[s] for s in valid_subj if s in subject_split]
+)
+test_set = BaseConcatDataset(
+    [subject_split[s] for s in test_subj if s in subject_split]
+)
 
 logger.info(f"\n[bold]Window counts:[/bold]")
 logger.info(f"  Train: {len(train_set)}")
 logger.info(f"  Val: {len(val_set)}")
 logger.info(f"  Test: {len(test_set)}")
+
 
 # %% Define LightningDataModule
 class Challenge1DataModule(L.LightningDataModule):
@@ -409,6 +469,7 @@ class Challenge1DataModule(L.LightningDataModule):
             pin_memory=True,
         )
 
+
 # %% Define LightningModule
 class Challenge1Module(L.LightningModule):
     """LightningModule for Challenge 1 (RT prediction from CCD task)"""
@@ -425,9 +486,15 @@ class Challenge1Module(L.LightningModule):
             sfreq=SFREQ,
             # SignalJEPA-specific hyperparameters
             n_spat_filters=4,
-            feature_encoder__conv_layers_spec=((8, 32, 8), (16, 2, 2), (32, 2, 2), (64, 2, 2), (64, 2, 2)),
+            feature_encoder__conv_layers_spec=(
+                (8, 32, 8),
+                (16, 2, 2),
+                (32, 2, 2),
+                (64, 2, 2),
+                (64, 2, 2),
+            ),
             drop_prob=0.0,
-            feature_encoder__mode='default',
+            feature_encoder__mode="default",
             feature_encoder__conv_bias=False,
             pos_encoder__spat_dim=30,
             pos_encoder__time_dim=34,
@@ -554,10 +621,11 @@ class Challenge1Module(L.LightningModule):
         )
         return [optimizer], [scheduler]
 
+
 # %% Setup callbacks and logger
-logger.info("\n" + "="*60)
+logger.info("\n" + "=" * 60)
 logger.info("[bold cyan]SETUP TRAINING[/bold cyan]")
-logger.info("="*60)
+logger.info("=" * 60)
 
 # Callbacks
 checkpoint_callback = ModelCheckpoint(
@@ -613,60 +681,64 @@ model = Challenge1Module(
 )
 
 logger.info(f"\n[bold]Model:[/bold] {model.model.__class__.__name__}")
-logger.info(f"[bold]Total parameters:[/bold] {sum(p.numel() for p in model.parameters()):,}")
+logger.info(
+    f"[bold]Total parameters:[/bold] {sum(p.numel() for p in model.parameters()):,}"
+)
 
 # Log all configuration to wandb for reproducibility
-wandb_logger.experiment.config.update({
-    # Data settings
-    "data_dir": str(DATA_DIR),
-    "releases": RELEASES,
-    "num_releases": len(RELEASES),
-    "use_mini": USE_MINI,
-    "excluded_subjects": EXCLUDED_SUBJECTS,
-
-    # Windowing parameters
-    "epoch_len_s": EPOCH_LEN_S,
-    "sfreq": SFREQ,
-    "anchor": ANCHOR,
-    "shift_after_stim": SHIFT_AFTER_STIM,
-    "window_len": WINDOW_LEN,
-
-    # Training parameters
-    "batch_size": BATCH_SIZE,
-    "epochs": EPOCHS,
-    "lr": LR,
-    "weight_decay": WEIGHT_DECAY,
-    "early_stopping_patience": EARLY_STOPPING_PATIENCE,
-    "precision": PRECISION,
-
-    # Hyperparameter tuning switches
-    "run_lr_finder": RUN_LR_FINDER,
-    "run_batch_size_finder": RUN_BATCH_SIZE_FINDER,
-
-    # Splits
-    "val_frac": VAL_FRAC,
-    "test_frac": TEST_FRAC,
-    "seed": SEED,
-    "num_train_subjects": len(train_subj),
-    "num_val_subjects": len(valid_subj),
-    "num_test_subjects": len(test_subj),
-    "num_train_windows": len(train_set),
-    "num_val_windows": len(val_set),
-    "num_test_windows": len(test_set),
-
-    # Model architecture
-    "model_name": model.model.__class__.__name__,
-    "n_chans": N_CHANS,
-    "n_times": int(WINDOW_LEN * SFREQ),
-    "num_parameters": sum(p.numel() for p in model.parameters()),
-})
+wandb_logger.experiment.config.update(
+    {
+        # Data settings
+        "data_dir": str(DATA_ROOT),
+        "releases": RELEASES,
+        "num_releases": len(RELEASES),
+        "use_mini": USE_MINI,
+        "excluded_subjects": EXCLUDED_SUBJECTS,
+        # Windowing parameters
+        "epoch_len_s": EPOCH_LEN_S,
+        "sfreq": SFREQ,
+        "anchor": ANCHOR,
+        "shift_after_stim": SHIFT_AFTER_STIM,
+        "window_len": WINDOW_LEN,
+        # Training parameters
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "lr": LR,
+        "weight_decay": WEIGHT_DECAY,
+        "early_stopping_patience": EARLY_STOPPING_PATIENCE,
+        "precision": PRECISION,
+        # Hyperparameter tuning switches
+        "run_lr_finder": RUN_LR_FINDER,
+        "run_batch_size_finder": RUN_BATCH_SIZE_FINDER,
+        # Splits
+        "val_frac": VAL_FRAC,
+        "test_frac": TEST_FRAC,
+        "seed": SEED,
+        "num_train_subjects": len(train_subj),
+        "num_val_subjects": len(valid_subj),
+        "num_test_subjects": len(test_subj),
+        "num_train_windows": len(train_set),
+        "num_val_windows": len(val_set),
+        "num_test_windows": len(test_set),
+        # Model architecture
+        "model_name": model.model.__class__.__name__,
+        "n_chans": N_CHANS,
+        "n_times": int(WINDOW_LEN * SFREQ),
+        "num_parameters": sum(p.numel() for p in model.parameters()),
+    }
+)
 
 # %% Setup Trainer
 trainer = L.Trainer(
     max_epochs=EPOCHS,
     accelerator="auto",  # Auto-detect best available hardware
-    devices=1,           # Use single device
-    callbacks=[checkpoint_callback, early_stop_callback, progress_bar, model_summary_callback],
+    devices=1,  # Use single device
+    callbacks=[
+        checkpoint_callback,
+        early_stop_callback,
+        progress_bar,
+        model_summary_callback,
+    ],
     logger=wandb_logger,
     gradient_clip_val=1.0,
     precision=PRECISION,
@@ -684,9 +756,9 @@ logger.info(f"  Gradient clip: 1.0")
 if RUN_LR_FINDER or RUN_BATCH_SIZE_FINDER:
     from lightning.pytorch.tuner import Tuner
 
-    logger.info("\n" + "="*60)
+    logger.info("\n" + "=" * 60)
     logger.info("[bold cyan]TUNING HYPERPARAMETERS[/bold cyan]")
-    logger.info("="*60)
+    logger.info("=" * 60)
 
     tuner = Tuner(trainer)
 
@@ -701,7 +773,7 @@ if RUN_LR_FINDER or RUN_BATCH_SIZE_FINDER:
             mode=BS_FINDER_MODE,
             steps_per_trial=BS_FINDER_STEPS_PER_TRIAL,
             init_val=BS_FINDER_INIT_VAL,
-            max_trials=BS_FINDER_MAX_TRIALS  # Caps at 1024 (32*2^5), won't try 4096+
+            max_trials=BS_FINDER_MAX_TRIALS,  # Caps at 1024 (32*2^5), won't try 4096+
         )
 
         new_batch_size = datamodule.batch_size
@@ -709,15 +781,17 @@ if RUN_LR_FINDER or RUN_BATCH_SIZE_FINDER:
         logger.info(f"[bold]Updated datamodule batch_size to:[/bold] {new_batch_size}")
 
         # Log batch size finder results to wandb
-        wandb_logger.experiment.config.update({
-            "batch_size_finder_enabled": True,
-            "batch_size_original": BATCH_SIZE,
-            "batch_size_optimal": new_batch_size,
-            "batch_size_finder_mode": BS_FINDER_MODE,
-            "batch_size_finder_init_val": BS_FINDER_INIT_VAL,
-            "batch_size_finder_max_trials": BS_FINDER_MAX_TRIALS,
-            "batch_size_finder_steps_per_trial": BS_FINDER_STEPS_PER_TRIAL,
-        })
+        wandb_logger.experiment.config.update(
+            {
+                "batch_size_finder_enabled": True,
+                "batch_size_original": BATCH_SIZE,
+                "batch_size_optimal": new_batch_size,
+                "batch_size_finder_mode": BS_FINDER_MODE,
+                "batch_size_finder_init_val": BS_FINDER_INIT_VAL,
+                "batch_size_finder_max_trials": BS_FINDER_MAX_TRIALS,
+                "batch_size_finder_steps_per_trial": BS_FINDER_STEPS_PER_TRIAL,
+            }
+        )
 
     # Learning rate finder (RUN SECOND - uses finalized batch size)
     if RUN_LR_FINDER:
@@ -729,7 +803,7 @@ if RUN_LR_FINDER or RUN_BATCH_SIZE_FINDER:
             max_lr=LR_FINDER_MAX_LR,
             num_training=LR_FINDER_NUM_TRAINING,
             mode=LR_FINDER_MODE,
-            attr_name="lr"
+            attr_name="lr",
         )
 
         suggested_lr = lr_finder.suggestion()
@@ -745,32 +819,36 @@ if RUN_LR_FINDER or RUN_BATCH_SIZE_FINDER:
         logger.info(f"[bold]Updated model LR to:[/bold] {suggested_lr:.6f}")
 
         # Log LR finder results to wandb
-        wandb_logger.experiment.config.update({
-            "lr_finder_enabled": True,
-            "lr_original": LR,
-            "lr_suggested": suggested_lr,
-            "lr_finder_min_lr": LR_FINDER_MIN_LR,
-            "lr_finder_max_lr": LR_FINDER_MAX_LR,
-            "lr_finder_num_training": LR_FINDER_NUM_TRAINING,
-            "lr_finder_mode": LR_FINDER_MODE,
-        })
+        wandb_logger.experiment.config.update(
+            {
+                "lr_finder_enabled": True,
+                "lr_original": LR,
+                "lr_suggested": suggested_lr,
+                "lr_finder_min_lr": LR_FINDER_MIN_LR,
+                "lr_finder_max_lr": LR_FINDER_MAX_LR,
+                "lr_finder_num_training": LR_FINDER_NUM_TRAINING,
+                "lr_finder_mode": LR_FINDER_MODE,
+            }
+        )
 
         # Upload LR finder plot to wandb
         wandb_logger.experiment.log({"lr_finder_plot": wandb.Image(str(lr_plot_path))})
 
     logger.info("\n[bold green]Tuning complete![/bold green]")
-    logger.info("="*60)
+    logger.info("=" * 60)
 else:
     # Log that tuners were disabled
-    wandb_logger.experiment.config.update({
-        "lr_finder_enabled": False,
-        "batch_size_finder_enabled": False,
-    })
+    wandb_logger.experiment.config.update(
+        {
+            "lr_finder_enabled": False,
+            "batch_size_finder_enabled": False,
+        }
+    )
 
 # %% Train model
-logger.info("\n" + "="*60)
+logger.info("\n" + "=" * 60)
 logger.info("[bold cyan]TRAINING[/bold cyan]")
-logger.info("="*60)
+logger.info("=" * 60)
 
 trainer.fit(model, datamodule)
 
@@ -779,16 +857,16 @@ logger.info(f"Best checkpoint: {checkpoint_callback.best_model_path}")
 logger.info(f"[bold]Best val NRMSE:[/bold] {checkpoint_callback.best_model_score:.6f}")
 
 # %% Test model
-logger.info("\n" + "="*60)
+logger.info("\n" + "=" * 60)
 logger.info("[bold cyan]TESTING[/bold cyan]")
-logger.info("="*60)
+logger.info("=" * 60)
 
 trainer.test(model, datamodule, ckpt_path="best")
 
 # %% Save weights for submission
-logger.info("\n" + "="*60)
+logger.info("\n" + "=" * 60)
 logger.info("[bold cyan]SAVING FOR SUBMISSION[/bold cyan]")
-logger.info("="*60)
+logger.info("=" * 60)
 
 # Load best checkpoint
 best_model = Challenge1Module.load_from_checkpoint(checkpoint_callback.best_model_path)
@@ -801,9 +879,9 @@ logger.info(f"[green]Model weights saved to:[/green] {weights_path}")
 logger.info(f"Use this file in submission.py's get_model_challenge_1() method")
 
 # %% Summary
-logger.info("\n" + "="*60)
+logger.info("\n" + "=" * 60)
 logger.info("[bold cyan]SUMMARY[/bold cyan]")
-logger.info("="*60)
+logger.info("=" * 60)
 logger.info(f"Experiment: Challenge 1 Baseline (SignalJEPA_PreLocal)")
 logger.info(f"Data: {len(RELEASES)} releases, {'mini' if USE_MINI else 'full'} dataset")
 logger.info(f"Training windows: {len(train_set)}")
@@ -812,4 +890,4 @@ logger.info(f"Test windows: {len(test_set)}")
 logger.info(f"[bold]Best val NRMSE:[/bold] {checkpoint_callback.best_model_score:.6f}")
 logger.info(f"Weights saved: {weights_path}")
 logger.info(f"Checkpoints: {CHECKPOINT_DIR}")
-logger.info("="*60)
+logger.info("=" * 60)

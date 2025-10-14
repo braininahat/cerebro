@@ -107,7 +107,9 @@ class ModelAutopsyCallback(Callback):
         self.autopsy_triggered = False
         self.early_stop_detected = False
 
-    def on_validation_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+    def on_validation_end(
+        self, trainer: L.Trainer, pl_module: L.LightningModule
+    ) -> None:
         """Check if early stopping will trigger.
 
         Early stopping sets trainer.should_stop=True during validation_end.
@@ -116,13 +118,17 @@ class ModelAutopsyCallback(Callback):
         if trainer.should_stop and not self.early_stop_detected:
             self.early_stop_detected = True
             if self.run_on_early_stop:
-                logger.info("[bold yellow]⚠️  Early stopping detected. Running model autopsy...[/bold yellow]")
+                logger.info(
+                    "[bold yellow]⚠️  Early stopping detected. Running model autopsy...[/bold yellow]"
+                )
                 self._run_autopsy(trainer, pl_module, trigger="early_stop")
 
     def on_train_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         """Run autopsy at training end if not already run."""
         if self.run_on_training_end and not self.autopsy_triggered:
-            logger.info("[bold green]🔬 Training complete. Running model autopsy...[/bold green]")
+            logger.info(
+                "[bold green]🔬 Training complete. Running model autopsy...[/bold green]"
+            )
             self._run_autopsy(trainer, pl_module, trigger="training_end")
 
     def _run_autopsy(
@@ -158,11 +164,15 @@ class ModelAutopsyCallback(Callback):
                 try:
                     pl_module = pl_module.__class__.load_from_checkpoint(best_ckpt)
                 except Exception as e:
-                    logger.warning(f"⚠️  Failed to load checkpoint: {e}. Using current model state.")
+                    logger.warning(
+                        f"⚠️  Failed to load checkpoint: {e}. Using current model state."
+                    )
             else:
                 logger.info("ℹ️  No checkpoint found. Using current model state.")
 
-        pl_module = pl_module.to(trainer.device)
+        # Get device from pl_module (works in all Lightning versions)
+        device = pl_module.device
+        pl_module = pl_module.to(device)
         pl_module.eval()
 
         # 3. Get validation dataloader
@@ -176,28 +186,29 @@ class ModelAutopsyCallback(Callback):
 
         # Import diagnostic modules (will be created in next tasks)
         try:
+            from cerebro.diagnostics.activations import analyze_activations
+            from cerebro.diagnostics.gradients import analyze_gradient_flow
             from cerebro.diagnostics.predictions import (
                 analyze_predictions,
                 compute_baseline_scores,
             )
-            from cerebro.diagnostics.gradients import analyze_gradient_flow
-            from cerebro.diagnostics.activations import analyze_activations
             from cerebro.diagnostics.visualizations import (
-                plot_prediction_distribution,
-                plot_gradient_flow,
                 plot_activation_stats,
+                plot_gradient_flow,
+                plot_prediction_distribution,
             )
 
             # Prediction analysis
             if "predictions" in self.diagnostics:
                 logger.info("  ├─ Analyzing predictions...")
                 results["predictions"] = analyze_predictions(
-                    pl_module.model, val_loader, trainer.device, self.num_samples
+                    pl_module.model, val_loader, device, self.num_samples
                 )
 
                 logger.info("  ├─ Computing baseline comparisons...")
                 results["baselines"] = compute_baseline_scores(
-                    results["predictions"]["predictions"], results["predictions"]["targets"]
+                    results["predictions"]["predictions"],
+                    results["predictions"]["targets"],
                 )
 
             # Gradient flow analysis
@@ -205,7 +216,7 @@ class ModelAutopsyCallback(Callback):
                 logger.info("  ├─ Analyzing gradient flow...")
                 batch = next(iter(val_loader))
                 results["gradients"] = analyze_gradient_flow(
-                    pl_module.model, batch, trainer.device
+                    pl_module.model, batch, device
                 )
 
             # Activation analysis
@@ -213,7 +224,7 @@ class ModelAutopsyCallback(Callback):
                 logger.info("  ├─ Analyzing activations...")
                 batch = next(iter(val_loader))
                 results["activations"] = analyze_activations(
-                    pl_module.model, batch, trainer.device
+                    pl_module.model, batch, device
                 )
 
             # Integrated Gradients (Captum)
@@ -222,14 +233,14 @@ class ModelAutopsyCallback(Callback):
                 try:
                     from cerebro.diagnostics.captum_attributions import (
                         compute_integrated_gradients,
-                        interpret_temporal_pattern,
                         interpret_spatial_pattern,
+                        interpret_temporal_pattern,
                     )
 
                     results["integrated_gradients"] = compute_integrated_gradients(
                         pl_module.model,
                         val_loader,
-                        trainer.device,
+                        device,
                         num_samples=self.num_samples or 100,
                         n_steps=self.ig_n_steps,
                         baseline_type=self.ig_baseline,
@@ -261,13 +272,16 @@ class ModelAutopsyCallback(Callback):
                     target_layers = self.target_layers
                     if target_layers == ["auto"]:
                         from cerebro.diagnostics.captum_layers import detect_conv_layers
+
                         target_layers = detect_conv_layers(pl_module.model)
-                        logger.info(f"    Auto-detected {len(target_layers)} conv layers")
+                        logger.info(
+                            f"    Auto-detected {len(target_layers)} conv layers"
+                        )
 
                     results["layer_gradcam"] = compute_layer_gradcam(
                         pl_module.model,
                         val_loader,
-                        trainer.device,
+                        device,
                         target_layers=target_layers,
                         num_samples=self.num_samples or 100,
                     )
@@ -295,7 +309,7 @@ class ModelAutopsyCallback(Callback):
                 results["channel_ablation"] = ablate_channels(
                     pl_module.model,
                     val_loader,
-                    trainer.device,
+                    device,
                     num_samples=self.num_samples or 100,
                     num_trials=self.num_ablation_trials,
                     ablation_strategy="zero",
@@ -320,7 +334,7 @@ class ModelAutopsyCallback(Callback):
                 results["temporal_ablation"] = ablate_temporal_windows(
                     pl_module.model,
                     val_loader,
-                    trainer.device,
+                    device,
                     num_samples=self.num_samples or 100,
                     num_trials=self.num_ablation_trials,
                     window_size=20,  # 200ms windows at 100Hz
@@ -343,7 +357,7 @@ class ModelAutopsyCallback(Callback):
                 results["failure_modes"] = analyze_failure_modes(
                     pl_module.model,
                     val_loader,
-                    trainer.device,
+                    device,
                     top_k=self.top_k_failures,
                     metadata_keys=["subject", "correct", "rt_from_stimulus"],
                     output_dir=output_dir if self.save_plots else None,
@@ -355,7 +369,9 @@ class ModelAutopsyCallback(Callback):
                 logger.info("📈 Generating diagnostic plots...")
 
                 if "predictions" in results:
-                    plot_path = output_dir / f"prediction_distribution.{self.plot_format}"
+                    plot_path = (
+                        output_dir / f"prediction_distribution.{self.plot_format}"
+                    )
                     plot_prediction_distribution(results["predictions"], plot_path)
                     plot_paths.append(plot_path)
                     logger.info(f"  ├─ {plot_path.name}")
@@ -373,9 +389,14 @@ class ModelAutopsyCallback(Callback):
                     logger.info(f"  ├─ {plot_path.name}")
 
                 if "integrated_gradients" in results:
-                    from cerebro.diagnostics.visualizations import plot_integrated_gradients
+                    from cerebro.diagnostics.visualizations import (
+                        plot_integrated_gradients,
+                    )
+
                     plot_path = output_dir / f"integrated_gradients.{self.plot_format}"
-                    plot_integrated_gradients(results["integrated_gradients"], plot_path)
+                    plot_integrated_gradients(
+                        results["integrated_gradients"], plot_path
+                    )
                     plot_paths.append(plot_path)
                     logger.info(f"  ├─ {plot_path.name}")
 
@@ -384,32 +405,43 @@ class ModelAutopsyCallback(Callback):
                         plot_layer_gradcam,
                         plot_layer_temporal_profiles,
                     )
+
                     plot_path = output_dir / f"layer_gradcam.{self.plot_format}"
                     plot_layer_gradcam(results["layer_gradcam"], plot_path)
                     plot_paths.append(plot_path)
                     logger.info(f"  ├─ {plot_path.name}")
 
-                    plot_path = output_dir / f"layer_temporal_profiles.{self.plot_format}"
+                    plot_path = (
+                        output_dir / f"layer_temporal_profiles.{self.plot_format}"
+                    )
                     plot_layer_temporal_profiles(results["layer_patterns"], plot_path)
                     plot_paths.append(plot_path)
                     logger.info(f"  ├─ {plot_path.name}")
 
                 if "channel_ablation" in results:
                     from cerebro.diagnostics.visualizations import plot_channel_ablation
+
                     plot_path = output_dir / f"channel_ablation.{self.plot_format}"
                     plot_channel_ablation(results["channel_ablation"], plot_path)
                     plot_paths.append(plot_path)
                     logger.info(f"  ├─ {plot_path.name}")
 
                 if "temporal_ablation" in results:
-                    from cerebro.diagnostics.visualizations import plot_temporal_ablation
+                    from cerebro.diagnostics.visualizations import (
+                        plot_temporal_ablation,
+                    )
+
                     plot_path = output_dir / f"temporal_ablation.{self.plot_format}"
                     plot_temporal_ablation(results["temporal_ablation"], plot_path)
                     plot_paths.append(plot_path)
                     logger.info(f"  └─ {plot_path.name}")
 
             # 6. Log to wandb
-            if self.log_to_wandb and trainer.logger and hasattr(trainer.logger, "experiment"):
+            if (
+                self.log_to_wandb
+                and trainer.logger
+                and hasattr(trainer.logger, "experiment")
+            ):
                 logger.info("☁️  Uploading plots to wandb...")
                 try:
                     import wandb
@@ -504,7 +536,9 @@ class ModelAutopsyCallback(Callback):
 """
 
             if len(grad["dead_layers"]) > 0:
-                report += f"⚠️  **Dead layers detected**: {', '.join(grad['dead_layers'])}\n\n"
+                report += (
+                    f"⚠️  **Dead layers detected**: {', '.join(grad['dead_layers'])}\n\n"
+                )
 
             if avg_grad_to_param < 1e-5:
                 report += "⚠️  **WARNING**: Very small gradients detected. Learning rate may be too low.\n\n"
@@ -596,7 +630,10 @@ Based on the diagnostic results:
 
         recommendations = []
 
-        if "predictions" in diagnostics and diagnostics["predictions"]["variance_ratio"] < 0.5:
+        if (
+            "predictions" in diagnostics
+            and diagnostics["predictions"]["variance_ratio"] < 0.5
+        ):
             recommendations.append(
                 "1. **Increase learning rate** - predictions collapsed to narrow range"
             )
@@ -605,7 +642,10 @@ Based on the diagnostic results:
             )
             recommendations.append("3. **Train longer** - may not have converged yet")
 
-        if "gradients" in diagnostics and len(diagnostics["gradients"]["dead_layers"]) > 0:
+        if (
+            "gradients" in diagnostics
+            and len(diagnostics["gradients"]["dead_layers"]) > 0
+        ):
             recommendations.append(
                 f"4. **Investigate dead layers**: {', '.join(diagnostics['gradients']['dead_layers'])}"
             )
@@ -629,6 +669,7 @@ Based on the diagnostic results:
                 )
             # Check if temporal profile is uniform
             import numpy as np
+
             profile_std = np.std(ig["temporal_profile"])
             profile_mean = np.mean(ig["temporal_profile"])
             if profile_mean > 0 and profile_std / profile_mean < 0.2:

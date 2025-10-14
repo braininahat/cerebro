@@ -1,8 +1,10 @@
-# Lightning CLI configuration for Challenge 1 with SignalJEPA_PreLocal
-# Usage: uv run cerebro fit --config configs/challenge1_jepa.yaml
+# Lightning CLI configuration for Challenge 1 with R5 Test Evaluation
+# Usage: uv run cerebro fit --config configs/challenge1_r5test.yaml
 #
-# This config uses SignalJEPA_PreLocal instead of EEGNeX while keeping all other
-# settings identical to challenge1_base.yaml (trainer, data, callbacks).
+# This config enables R5 test evaluation in development mode:
+# - Train/val splits from training releases (R1-R4, R6-R11)
+# - Test on R5 (matches local_scoring.py and competition evaluation)
+# - Use this to validate model performance on competition validation set
 
 # Seed everything for reproducibility
 seed_everything: 42
@@ -23,10 +25,10 @@ bs_finder_max_trials: 6
 
 # Trainer configuration
 trainer:
-  max_epochs: 200
+  max_epochs: 1000
   accelerator: auto  # Auto-detect GPU/CPU
   devices: 1
-  precision: "32" # Options: "32" (full), "16-mixed" (fast), "bf16-mixed" (stable+fast, requires Ampere+)
+  precision: "bf16-mixed" # Options: "32" (full), "16-mixed" (fast), "bf16-mixed" (stable+fast, requires Ampere+)
   gradient_clip_val: 1.0
   deterministic: true
   log_every_n_steps: 10
@@ -37,13 +39,13 @@ trainer:
     init_args:
       project: eeg2025
       entity: ubcse-eeg2025  # Change to your wandb team/username
-      name: challenge1_signaljepa_baseline
+      name: challenge1_r5test
       tags:
         - challenge1
         - supervised
-        - signaljepa
-        - baseline
-      notes: "SignalJEPA_PreLocal baseline for Challenge 1 (RT prediction from CCD task)"
+        - eegnex
+        - r5_test
+      notes: "EEGNeX baseline for Challenge 1 with R5 test evaluation (matches competition scoring)"
       log_model: all  # Upload all checkpoints as wandb artifacts
       save_dir: outputs/challenge1
 
@@ -53,7 +55,7 @@ trainer:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         dirpath: outputs/challenge1/checkpoints
-        filename: challenge1-jepa-{epoch:02d}-{val_nrmse:.4f}
+        filename: challenge1-{epoch:02d}-{val_nrmse:.4f}
         monitor: val_nrmse
         mode: min
         save_top_k: 3
@@ -77,51 +79,45 @@ trainer:
       init_args:
         max_depth: 1
 
-# Model configuration: SignalJEPA_PreLocal with transformer architecture
+    # ModelAutopsy: Comprehensive diagnostics on early stopping or training end
+    - class_path: cerebro.callbacks.ModelAutopsyCallback
+      init_args:
+        run_on_training_end: true
+        run_on_early_stop: true
+        diagnostics:
+          - predictions
+          - gradients
+          - activations
+          # Captum diagnostics disabled due to integration issues - see docs/CAPTUM_INTEGRATION_ISSUE.md
+          # - integrated_gradients  # Captum: IG attribution analysis
+          # - layer_gradcam         # Captum: Layer-wise attention
+          - failure_modes         # Phase 4: Top-K worst predictions and error analysis
+        save_plots: true
+        log_to_wandb: true
+        generate_report: true
+        num_samples: 500    # Analyze 500 samples (not full val set for speed)
+        top_k_failures: 100 # Number of worst predictions to analyze in detail
+        ig_n_steps: 50      # IG integration steps (50 = good tradeoff)
+        ig_baseline: zero   # Baseline type: zero, mean, or random
+
+# Model configuration (class registered in CLI, just specify __init__ params)
 model:
   n_chans: 129  # HBN dataset channel count
   n_outputs: 1  # Regression output (RT)
   n_times: 200  # 2 seconds at 100 Hz
   sfreq: 100
-  model_class: SignalJEPA_PreLocal  # Use SignalJEPA transformer architecture
-  model_kwargs:
-    # Spatial filtering
-    n_spat_filters: 4
-
-    # Feature encoder: convolutional layers for temporal feature extraction
-    # Format: [[out_channels, kernel_size, stride], ...]
-    feature_encoder__conv_layers_spec:
-      - [8, 32, 8]
-      - [16, 2, 2]
-      - [32, 2, 2]
-      - [64, 2, 2]
-      - [64, 2, 2]
-    feature_encoder__mode: default
-    feature_encoder__conv_bias: false
-
-    # Dropout probability
-    drop_prob: 0.0
-
-    # Positional encoding: spatial and temporal dimensions
-    pos_encoder__spat_dim: 30
-    pos_encoder__time_dim: 34
-    pos_encoder__sfreq_features: 1.0
-    pos_encoder__spat_kwargs: null
-
-    # Transformer architecture
-    transformer__d_model: 64  # Model dimensionality
-    transformer__num_encoder_layers: 8  # Number of encoder layers
-    transformer__num_decoder_layers: 4  # Number of decoder layers
-    transformer__nhead: 8  # Number of attention heads
-
-  # Training hyperparameters
+  model_class: EEGNeX  # Architecture choice: "EEGNeX" or "SignalJEPA_PreLocal"
+  model_kwargs: {}  # Model-specific hyperparameters (empty for EEGNeX defaults)
   lr: 0.001
   weight_decay: 0.00001
-  epochs: 1000  # Must match trainer.max_epochs for scheduler
+  epochs: 100  # Must match trainer.max_epochs for scheduler
 
-# Data configuration (identical to challenge1_base.yaml)
+# Data configuration (class registered in CLI, just specify __init__ params)
 data:
   data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+  # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training releases!
+  # Training releases: R1-R4, R6-R11 only (10 releases total)
+  # R5 is used ONLY for test evaluation via test_on_r5=true
   releases:
     - R1
     - R2
@@ -150,8 +146,12 @@ data:
   use_mini: false  # Set to true for fast prototyping
   cache_dir: null  # null = auto (data_dir/../cache/challenge1)
   val_frac: 0.1
-  test_frac: 0.1
+  test_frac: 0.1  # Ignored when test_on_r5=true
   seed: 2025
   sfreq: 100
   epoch_len_s: 2.0
   anchor: stimulus_anchor
+  # R5 test evaluation settings
+  mode: dev  # "dev" = split training releases, "submission" = train on all
+  test_on_r5: true  # Use R5 as test set (matches local_scoring.py)
+  r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data}  # R5 data location

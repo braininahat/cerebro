@@ -18,28 +18,32 @@
 # - **Loss**: MAE (L1) vs MSE
 # - **Label**: externalizing (per-subject, constant) vs rt_from_stimulus (per-trial)
 
+import math
+import os
+import random
+import warnings
+
 # %% Setup and imports
 from pathlib import Path
-import os
-import math
-import random
-import torch
-import warnings
+
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
-from lightning.pytorch.loggers import WandbLogger
-from torch.utils.data import DataLoader
-from braindecode.models import EEGNeX
+import torch
 from braindecode.datasets import BaseConcatDataset, BaseDataset, EEGWindowsDataset
+from braindecode.models import EEGNeX
 from braindecode.preprocessing import create_fixed_length_windows
+from dotenv import load_dotenv
 from eegdash.dataset import EEGChallengeDataset
+from joblib import Parallel, delayed
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.loggers import WandbLogger
 from sklearn.model_selection import train_test_split
 from sklearn.utils import check_random_state
-from joblib import Parallel, delayed
-from dotenv import load_dotenv
+from torch.utils.data import DataLoader
 
 # Suppress EEGChallengeDataset warning
-warnings.filterwarnings("ignore", category=UserWarning, module="eegdash.dataset.dataset")
+warnings.filterwarnings(
+    "ignore", category=UserWarning, module="eegdash.dataset.dataset"
+)
 
 # Reproducibility
 L.seed_everything(42)
@@ -60,7 +64,11 @@ FULL_DIR = (DATA_ROOT / "full").resolve()
 # Data settings
 USE_MINI = False  # Set to True for quick testing
 DATA_DIR = MINI_DIR if USE_MINI else FULL_DIR
-RELEASES = ["R5"] if USE_MINI else ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
+RELEASES = (
+    ["R5"]
+    if USE_MINI
+    else ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
+)
 
 # Tasks to include (adjust based on what you want to use for pretraining)
 TASKS = [
@@ -75,8 +83,15 @@ TASKS = [
 
 # Excluded subjects (from startkit)
 EXCLUDED_SUBJECTS = [
-    "NDARWV769JM7", "NDARME789TD2", "NDARUA442ZVF", "NDARJP304NK1",
-    "NDARTY128YLU", "NDARDW550GU6", "NDARLD243KRE", "NDARUJ292JXV", "NDARBA381JGH"
+    "NDARWV769JM7",
+    "NDARME789TD2",
+    "NDARUA442ZVF",
+    "NDARJP304NK1",
+    "NDARTY128YLU",
+    "NDARDW550GU6",
+    "NDARLD243KRE",
+    "NDARUJ292JXV",
+    "NDARBA381JGH",
 ]
 
 # Windowing parameters
@@ -111,9 +126,9 @@ print(f"  Epochs: {EPOCHS}")
 print(f"  Batch size: {BATCH_SIZE}")
 
 # %% Load Challenge 2 data (multi-task)
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("LOADING DATA")
-print("="*60)
+print("=" * 60)
 
 # Load all tasks from all releases
 all_datasets_list = []
@@ -127,7 +142,13 @@ for release in RELEASES:
                 cache_dir=DATA_DIR,
                 mini=USE_MINI,
                 description_fields=[
-                    "subject", "session", "run", "task", "age", "sex", "p_factor",
+                    "subject",
+                    "session",
+                    "run",
+                    "task",
+                    "age",
+                    "sex",
+                    "p_factor",
                 ],
             )
             all_datasets_list.append(dataset)
@@ -147,9 +168,9 @@ raws = Parallel(n_jobs=os.cpu_count())(
 print("Done loading raw data")
 
 # %% Filter recordings
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("FILTERING RECORDINGS")
-print("="*60)
+print("=" * 60)
 
 # Filter criteria:
 # - Exclude specific subjects
@@ -158,7 +179,8 @@ print("="*60)
 # - Valid p_factor (not NaN)
 
 filtered_datasets = [
-    ds for ds in all_datasets.datasets
+    ds
+    for ds in all_datasets.datasets
     if ds.description.subject not in EXCLUDED_SUBJECTS
     and ds.raw.n_times >= WINDOW_SIZE_S * SFREQ
     and len(ds.raw.ch_names) == 129
@@ -176,9 +198,9 @@ print(f"  Min: {min(p_factors):.4f}")
 print(f"  Max: {max(p_factors):.4f}")
 
 # %% Create fixed-length windows
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("CREATING WINDOWS")
-print("="*60)
+print("=" * 60)
 
 print(f"Window size: {WINDOW_SIZE_S}s ({int(WINDOW_SIZE_S * SFREQ)} samples)")
 print(f"Window stride: {WINDOW_STRIDE_S}s ({int(WINDOW_STRIDE_S * SFREQ)} samples)")
@@ -194,6 +216,7 @@ windows_ds = create_fixed_length_windows(
 )
 
 print(f"Created {len(windows_ds)} windows")
+
 
 # %% Define DatasetWrapper for random cropping
 class DatasetWrapper(BaseDataset):
@@ -250,10 +273,11 @@ class DatasetWrapper(BaseDataset):
 
         return X, target, (i_window_in_trial, i_start_crop, i_stop_crop), infos
 
+
 # %% Wrap datasets with DatasetWrapper
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("WRAPPING WITH DATASETWARAPPER")
-print("="*60)
+print("=" * 60)
 
 wrapped_windows_ds = BaseConcatDataset(
     [
@@ -274,9 +298,9 @@ print(f"  Subject: {infos_sample['subject']}")
 print(f"  Task: {infos_sample['task']}")
 
 # %% Split data at subject level
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("SPLITTING DATA")
-print("="*60)
+print("=" * 60)
 
 metadata = wrapped_windows_ds.get_metadata()
 subjects = metadata["subject"].unique()
@@ -287,7 +311,7 @@ train_subj, valid_test_subj = train_test_split(
     subjects,
     test_size=(VAL_FRAC + TEST_FRAC),
     random_state=check_random_state(SEED),
-    shuffle=True
+    shuffle=True,
 )
 
 # Split: val / test
@@ -295,7 +319,7 @@ valid_subj, test_subj = train_test_split(
     valid_test_subj,
     test_size=TEST_FRAC / (VAL_FRAC + TEST_FRAC),
     random_state=check_random_state(SEED + 1),
-    shuffle=True
+    shuffle=True,
 )
 
 # Sanity check
@@ -307,14 +331,21 @@ print(f"Test subjects: {len(test_subj)}")
 
 # Create splits
 subject_split = wrapped_windows_ds.split("subject")
-train_set = BaseConcatDataset([subject_split[s] for s in train_subj if s in subject_split])
-val_set = BaseConcatDataset([subject_split[s] for s in valid_subj if s in subject_split])
-test_set = BaseConcatDataset([subject_split[s] for s in test_subj if s in subject_split])
+train_set = BaseConcatDataset(
+    [subject_split[s] for s in train_subj if s in subject_split]
+)
+val_set = BaseConcatDataset(
+    [subject_split[s] for s in valid_subj if s in subject_split]
+)
+test_set = BaseConcatDataset(
+    [subject_split[s] for s in test_subj if s in subject_split]
+)
 
 print(f"\nWindow counts:")
 print(f"  Train: {len(train_set)}")
 print(f"  Val: {len(val_set)}")
 print(f"  Test: {len(test_set)}")
+
 
 # %% Define LightningDataModule
 class Challenge2DataModule(L.LightningDataModule):
@@ -353,6 +384,7 @@ class Challenge2DataModule(L.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
         )
+
 
 # %% Define LightningModule
 class Challenge2Module(L.LightningModule):
@@ -485,10 +517,11 @@ class Challenge2Module(L.LightningModule):
         )
         return [optimizer], [scheduler]
 
+
 # %% Setup callbacks and logger
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("SETUP TRAINING")
-print("="*60)
+print("=" * 60)
 
 # Callbacks
 checkpoint_callback = ModelCheckpoint(
@@ -539,7 +572,7 @@ print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
 trainer = L.Trainer(
     max_epochs=EPOCHS,
     accelerator="auto",  # Auto-detect best available hardware
-    devices=1,           # Use single device
+    devices=1,  # Use single device
     callbacks=[checkpoint_callback, early_stop_callback],
     logger=wandb_logger,
     gradient_clip_val=1.0,
@@ -555,9 +588,9 @@ print(f"  Precision: {trainer.precision}")
 print(f"  Gradient clip: 1.0")
 
 # %% Train model
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("TRAINING")
-print("="*60)
+print("=" * 60)
 
 trainer.fit(model, datamodule)
 
@@ -566,16 +599,16 @@ print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
 print(f"Best val NRMSE: {checkpoint_callback.best_model_score:.6f}")
 
 # %% Test model
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("TESTING")
-print("="*60)
+print("=" * 60)
 
 trainer.test(model, datamodule, ckpt_path="best")
 
 # %% Save weights for submission
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("SAVING FOR SUBMISSION")
-print("="*60)
+print("=" * 60)
 
 # Load best checkpoint
 best_model = Challenge2Module.load_from_checkpoint(checkpoint_callback.best_model_path)
@@ -588,15 +621,17 @@ print(f"Model weights saved to: {weights_path}")
 print(f"Use this file in submission.py's get_model_challenge_2() method")
 
 # %% Summary
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("SUMMARY")
-print("="*60)
+print("=" * 60)
 print(f"Experiment: Challenge 2 Baseline (EEGNeX)")
-print(f"Data: {len(RELEASES)} releases, {len(TASKS)} tasks, {'mini' if USE_MINI else 'full'} dataset")
+print(
+    f"Data: {len(RELEASES)} releases, {len(TASKS)} tasks, {'mini' if USE_MINI else 'full'} dataset"
+)
 print(f"Training windows: {len(train_set)}")
 print(f"Validation windows: {len(val_set)}")
 print(f"Test windows: {len(test_set)}")
 print(f"Best val NRMSE: {checkpoint_callback.best_model_score:.6f}")
 print(f"Weights saved: {weights_path}")
 print(f"Checkpoints: {OUTPUT_DIR / 'checkpoints'}")
-print("="*60)
+print("=" * 60)

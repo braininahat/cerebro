@@ -13,14 +13,14 @@ REPO_ROOT = Path(__file__).parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from cerebro.callbacks.model_autopsy import ModelAutopsyCallback
-from cerebro.models.challenge1 import Challenge1Module
 from cerebro.data.challenge1 import Challenge1DataModule
+from cerebro.models.challenge1 import Challenge1Module
 
 
 def main():
-    print("="*60)
+    print("=" * 60)
     print("MODEL AUTOPSY TEST")
-    print("="*60)
+    print("=" * 60)
 
     # Load checkpoint
     checkpoint_path = "outputs/challenge1/20251013_181025/checkpoints/challenge1-epoch=16-val_nrmse=1.0007.ckpt"
@@ -79,9 +79,9 @@ def main():
 
     callback._run_autopsy(trainer, model, "manual_test")
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST COMPLETE")
-    print("="*60)
+    print("=" * 60)
     print(f"\nCheck outputs at: {trainer.log_dir}/autopsy/")
     print("Expected files:")
     print("  - prediction_distribution.png")

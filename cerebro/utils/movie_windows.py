@@ -7,9 +7,10 @@ metadata for contrastive learning.
 
 import re
 from typing import Optional
+
 import pandas as pd
-from braindecode.preprocessing import create_fixed_length_windows
 from braindecode.datasets import BaseConcatDataset
+from braindecode.preprocessing import create_fixed_length_windows
 
 
 def extract_subject_id(description) -> Optional[str]:
@@ -26,11 +27,11 @@ def extract_subject_id(description) -> Optional[str]:
     str or None
         Subject ID (e.g., 'NDARXXXXXX') or None if not found.
     """
-    if isinstance(description, dict) and 'subject' in description:
-        return description['subject']
+    if isinstance(description, dict) and "subject" in description:
+        return description["subject"]
 
-    if isinstance(description, str) and 'sub-' in description:
-        match = re.search(r'sub-([A-Z0-9]+)', description)
+    if isinstance(description, str) and "sub-" in description:
+        match = re.search(r"sub-([A-Z0-9]+)", description)
         if match:
             return match.group(1)
 
@@ -51,8 +52,8 @@ def get_video_start_time(raw) -> float:
         Onset time in seconds of video_start marker, or 0.0 if not found.
     """
     for ann in raw.annotations:
-        if 'video_start' in ann['description']:
-            return ann['onset']
+        if "video_start" in ann["description"]:
+            return ann["onset"]
     return 0.0
 
 
@@ -133,16 +134,16 @@ def add_movie_metadata(
         md = win_ds.metadata.copy()
 
         # Add movie identifier
-        md['movie_id'] = movie_name
+        md["movie_id"] = movie_name
 
         # Add subject identifier
-        md['subject_id'] = subject_id
+        md["subject_id"] = subject_id
 
         # Compute time offset from video start
-        md['time_offset_seconds'] = (md['i_start_in_trial'] / sfreq) + video_start
+        md["time_offset_seconds"] = (md["i_start_in_trial"] / sfreq) + video_start
 
         # Create time bins for grouping
-        md['time_bin'] = (md['time_offset_seconds'] // time_bin_size_s).astype(int)
+        md["time_bin"] = (md["time_offset_seconds"] // time_bin_size_s).astype(int)
 
         win_ds.metadata = md
 
@@ -247,5 +248,7 @@ def get_positive_pair_stats(windows_ds: BaseConcatDataset) -> pd.DataFrame:
         DataFrame with (movie_id, time_bin) as index and subject counts.
     """
     metadata = windows_ds.get_metadata()
-    pair_availability = metadata.groupby(['movie_id', 'time_bin'])['subject_id'].nunique()
+    pair_availability = metadata.groupby(["movie_id", "time_bin"])[
+        "subject_id"
+    ].nunique()
     return pair_availability[pair_availability > 1]

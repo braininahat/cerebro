@@ -552,6 +552,98 @@ The `startkit/` directory contains reference implementations that MUST be replic
 
 **Critical**: R5 is a competition validation set that provides leaderboard feedback, NOT a traditional test set. Never train on R5 under any circumstances.
 
+### Challenge1DataModule Modes
+
+The `Challenge1DataModule` supports two modes via the `mode` parameter:
+
+#### Dev Mode (`mode="dev"`)
+**Purpose**: Development and hyperparameter tuning with local validation
+
+**Data splits**:
+- Splits training releases (R1-R4, R6-R11) into train/val/test at subject level
+- `test_on_r5=false` (default): Use local test split from training releases
+- `test_on_r5=true`: Use R5 as test set (matches competition evaluation)
+
+**Configs**:
+- `configs/challenge1_base.yaml` - Standard dev mode with local test
+- `configs/challenge1_mini.yaml` - Fast prototyping with R1 mini dataset
+- `configs/challenge1_r5test.yaml` - Dev mode with R5 test evaluation
+
+**Usage**:
+```bash
+# Dev mode with local test split (fastest iteration)
+uv run cerebro fit --config configs/challenge1_base.yaml
+
+# Dev mode with R5 test (validate against competition distribution)
+uv run cerebro fit --config configs/challenge1_r5test.yaml
+
+# Mini mode for prototyping
+uv run cerebro fit --config configs/challenge1_mini.yaml
+```
+
+**When to use**:
+- Days 1-9: Architecture selection, hyperparameter tuning
+- Use `test_on_r5=false` for fast iteration
+- Use `test_on_r5=true` to validate major decisions against R5 distribution
+
+#### Submission Mode (`mode="submission"`)
+**Purpose**: Final submission with maximum training data
+
+**Data splits**:
+- Train on ALL subjects from training releases (R1-R4, R6-R11)
+- No val split (uses all data for training)
+- `test_on_r5=true` (required): Test on R5 for competition submission
+
+**Config**:
+- `configs/challenge1_submission.yaml` - Final submission mode
+
+**Usage**:
+```bash
+# Day 10: Final submission training
+uv run cerebro fit --config configs/challenge1_submission.yaml
+```
+
+**When to use**:
+- Day 10 only, after architecture and hyperparameters are locked
+- Maximizes training data for final submission
+- No validation monitoring (save checkpoints periodically)
+
+#### Mode Comparison Table
+
+| Feature | Dev Mode (local test) | Dev Mode (R5 test) | Submission Mode |
+|---------|----------------------|-------------------|-----------------|
+| Train data | 80% of training releases | 80% of training releases | 100% of training releases |
+| Val data | 10% of training releases | 10% of training releases | None |
+| Test data | 10% of training releases | R5 | R5 |
+| Validation monitoring | ✓ | ✓ | ✗ |
+| Early stopping | ✓ | ✓ | ✗ |
+| When to use | Fast iteration | Validate decisions | Final submission |
+| Config | `challenge1_base.yaml` | `challenge1_r5test.yaml` | `challenge1_submission.yaml` |
+
+#### R5 Protection
+
+**Multiple layers of protection prevent R5 contamination**:
+1. **ValueError guard**: `Challenge1DataModule.__init__()` raises error if "R5" in releases list
+2. **Mode validation**: Submission mode requires `test_on_r5=True` (raises error otherwise)
+3. **Separate caching**: R5 cached in `cache/challenge1/r5/` to avoid mixing with training data
+4. **Validation notebook**: `notebooks/08_validate_data_quality.py` checks for train/R5 subject overlap
+
+#### Verification
+
+**Before training**:
+```bash
+# Validate data quality and R5 separation
+uv run python notebooks/08_validate_data_quality.py
+
+# Test R5 evaluation matches local_scoring.py
+uv run python test_r5_evaluation.py --use-mini
+```
+
+**Expected outputs**:
+- No subject overlap between training releases and R5
+- R5 distribution may differ from training (expected - different subject pool)
+- R5 preprocessing matches `startkit/local_scoring.py` exactly
+
 ## Development Workflow
 
 1. **Start with mini=True**: Fast prototyping on small dataset

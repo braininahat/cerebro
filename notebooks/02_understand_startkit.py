@@ -30,8 +30,8 @@
 
 # %%
 import sys
-from pathlib import Path
 import warnings
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -61,7 +61,9 @@ from eegdash.hbn.windows import (
 )
 
 # Suppress EEGChallengeDataset warning
-warnings.filterwarnings("ignore", category=UserWarning, module="eegdash.dataset.dataset")
+warnings.filterwarnings(
+    "ignore", category=UserWarning, module="eegdash.dataset.dataset"
+)
 
 # %%
 DATA_DIR = Path("..") / "data" / "full"

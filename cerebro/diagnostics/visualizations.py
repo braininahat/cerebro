@@ -29,10 +29,20 @@ def plot_prediction_distribution(diagnostics: dict, output_path: Path) -> None:
         alpha=0.7,
         color=["#2E86AB", "#A23B72"],
     )
-    ax.axvline(diagnostics["target_mean"], color="#2E86AB", linestyle="--", linewidth=2,
-               label=f'Target mean: {diagnostics["target_mean"]:.3f}')
-    ax.axvline(diagnostics["pred_mean"], color="#A23B72", linestyle="--", linewidth=2,
-               label=f'Pred mean: {diagnostics["pred_mean"]:.3f}')
+    ax.axvline(
+        diagnostics["target_mean"],
+        color="#2E86AB",
+        linestyle="--",
+        linewidth=2,
+        label=f'Target mean: {diagnostics["target_mean"]:.3f}',
+    )
+    ax.axvline(
+        diagnostics["pred_mean"],
+        color="#A23B72",
+        linestyle="--",
+        linewidth=2,
+        label=f'Pred mean: {diagnostics["pred_mean"]:.3f}',
+    )
     ax.set_xlabel("Response Time (s)", fontsize=11)
     ax.set_ylabel("Count", fontsize=11)
     ax.set_title("Distribution Comparison", fontsize=13, fontweight="bold")
@@ -56,11 +66,13 @@ def plot_prediction_distribution(diagnostics: dict, output_path: Path) -> None:
     ax.grid(alpha=0.3)
 
     # Add text box with key statistics
-    textstr = "\n".join([
-        f"NRMSE: {diagnostics['nrmse']:.4f}",
-        f"RMSE: {diagnostics['rmse']:.4f}",
-        f"Variance Ratio: {diagnostics['variance_ratio']:.2f}",
-    ])
+    textstr = "\n".join(
+        [
+            f"NRMSE: {diagnostics['nrmse']:.4f}",
+            f"RMSE: {diagnostics['rmse']:.4f}",
+            f"Variance Ratio: {diagnostics['variance_ratio']:.2f}",
+        ]
+    )
     props = dict(boxstyle="round", facecolor="wheat", alpha=0.5)
     ax.text(
         0.05,
@@ -99,9 +111,18 @@ def plot_gradient_flow(diagnostics: dict, output_path: Path) -> None:
     ]
 
     # Color bars based on magnitude (red = very small, green = healthy)
-    colors = ["#E63946" if gn < 1e-6 else "#06D6A0" if gn > 1e-4 else "#FFB703" for gn in grad_norms]
+    colors = [
+        "#E63946" if gn < 1e-6 else "#06D6A0" if gn > 1e-4 else "#FFB703"
+        for gn in grad_norms
+    ]
 
-    bars = ax.bar(range(len(grad_norms)), grad_norms, color=colors, edgecolor="black", linewidth=0.5)
+    bars = ax.bar(
+        range(len(grad_norms)),
+        grad_norms,
+        color=colors,
+        edgecolor="black",
+        linewidth=0.5,
+    )
     ax.set_xticks(range(len(grad_norms)))
     ax.set_xticklabels(short_names, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("Gradient L2 Norm", fontsize=11)
@@ -121,7 +142,11 @@ def plot_gradient_flow(diagnostics: dict, output_path: Path) -> None:
 
     # Highlight dead layers
     if diagnostics["dead_layers"]:
-        dead_indices = [i for i, name in enumerate(layer_names) if name in diagnostics["dead_layers"]]
+        dead_indices = [
+            i
+            for i, name in enumerate(layer_names)
+            if name in diagnostics["dead_layers"]
+        ]
         for idx in dead_indices:
             ax.text(
                 idx,
@@ -159,15 +184,31 @@ def plot_activation_stats(diagnostics: dict, output_path: Path) -> None:
     ]
 
     # Color bars based on severity (red = many dead, green = healthy)
-    colors = ["#E63946" if dp > 20 else "#FFB703" if dp > 10 else "#06D6A0" for dp in dead_pcts]
+    colors = [
+        "#E63946" if dp > 20 else "#FFB703" if dp > 10 else "#06D6A0"
+        for dp in dead_pcts
+    ]
 
-    bars = ax.bar(range(len(dead_pcts)), dead_pcts, color=colors, edgecolor="black", linewidth=0.5)
+    bars = ax.bar(
+        range(len(dead_pcts)), dead_pcts, color=colors, edgecolor="black", linewidth=0.5
+    )
     ax.set_xticks(range(len(dead_pcts)))
     ax.set_xticklabels(short_names, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("Dead Neurons (%)", fontsize=11)
-    ax.set_title("Dead Neuron Detection (Activation < 1e-6)", fontsize=13, fontweight="bold")
-    ax.axhline(10, color="orange", linestyle="--", linewidth=1, label="10% threshold", alpha=0.7)
-    ax.axhline(20, color="red", linestyle="--", linewidth=1, label="20% threshold", alpha=0.7)
+    ax.set_title(
+        "Dead Neuron Detection (Activation < 1e-6)", fontsize=13, fontweight="bold"
+    )
+    ax.axhline(
+        10,
+        color="orange",
+        linestyle="--",
+        linewidth=1,
+        label="10% threshold",
+        alpha=0.7,
+    )
+    ax.axhline(
+        20, color="red", linestyle="--", linewidth=1, label="20% threshold", alpha=0.7
+    )
     ax.legend(loc="upper right", fontsize=9)
     ax.grid(alpha=0.3, axis="y")
 
@@ -201,7 +242,7 @@ def plot_integrated_gradients(ig_results: dict, output_path: Path) -> None:
         color="#E63946",
         linestyle="--",
         linewidth=2,
-        label=f'Peak: {ig_results["peak_time_sec"]:.2f}s'
+        label=f'Peak: {ig_results["peak_time_sec"]:.2f}s',
     )
 
     # Highlight P300 window (0.8-1.3s post-stimulus)
@@ -229,13 +270,19 @@ def plot_integrated_gradients(ig_results: dict, output_path: Path) -> None:
         else:
             colors.append("#A23B72")  # Other (purple)
 
-    ax2.bar(channel_indices, ig_results["spatial_profile"], color=colors, edgecolor="black", linewidth=0.3)
+    ax2.bar(
+        channel_indices,
+        ig_results["spatial_profile"],
+        color=colors,
+        edgecolor="black",
+        linewidth=0.3,
+    )
     ax2.axvline(
         ig_results["peak_channel_idx"],
         color="#E63946",
         linestyle="--",
         linewidth=2,
-        label=f'Peak: Ch{ig_results["peak_channel_idx"]}'
+        label=f'Peak: Ch{ig_results["peak_channel_idx"]}',
     )
 
     ax2.set_xlabel("Channel Index", fontsize=11)
@@ -244,6 +291,7 @@ def plot_integrated_gradients(ig_results: dict, output_path: Path) -> None:
 
     # Legend for regions
     from matplotlib.patches import Patch
+
     legend_elements = [
         Patch(facecolor="#FFB703", label="Frontal (0-40)"),
         Patch(facecolor="#06D6A0", label="Central (41-59)"),
@@ -282,7 +330,7 @@ def plot_integrated_gradients(ig_results: dict, output_path: Path) -> None:
         s=100,
         marker="x",
         linewidths=3,
-        label="Peak"
+        label="Peak",
     )
     ax3.legend(fontsize=9)
 
@@ -319,10 +367,16 @@ def plot_layer_gradcam(gradcam_results: dict, output_path: Path) -> None:
 
     # Color gradient: most important = dark blue, least important = light blue
     cmap = plt.cm.Blues
-    norm = plt.Normalize(vmin=0, vmax=len(sorted_importances)-1)
+    norm = plt.Normalize(vmin=0, vmax=len(sorted_importances) - 1)
     colors = [cmap(norm(i)) for i in range(len(sorted_importances))]
 
-    bars = ax.bar(range(len(sorted_importances)), sorted_importances, color=colors, edgecolor="black", linewidth=0.5)
+    bars = ax.bar(
+        range(len(sorted_importances)),
+        sorted_importances,
+        color=colors,
+        edgecolor="black",
+        linewidth=0.5,
+    )
     ax.set_xticks(range(len(sorted_importances)))
     ax.set_xticklabels(short_names, rotation=45, ha="right", fontsize=9)
     ax.set_ylabel("Aggregate Importance (Mean |Attribution|)", fontsize=11)
@@ -374,16 +428,29 @@ def plot_layer_temporal_profiles(layer_patterns: dict, output_path: Path) -> Non
         time_sec = np.arange(len(profile)) / 100.0 + 0.5
 
         # Shorten layer name for legend
-        short_name = ".".join(layer_name.split(".")[-2:]) if len(layer_name.split(".")) > 2 else layer_name
+        short_name = (
+            ".".join(layer_name.split(".")[-2:])
+            if len(layer_name.split(".")) > 2
+            else layer_name
+        )
 
-        ax.plot(time_sec, profile_norm, label=short_name, color=color, linewidth=2, alpha=0.7)
+        ax.plot(
+            time_sec,
+            profile_norm,
+            label=short_name,
+            color=color,
+            linewidth=2,
+            alpha=0.7,
+        )
 
     # Highlight P300 window
     ax.axvspan(0.8, 1.3, alpha=0.1, color="green", label="P300 window")
 
     ax.set_xlabel("Time Post-Stimulus (s)", fontsize=11)
     ax.set_ylabel("Normalized Attribution", fontsize=11)
-    ax.set_title("Layer-wise Temporal Attribution Profiles", fontsize=13, fontweight="bold")
+    ax.set_title(
+        "Layer-wise Temporal Attribution Profiles", fontsize=13, fontweight="bold"
+    )
     ax.legend(loc="upper right", fontsize=8, ncol=2)
     ax.grid(alpha=0.3)
 
@@ -422,21 +489,35 @@ def plot_channel_ablation(ablation_results: dict, output_path: Path) -> None:
         else:
             colors.append("#457B9D")  # Others: blue
 
-    bars = ax.bar(channel_indices, channel_importance, color=colors, edgecolor="black", linewidth=0.3)
+    bars = ax.bar(
+        channel_indices,
+        channel_importance,
+        color=colors,
+        edgecolor="black",
+        linewidth=0.3,
+    )
     ax.set_xlabel("Channel Index", fontsize=11)
     ax.set_ylabel("ΔNRMSE (Importance)", fontsize=11)
     ax.set_title(
         f"Channel Ablation Study ({ablation_results['ablation_strategy']} strategy)",
         fontsize=13,
-        fontweight="bold"
+        fontweight="bold",
     )
     ax.grid(alpha=0.3, axis="y")
 
     # Highlight baseline
-    ax.axhline(0, color="black", linestyle="--", linewidth=1, alpha=0.5, label="Baseline (no ablation)")
+    ax.axhline(
+        0,
+        color="black",
+        linestyle="--",
+        linewidth=1,
+        alpha=0.5,
+        label="Baseline (no ablation)",
+    )
 
     # Legend
     from matplotlib.patches import Patch
+
     legend_elements = [
         Patch(facecolor="#E63946", label="Top 3 channels"),
         Patch(facecolor="#F18F01", label="Top 4-10 channels"),
@@ -478,7 +559,14 @@ def plot_temporal_ablation(ablation_results: dict, output_path: Path) -> None:
     window_centers_sec = ablation_results["window_centers_sec"]
     most_important_time = ablation_results["most_important_time_sec"]
 
-    ax.plot(window_centers_sec, window_importance, color="#2E86AB", linewidth=2, marker="o", markersize=4)
+    ax.plot(
+        window_centers_sec,
+        window_importance,
+        color="#2E86AB",
+        linewidth=2,
+        marker="o",
+        markersize=4,
+    )
 
     # Highlight P300 window
     ax.axvspan(0.8, 1.3, alpha=0.2, color="green", label="P300 window (expected)")
@@ -489,7 +577,7 @@ def plot_temporal_ablation(ablation_results: dict, output_path: Path) -> None:
         color="#E63946",
         linestyle="--",
         linewidth=2,
-        label=f"Most critical: {most_important_time:.2f}s"
+        label=f"Most critical: {most_important_time:.2f}s",
     )
 
     ax.set_xlabel("Time Post-Stimulus (s)", fontsize=11)
@@ -497,7 +585,7 @@ def plot_temporal_ablation(ablation_results: dict, output_path: Path) -> None:
     ax.set_title(
         f"Temporal Window Ablation Study ({ablation_results['ablation_strategy']} strategy)",
         fontsize=13,
-        fontweight="bold"
+        fontweight="bold",
     )
     ax.legend(fontsize=9)
     ax.grid(alpha=0.3)

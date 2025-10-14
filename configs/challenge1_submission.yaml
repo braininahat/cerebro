@@ -1,22 +1,18 @@
-# Lightning CLI configuration for Challenge 1 (Response Time Prediction)
-# Usage: uv run python src/cli/train.py fit --config configs/challenge1_base.yaml
+# Lightning CLI configuration for Challenge 1 Final Submission
+# Usage: uv run cerebro fit --config configs/challenge1_submission.yaml
+#
+# This config is for final submission (Day 10):
+# - Trains on ALL subjects from training releases (R1-R4, R6-R11)
+# - No validation split (maxim izes training data)
+# - Tests on R5 (competition evaluation)
+# - Architecture and hyperparameters should be locked before using this config
 
 # Seed everything for reproducibility
 seed_everything: 42
 
-# Tuning flags (root level, not under trainer)
+# Tuning flags (disabled for submission - hyperparameters should be locked)
 run_lr_finder: false
 run_batch_size_finder: false
-
-# LR finder parameters (used if run_lr_finder=true)
-lr_finder_min: 1.0e-07
-lr_finder_max: 0.1
-lr_finder_num_training: 100
-
-# Batch size finder parameters (used if run_batch_size_finder=true)
-bs_finder_mode: power
-bs_finder_init_val: 32
-bs_finder_max_trials: 6
 
 # Trainer configuration
 trainer:
@@ -34,35 +30,27 @@ trainer:
     init_args:
       project: eeg2025
       entity: ubcse-eeg2025  # Change to your wandb team/username
-      name: challenge1_baseline
+      name: challenge1_submission
       tags:
         - challenge1
         - supervised
         - eegnex
-        - baseline
-      notes: "EEGNeX baseline for Challenge 1 (RT prediction from CCD task)"
+        - submission
+        - final
+      notes: "Final submission: Train on ALL subjects from training releases, test on R5"
       log_model: all  # Upload all checkpoints as wandb artifacts
       save_dir: outputs/challenge1
 
   # Callbacks
   callbacks:
-    # ModelCheckpoint: Save best models based on validation NRMSE
+    # ModelCheckpoint: Save models periodically (no validation to monitor in submission mode)
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         dirpath: outputs/challenge1/checkpoints
-        filename: challenge1-{epoch:02d}-{val_nrmse:.4f}
-        monitor: val_nrmse
-        mode: min
+        filename: challenge1-submission-{epoch:02d}
         save_top_k: 3
         save_last: true
-
-    # EarlyStopping: Stop training if validation NRMSE doesn't improve
-    - class_path: lightning.pytorch.callbacks.EarlyStopping
-      init_args:
-        monitor: val_nrmse
-        patience: 10
-        mode: min
-        verbose: true
+        every_n_epochs: 10  # Save every 10 epochs since no validation
 
     # TQDMProgressBar: Keep progress bars after epoch completion
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
@@ -74,26 +62,23 @@ trainer:
       init_args:
         max_depth: 1
 
-    # ModelAutopsy: Comprehensive diagnostics on early stopping or training end
+    # ModelAutopsy: Comprehensive diagnostics on training end
     - class_path: cerebro.callbacks.ModelAutopsyCallback
       init_args:
         run_on_training_end: true
-        run_on_early_stop: true
+        run_on_early_stop: false  # No early stopping in submission mode
         diagnostics:
           - predictions
           - gradients
           - activations
-          # Captum diagnostics disabled due to integration issues - see docs/CAPTUM_INTEGRATION_ISSUE.md
-          # - integrated_gradients  # Captum: IG attribution analysis
-          # - layer_gradcam         # Captum: Layer-wise attention
-          - failure_modes         # Phase 4: Top-K worst predictions and error analysis
+          - failure_modes
         save_plots: true
         log_to_wandb: true
         generate_report: true
-        num_samples: 500    # Analyze 500 samples (not full val set for speed)
-        top_k_failures: 100 # Number of worst predictions to analyze in detail
-        ig_n_steps: 50      # IG integration steps (50 = good tradeoff)
-        ig_baseline: zero   # Baseline type: zero, mean, or random
+        num_samples: 500
+        top_k_failures: 100
+        ig_n_steps: 50
+        ig_baseline: zero
 
 # Model configuration (class registered in CLI, just specify __init__ params)
 model:
@@ -103,16 +88,15 @@ model:
   sfreq: 100
   model_class: EEGNeX  # Architecture choice: "EEGNeX" or "SignalJEPA_PreLocal"
   model_kwargs: {}  # Model-specific hyperparameters (empty for EEGNeX defaults)
-  lr: 0.001
-  weight_decay: 0.00001
-  epochs: 100  # Must match trainer.max_epochs for scheduler
+  lr: 0.001  # Should be tuned in dev mode before submission
+  weight_decay: 0.00001  # Should be tuned in dev mode before submission
+  epochs: 1000  # Must match trainer.max_epochs for scheduler
 
 # Data configuration (class registered in CLI, just specify __init__ params)
 data:
   data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
-  # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training!
-  # Training releases: R1-R4, R6-R11 only (10 releases total)
-  # R5 is held out for competition leaderboard evaluation
+  # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training releases!
+  # Training on ALL subjects from R1-R4, R6-R11 (10 releases total)
   releases:
     - R1
     - R2
@@ -138,15 +122,15 @@ data:
     - NDARBA381JGH
   shift_after_stim: 0.5  # Start window 0.5s after stimulus
   window_len: 2.0  # 2 second windows
-  use_mini: false  # Set to true for fast prototyping
+  use_mini: false  # Must be false for final submission
   cache_dir: null  # null = auto (data_dir/../cache/challenge1)
-  val_frac: 0.1
-  test_frac: 0.1
+  val_frac: 0.1  # Ignored in submission mode
+  test_frac: 0.1  # Ignored in submission mode
   seed: 2025
   sfreq: 100
   epoch_len_s: 2.0
   anchor: stimulus_anchor
-  # Mode settings (see challenge1_r5test.yaml or challenge1_submission.yaml for alternatives)
-  mode: dev  # "dev" = split training releases for train/val/test, "submission" = train on all
-  test_on_r5: false  # false = use local test split, true = use R5 (matches competition scoring)
-  r5_data_dir: null  # Only used if test_on_r5=true
+  # Submission mode settings
+  mode: submission  # "submission" = train on ALL subjects, no val split
+  test_on_r5: true  # REQUIRED in submission mode
+  r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data}  # R5 data location
