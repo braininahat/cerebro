@@ -23,19 +23,33 @@ logger = logging.getLogger(__name__)
 class Challenge1Module(L.LightningModule):
     """LightningModule for Challenge 1 (RT prediction from CCD task).
 
+    Supports multiple braindecode architectures via model_class parameter.
+
     Args:
         n_chans: Number of EEG channels (default: 129 for HBN)
         n_outputs: Number of output neurons (default: 1 for regression)
         n_times: Window length in samples (default: 200 = 2s @ 100Hz)
         sfreq: Sampling frequency in Hz (default: 100)
+        model_class: Model architecture to use (default: "EEGNeX")
+            Options: "EEGNeX", "SignalJEPA_PreLocal"
+        model_kwargs: Additional model-specific kwargs (default: None)
+            For EEGNeX: typically empty dict {}
+            For SignalJEPA_PreLocal: transformer params, feature encoder spec, etc.
         lr: Learning rate for AdamW (default: 0.001)
         weight_decay: Weight decay for AdamW (default: 0.00001)
         epochs: Total training epochs for scheduler (default: 100)
 
     Example:
-        >>> model = Challenge1Module(lr=0.001, weight_decay=0.00001)
+        >>> # EEGNeX baseline
+        >>> model = Challenge1Module(model_class="EEGNeX", lr=0.001)
         >>> trainer = Trainer(max_epochs=100)
         >>> trainer.fit(model, datamodule)
+
+        >>> # SignalJEPA_PreLocal
+        >>> model = Challenge1Module(
+        ...     model_class="SignalJEPA_PreLocal",
+        ...     model_kwargs={"transformer__d_model": 128, "transformer__num_encoder_layers": 12}
+        ... )
     """
 
     def __init__(
@@ -44,6 +58,8 @@ class Challenge1Module(L.LightningModule):
         n_outputs: int = 1,
         n_times: int = 200,
         sfreq: int = 100,
+        model_class: str = "EEGNeX",
+        model_kwargs: dict | None = None,
         lr: float = 1e-3,
         weight_decay: float = 1e-5,
         epochs: int = 100,
@@ -51,13 +67,34 @@ class Challenge1Module(L.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        # Model
-        self.model = EEGNeX(
-            n_chans=n_chans,
-            n_outputs=n_outputs,
-            n_times=n_times,
-            sfreq=sfreq,
-        )
+        # Handle None for model_kwargs
+        if model_kwargs is None:
+            model_kwargs = {}
+
+        # Model instantiation (factory pattern)
+        if model_class == "EEGNeX":
+            from braindecode.models import EEGNeX
+            self.model = EEGNeX(
+                n_chans=n_chans,
+                n_outputs=n_outputs,
+                n_times=n_times,
+                sfreq=sfreq,
+                **model_kwargs
+            )
+        elif model_class == "SignalJEPA_PreLocal":
+            from braindecode.models import SignalJEPA_PreLocal
+            self.model = SignalJEPA_PreLocal(
+                n_chans=n_chans,
+                n_outputs=n_outputs,
+                n_times=n_times,
+                sfreq=sfreq,
+                **model_kwargs
+            )
+        else:
+            raise ValueError(
+                f"Unknown model_class: {model_class}. "
+                f"Supported: 'EEGNeX', 'SignalJEPA_PreLocal'"
+            )
 
         # Loss
         self.loss_fn = torch.nn.MSELoss()

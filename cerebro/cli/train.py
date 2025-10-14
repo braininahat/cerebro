@@ -245,6 +245,8 @@ class CerebroCLI(LightningCLI):
             "num_test_windows": len(self.datamodule.test_set) if self.datamodule.test_set else 0,
 
             # Model architecture
+            "model_class": model_hparams.model_class,  # Architecture choice (EEGNeX, SignalJEPA_PreLocal, etc.)
+            "model_kwargs": model_hparams.model_kwargs,  # Model-specific hyperparameters
             "model_name": self.model.model.__class__.__name__,
             "n_chans": model_hparams.n_chans,
             "n_times": model_hparams.n_times,
