@@ -92,6 +92,13 @@ class Challenge1DataModule(L.LightningDataModule):
         super().__init__()
         self.save_hyperparameters()
 
+        # R5 guard: Prevent training on competition validation set
+        if "R5" in releases:
+            raise ValueError(
+                "R5 is the COMPETITION VALIDATION SET and must NEVER be used for training! "
+                f"Got releases={releases}. Use releases from [R1, R2, R3, R4, R6, R7, R8, R9, R10, R11] only."
+            )
+
         # Convert to Path objects
         self.data_dir = Path(data_dir)
 

@@ -74,6 +74,26 @@ trainer:
       init_args:
         max_depth: 1
 
+    # ModelAutopsy: Comprehensive diagnostics on early stopping or training end
+    - class_path: cerebro.callbacks.ModelAutopsyCallback
+      init_args:
+        run_on_training_end: true
+        run_on_early_stop: true
+        diagnostics:
+          - predictions
+          - gradients
+          - activations
+          - integrated_gradients  # Captum: IG attribution analysis
+          - layer_gradcam         # Captum: Layer-wise attention
+          - failure_modes         # Phase 4: Top-K worst predictions and error analysis
+        save_plots: true
+        log_to_wandb: true
+        generate_report: true
+        num_samples: 500    # Analyze 500 samples (not full val set for speed)
+        top_k_failures: 100 # Number of worst predictions to analyze in detail
+        ig_n_steps: 50      # IG integration steps (50 = good tradeoff)
+        ig_baseline: zero   # Baseline type: zero, mean, or random
+
 # Model configuration (class registered in CLI, just specify __init__ params)
 model:
   n_chans: 129  # HBN dataset channel count
@@ -87,6 +107,9 @@ model:
 # Data configuration (class registered in CLI, just specify __init__ params)
 data:
   data_dir: ${oc.env:EEG2025_DATA_ROOT,data/full}
+  # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training!
+  # Training releases: R1-R4, R6-R11 only (10 releases total)
+  # R5 is held out for competition leaderboard evaluation
   releases:
     - R1
     - R2

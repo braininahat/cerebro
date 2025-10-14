@@ -318,6 +318,46 @@ Hydra enables clean experiment management through composition:
 - Notebooks for exploration, src/ for reusable code
 - Configuration as documentation
 
+## Future Improvements (If Time Permits)
+
+### Challenge 1: Multi-Task Learning with Feedback
+
+**Current limitation**: Model fails catastrophically on fast RT trials (< 0.5s) with errors > 1.5s. The competition's fixed evaluation window [0.5s, 2.5s] post-stimulus means these trials have minimal pre-response signal.
+
+**Proposed solution**: Add auxiliary classification task to predict response correctness (smiley vs sad face feedback).
+
+**Architecture**:
+```
+Input (129, 200) → EEGNeX Encoder → [RT Head, Correctness Head]
+                                       ↓            ↓
+                                   RT prediction  [Correct/Incorrect]
+```
+
+**Rationale**:
+- Error trials likely have different neural signatures in available signal (0.5-2.5s window)
+- Multi-task learning may improve shared representations
+- Feedback annotations available in BIDS data (`feedback` field: smiley_face/sad_face)
+- Expected benefit: 5-15% NRMSE reduction (speculative)
+
+**Implementation notes**:
+- Extract `feedback` field via `add_extras_columns` in preprocessing
+- Add binary classification head to encoder
+- Loss: `L_total = L_rt + 0.1 * L_correctness` (MSE + weighted CrossEntropy)
+- At inference, only use RT head (auxiliary task is training-only)
+
+**Why not pursued initially**: Challenge 2 (70% of score) higher priority; contrastive pretraining more promising.
+
+### Challenge 1: Understanding the Task Constraint
+
+The Contrast Change Detection task has a 1.6s stimulus ramping period (contrast gradually changes 50%→100% over 1.6 seconds). The [0.5s, 2.5s] evaluation window captures:
+- 0.5-1.6s: Mid-to-late stimulus ramping
+- 1.6-2.4s: Stimulus return to baseline
+- 2.4-2.5s: First 100ms of feedback
+
+For RTs < 0.5s, the window captures partial stimulus ramping, which may still contain speed-discriminative features. The competition's window choice appears intentional - focusing on decision/motor processes rather than early visual encoding.
+
+**Why temporal jittering won't work**: Shifting the window breaks the stimulus-response time relationship (the label we're predicting). Unlike image augmentation, time is causally linked to RT.
+
 ## References
 
 **Dataset**:

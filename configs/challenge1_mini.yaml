@@ -57,6 +57,13 @@ trainer:
       init_args:
         max_depth: 1
 
+    # ModelAutopsy: Disabled for mini dataset (too slow for quick iteration)
+    - class_path: cerebro.callbacks.ModelAutopsyCallback
+      init_args:
+        run_on_training_end: false
+        run_on_early_stop: false
+        diagnostics: []
+
 # Model configuration (class registered in CLI, just specify __init__ params)
 model:
   n_chans: 129
@@ -69,9 +76,11 @@ model:
 
 # Data configuration (mini overrides)
 data:
-  data_dir: ${oc.env:EEG2025_DATA_ROOT,data/mini}
+  data_dir: ${oc.env:EEG2025_DATA_ROOT,data/full}
+  # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training!
+  # Using R1 for mini prototyping (small enough for fast iteration)
   releases:
-    - R5  # Mini dataset only has R5
+    - R1  # Mini prototyping with R1 (NOT R5!)
   batch_size: 64  # Smaller batch for mini
   num_workers: 4  # Fewer workers for mini
   excluded_subjects:
