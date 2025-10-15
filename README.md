@@ -48,127 +48,138 @@ Priority: working submission over architectural complexity. Advanced architectur
 
 ## Repository Structure
 
-**Design philosophy**: Modular src/ directory for organization, but NOT packaged as installable library. Run scripts from root with `PYTHONPATH=. python scripts/train.py` for fast iteration.
+**Design philosophy**: Installable package (`uv pip install -e .`) for clean imports and IDE support. Lightning CLI for experiment management with rich diagnostics.
 
 ```
 cerebro/
-├── pyproject.toml                # uv dependency management
+├── pyproject.toml                # uv dependency management + CLI entry point
 ├── README.md
 ├── .env                          # Paths, API keys (gitignored)
 │
 ├── notebooks/                    # Jupytext .py format (# %%), executable in VSCode
-│   ├── 00_download_all_data.py       # Download R1-R5 via EEGChallengeDataset
-│   ├── 01_explore_hbn_structure.py   # BIDS structure, events, participants.tsv
-│   ├── 02_understand_startkit.py     # Work through challenge_1.py, challenge_2.py
-│   ├── 03_challenge1_baseline.py     # EEGNeX for RT prediction
-│   ├── 04_challenge2_baseline.py     # EEGNeX for p_factor prediction
-│   ├── 05_movie_contrastive_data.py  # Explore movies, create positive/negative pairs
-│   ├── 06_movie_pretrain.py          # Contrastive pretraining loop
-│   └── 07_multitask_finetune.py      # Joint C1+C2 fine-tuning
+│   ├── 001_train_challenge1_eegnex.py   # ✅ EEGNeX baseline for RT prediction
+│   ├── 002_train_challenge1_jepa.py     # ✅ SignalJEPA baseline for RT prediction
+│   ├── 003_validate_data_quality.py     # ✅ Data pipeline validation, R5 separation checks
+│   ├── 015_train_challenge2.py          # 🚧 p_factor prediction (planned)
+│   ├── 020_train_multitask.py           # 🚧 Joint C1+C2 training (planned)
+│   ├── 023_movie_contrastive_windowing.py  # ✅ Movie windowing exploration
+│   └── 024_test_contrastive_dataset.py  # ✅ Contrastive pair validation
 │
-├── src/
+├── cerebro/                      # Main package (installed via `uv pip install -e .`)
+│   ├── __init__.py
+│   │
+│   ├── cli/
+│   │   └── train.py              # ✅ CerebroCLI (Lightning CLI with logging, tuning)
+│   │
 │   ├── data/
-│   │   ├── challenge1.py         # Challenge1Dataset: CCD windows + RT labels
-│   │   ├── challenge2.py         # Challenge2Dataset: multi-task windows + p_factor
-│   │   ├── movies.py             # MoviePairDataset: contrastive pairs from videos
-│   │   ├── preprocessing.py      # annotate_trials_with_target, windowing utils
-│   │   └── augmentation.py       # Time jitter, amplitude scaling
+│   │   └── challenge1.py         # ✅ Challenge1DataModule: CCD windows + RT labels (636 lines)
 │   │
 │   ├── models/
-│   │   ├── encoders.py           # Wrap braindecode models (EEGNeX, SignalJEPA)
-│   │   ├── projector.py          # MLP projection head for contrastive learning
-│   │   ├── heads.py              # RegressionHead for C1/C2 predictions
-│   │   └── multitask.py          # MultitaskModel: shared encoder + dual heads
+│   │   └── challenge1.py         # ✅ Challenge1Module: EEGNeX/SignalJEPA for RT regression
 │   │
-│   ├── training/
-│   │   ├── supervised.py         # SupervisedTrainer: single task training loop
-│   │   ├── contrastive.py        # ContrastiveTrainer: InfoNCE loss, pair sampling
-│   │   ├── multitask.py          # MultitaskTrainer: joint C1+C2 optimization
-│   │   └── metrics.py            # NRMSE calculation, local scoring wrapper
+│   ├── callbacks/
+│   │   └── model_autopsy.py      # ✅ ModelAutopsyCallback: comprehensive diagnostics
 │   │
-│   ├── evaluation/
-│   │   ├── local_scoring.py      # Adapted from startkit/local_scoring.py
-│   │   └── submission_wrapper.py # Convert checkpoint → Submission class format
+│   ├── diagnostics/              # ✅ Diagnostic modules (9 modules implemented)
+│   │   ├── predictions.py        # Prediction analysis, baseline comparisons
+│   │   ├── gradients.py          # Gradient flow analysis
+│   │   ├── activations.py        # Dead neurons, layer statistics
+│   │   ├── captum_attributions.py   # Integrated Gradients (Captum)
+│   │   ├── captum_layers.py      # Layer GradCAM (Captum)
+│   │   ├── failure_modes.py      # Top-K worst predictions
+│   │   ├── ablation.py           # Channel/temporal ablation studies
+│   │   └── visualizations.py     # Plot generation for all diagnostics
 │   │
-│   └── utils/
-│       ├── checkpoint.py         # save_checkpoint(), load_checkpoint()
-│       └── config.py             # Config dataclasses (if needed beyond Hydra)
+│   ├── utils/
+│   │   ├── logging.py            # ✅ Rich logging (console + file)
+│   │   ├── tuning.py             # ✅ LR finder, batch size finder wrappers
+│   │   ├── movie_windows.py      # ✅ Movie task windowing (fixed-length)
+│   │   └── contrastive_dataset.py   # ✅ ContrastivePairDataset (pos/neg pairs)
+│   │
+│   ├── training/                 # ❌ Planned (empty directory)
+│   │   └── __init__.py
+│   │
+│   └── evaluation/               # ❌ Planned (empty directory)
+│       └── __init__.py
 │
-├── configs/                      # Hydra configuration files
-│   ├── config.yaml              # Base: seed, device, paths, wandb
-│   ├── data/
-│   │   └── hbn.yaml             # cache_dir, releases, batch_size, num_workers
-│   ├── model/
-│   │   ├── eegnex.yaml          # n_chans, n_times, sfreq, n_outputs
-│   │   ├── jepa.yaml            # SignalJEPA configuration
-│   │   └── contrastive.yaml     # encoder config + projection_dim, temperature
-│   ├── training/
-│   │   ├── supervised.yaml      # lr, weight_decay, epochs, early_stopping
-│   │   ├── contrastive.yaml     # lr, temperature, epochs
-│   │   └── multitask.yaml       # loss_weights, lr, freeze_encoder_epochs
-│   └── experiment/              # Composed experiment configs
-│       ├── baseline_eegnex_c1.yaml
-│       ├── baseline_eegnex_c2.yaml
-│       ├── movie_pretrain.yaml
-│       └── multitask_finetune.yaml
-│
-├── scripts/
-│   ├── train.py                 # Main training entry (Hydra-decorated)
-│   ├── evaluate.py              # Run local_scoring on checkpoint
-│   └── package_submission.py    # Create submission.zip
+├── configs/                      # Lightning CLI configuration files
+│   ├── challenge1_eegnex.yaml          # ✅ EEGNeX for Challenge 1
+│   ├── challenge1_eegnex_mini.yaml     # ✅ Fast prototyping (R1 mini)
+│   ├── challenge1_jepa.yaml            # ✅ SignalJEPA for Challenge 1
+│   ├── challenge1_jepa_mini.yaml       # ✅ Fast prototyping (R1 mini)
+│   ├── challenge1_submission.yaml      # ✅ Final submission (all training data)
+│   └── README.md                       # Config documentation
 │
 ├── startkit/                    # Original competition startkit (reference)
-├── data/full/ds005505-bdf/     # HBN BIDS data (gitignored)
+│   ├── challenge_1.py           # Reference preprocessing for C1
+│   ├── challenge_2.py           # Reference preprocessing for C2
+│   └── local_scoring.py         # Local evaluation (NRMSE calculation)
+│
+├── cache/                       # Preprocessed data cache (gitignored)
+├── data/                        # HBN BIDS data (gitignored)
 └── outputs/                     # Checkpoints, logs, wandb (gitignored)
 ```
 
+**Status Legend**: ✅ Implemented | 🚧 Partially implemented | ❌ Planned
+
 ## Timeline & Milestones (10 Days)
 
-**Days 1-2: Foundation & Data Understanding**
-- Download all HBN releases (R1-R5) using `EEGChallengeDataset` API
-- Explore BIDS structure, participants.tsv, event annotations
-- Work through startkit code cell-by-cell in notebooks
-- Set up local scoring pipeline
+**Days 1-2: Foundation & Data Understanding** ✅
+- ✅ Downloaded HBN releases using `EEGChallengeDataset` API
+- ✅ Explored BIDS structure, participants.tsv, event annotations
+- ✅ Worked through startkit code (challenge_1.py, challenge_2.py)
+- ✅ Set up local scoring pipeline via R5 test evaluation
 
-**Days 3-4: Supervised Baselines**
-- Implement Challenge1Dataset (CCD windows + RT labels)
-- Implement Challenge2Dataset (multi-task windows + p_factor labels)
-- Train EEGNeX baselines for both challenges
-- Establish baseline NRMSE scores via local evaluation
-- Integrate wandb logging
+**Days 3-4: Supervised Baselines** ✅
+- ✅ Implemented Challenge1DataModule (CCD windows + RT labels, 636 lines)
+- ✅ Implemented Challenge1Module (EEGNeX + SignalJEPA support)
+- ✅ Integrated Lightning CLI for experiment management
+- ✅ Added comprehensive diagnostics (ModelAutopsyCallback + 9 modules)
+- ✅ Integrated wandb logging with artifact management
+- 🚧 Challenge2Dataset (planned, not yet implemented)
 
-**Days 5-7: Movie Contrastive Pretraining**
-- Implement MoviePairDataset (positive/negative pairs)
-- Train contrastive encoder with InfoNCE loss
-- Implement multitask fine-tuning (shared encoder, dual heads)
-- Evaluate: does it beat supervised baselines?
+**Days 5-7: Movie Contrastive Pretraining** 🚧
+- ✅ Implemented movie windowing utilities (movie_windows.py)
+- ✅ Implemented ContrastivePairDataset (contrastive_dataset.py)
+- ✅ Validated infrastructure with notebooks (023, 024)
+- ❌ Training loop not yet implemented (cerebro/training/ empty)
+- ❌ Multitask fine-tuning not yet implemented
 
-**Days 8-9: Iteration & Architecture Exploration** (if movie approach works)
-- Hyperparameter tuning via wandb sweeps
-- Try SignalJEPA, spatial hierarchies, SlowFast (if time permits)
-- Experiment with different loss weights, temperatures
+**Days 8-9: Iteration & Architecture Exploration** ⏳
+- Hyperparameter tuning via LR finder / batch size finder
+- Try different architectures (SignalJEPA validated)
+- Experiment with training strategies
 
-**Day 10: Final Submission**
+**Day 10: Final Submission** ⏳
 - Select best checkpoint via local scoring
-- Package submission.zip following competition format
-- Test with `local_scoring.py --fast-dev-run`
+- Package submission.zip (TorchScript conversion)
+- Test with `startkit/local_scoring.py`
 - Submit to competition platform
+
+**Status Legend**: ✅ Complete | 🚧 In progress | ❌ Not started | ⏳ Upcoming
 
 ## Setup
 
-Install dependencies using uv:
+**1. Install dependencies and package:**
 
 ```bash
 cd cerebro
-uv sync
+uv sync                   # Install dependencies from pyproject.toml
+uv pip install -e .       # Install cerebro package in editable mode
 ```
 
-Create `.env` file for paths:
+This registers the `cerebro` CLI command and enables clean imports throughout the codebase.
+
+**2. Create `.env` file for paths:**
 
 ```bash
-echo "DATA_DIR=/home/varun/repos/cerebro/data/full" > .env
+echo "EEG2025_DATA_ROOT=/path/to/your/data" > .env
 echo "WANDB_API_KEY=your_key_here" >> .env
 ```
+
+**Environment variables:**
+- `EEG2025_DATA_ROOT`: Parent directory containing HBN releases (e.g., `/home/user/data`)
+- `WANDB_API_KEY`: Weights & Biases API key for experiment tracking
 
 ## Data Download
 
@@ -189,70 +200,161 @@ for release in ["R1", "R2", "R3", "R4", "R5"]:
 
 ## Running Experiments
 
-All experiments use Hydra for configuration management. Run from repository root:
+All experiments use **Lightning CLI** for configuration management. The `cerebro` command is registered via `pyproject.toml` during installation.
 
-**Train supervised baseline:**
+### Basic Training
+
+**Train Challenge 1 baseline (EEGNeX):**
 ```bash
-uv run python scripts/train.py experiment=baseline_eegnex_c1
-uv run python scripts/train.py experiment=baseline_eegnex_c2
+uv run cerebro fit --config configs/challenge1_eegnex.yaml
 ```
 
-**Train contrastive pretraining:**
+**Train Challenge 1 baseline (SignalJEPA):**
 ```bash
-uv run python scripts/train.py experiment=movie_pretrain
+uv run cerebro fit --config configs/challenge1_jepa.yaml
 ```
 
-**Fine-tune multitask:**
+**Fast prototyping with mini dataset:**
 ```bash
-uv run python scripts/train.py experiment=multitask_finetune \
-  training.pretrained_checkpoint=outputs/movie_pretrain/best.pt
+uv run cerebro fit --config configs/challenge1_eegnex_mini.yaml
 ```
 
-**Override config values:**
+### With Automatic Tuning
+
+**Learning rate finder:**
 ```bash
-uv run python scripts/train.py experiment=baseline_eegnex_c1 \
-  training.lr=0.0001 data.batch_size=256
+uv run cerebro fit --config configs/challenge1_eegnex.yaml --run_lr_finder true
+```
+
+The LR finder runs before training, plots the loss curve, and uploads it to wandb.
+
+**Batch size finder:**
+```bash
+uv run cerebro fit --config configs/challenge1_eegnex.yaml --run_batch_size_finder true
+```
+
+Automatically finds the largest batch size that fits in GPU memory.
+
+### Overriding Config Values
+
+**Override model hyperparameters:**
+```bash
+uv run cerebro fit --config configs/challenge1_eegnex.yaml \
+  --model.lr 0.0001 \
+  --model.weight_decay 0.0001
+```
+
+**Override data parameters:**
+```bash
+uv run cerebro fit --config configs/challenge1_eegnex.yaml \
+  --data.batch_size 256 \
+  --data.num_workers 16
+```
+
+**Override trainer settings:**
+```bash
+uv run cerebro fit --config configs/challenge1_eegnex.yaml \
+  --trainer.max_epochs 50 \
+  --trainer.precision "16-mixed"
+```
+
+### Final Submission Training
+
+**Train on all available data (no validation split):**
+```bash
+uv run cerebro fit --config configs/challenge1_submission.yaml
+```
+
+This uses `mode="submission"` to train on 100% of R1-R4, R6-R11 for maximum performance.
+
+### Backward Compatibility
+
+You can also run the CLI directly via Python:
+```bash
+uv run python cerebro/cli/train.py fit --config configs/challenge1_eegnex.yaml
 ```
 
 ## Local Evaluation
 
-Critical for rapid iteration before submitting:
+**Current status**: R5 evaluation is integrated into training via `test_on_r5=true` in configs. Dedicated evaluation script planned but not yet implemented.
+
+### During Training
+
+Configs with `test_on_r5: true` automatically evaluate on R5 after training:
 
 ```bash
-# Evaluate checkpoint on R5 dataset (same as competition)
-uv run python scripts/evaluate.py \
-  checkpoint=outputs/baseline_eegnex_c1/best.pt
-
-# Fast dev run (single subject, quick validation)
-uv run python scripts/evaluate.py \
-  checkpoint=outputs/baseline_eegnex_c1/best.pt \
-  --fast-dev-run
+uv run cerebro fit --config configs/challenge1_eegnex.yaml
+# Training completes → automatic R5 test evaluation → test_nrmse logged
 ```
 
-Output:
+### Manual Evaluation (Planned)
+
+```bash
+# Planned: scripts/evaluate.py
+uv run python startkit/local_scoring.py \
+  --submission-zip submission.zip \
+  --data-dir $EEG2025_DATA_ROOT \
+  --output-dir outputs/test_submission
 ```
-Challenge 1 NRMSE: 0.8234
-Challenge 2 NRMSE: 0.9112
-Overall Score: 0.8850
-```
+
+This uses the competition's official scoring script to compute:
+- Challenge 1 NRMSE
+- Challenge 2 NRMSE
+- Overall score: 0.3 × C1_NRMSE + 0.7 × C2_NRMSE
 
 ## Creating Submission
 
-Package checkpoint for competition submission:
+**Current status**: Submission packaging planned but not yet implemented. Use manual TorchScript conversion workflow.
+
+### TorchScript Conversion Workflow (Recommended)
+
+**Why TorchScript?** Competition environment lacks custom dependencies (mamba-ssm, neuralop). TorchScript bundles model architecture + weights in a single `.pt` file that only requires PyTorch.
+
+**1. Convert Lightning checkpoint to TorchScript:**
 
 ```bash
-uv run python scripts/package_submission.py \
-  checkpoint=outputs/multitask_finetune/best.pt \
-  output=submission.zip
+uv run python -m cerebro.utils.checkpoint_to_torchscript \
+  --ckpt outputs/challenge1/TIMESTAMP/checkpoints/best.ckpt \
+  --output model_challenge_1.pt \
+  --input-shape 1 129 200
 ```
 
-Test locally before submitting:
+**2. Create submission.py:**
+
+See `cerebro/submission/submission.py` template (planned). Minimal example:
+
+```python
+import torch
+from pathlib import Path
+
+class Submission:
+    def __init__(self, SFREQ, DEVICE):
+        self.sfreq = SFREQ
+        self.device = DEVICE
+
+    def get_model_challenge_1(self):
+        return torch.jit.load("model_challenge_1.pt", map_location=self.device)
+
+    def get_model_challenge_2(self):
+        return torch.jit.load("model_challenge_2.pt", map_location=self.device)
+```
+
+**3. Package submission (single-level zip):**
+
+```bash
+cd cerebro/submission
+zip -j ../../submission.zip submission.py model_challenge_1.pt model_challenge_2.pt
+```
+
+**Critical**: Use `zip -j` to create single-level zip (no folders).
+
+**4. Test locally:**
+
 ```bash
 uv run python startkit/local_scoring.py \
   --submission-zip submission.zip \
-  --data-dir data/full \
-  --output-dir outputs/test_submission \
-  --fast-dev-run
+  --data-dir $EEG2025_DATA_ROOT \
+  --output-dir outputs/local_scoring
 ```
 
 ## Key Dependencies
@@ -262,32 +364,164 @@ Core libraries (managed via `pyproject.toml`):
 - **eegdash** (0.3.8+): Competition-specific HBN data loader with `EEGChallengeDataset`
 - **braindecode** (1.2.0+): EEG models (EEGNeX, SignalJEPA) and preprocessing
 - **MNE-Python**: Signal processing, BIDS support, Raw data handling
-- **PyTorch** (2.2.2+): Deep learning framework, automatic differentiation
-- **Hydra**: Hierarchical configuration composition and command-line overrides
-- **wandb**: Experiment tracking, hyperparameter sweeps, model checkpointing
-- **jupytext**: Notebook-as-code (.py format with # %% cells)
+- **PyTorch** (2.8.0+): Deep learning framework, automatic differentiation
+- **Lightning** (2.5.5+): Training framework with CLI, callbacks, loggers
+- **Captum** (0.8.0+): Model interpretability (Integrated Gradients, GradCAM)
+- **wandb** (0.21.4+): Experiment tracking, artifact management
+- **Rich** (13.9.0+): Beautiful terminal logging
 
-Install all with: `uv sync`
+Install all with: `uv sync && uv pip install -e .`
 
-## Configuration Management with Hydra
+## Configuration Management with Lightning CLI
 
-Hydra enables clean experiment management through composition:
+**Design**: Self-contained YAML configs with all parameters. Each config defines a complete experiment.
 
-**Base configs** (`configs/config.yaml`, `data/hbn.yaml`, `model/eegnex.yaml`):
-- Define reusable building blocks
-- Version-controlled defaults
-- Override via command line
+**Config structure** (e.g., `configs/challenge1_eegnex.yaml`):
 
-**Experiment configs** (`configs/experiment/`):
-- Compose base configs
-- Specify complete experimental setups
-- Example: `baseline_eegnex_c1.yaml` combines data/hbn + model/eegnex + training/supervised
+```yaml
+seed_everything: 42  # Reproducibility
+
+# Tuning flags (optional)
+run_lr_finder: false
+run_batch_size_finder: false
+
+# Trainer configuration
+trainer:
+  max_epochs: 1000
+  accelerator: auto
+  precision: "bf16-mixed"
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      name: challenge1_baseline
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val_nrmse
+        mode: min
+    - class_path: cerebro.callbacks.ModelAutopsyCallback
+      init_args:
+        diagnostics: ["predictions", "gradients", "activations"]
+
+# Model configuration
+model:
+  n_chans: 129
+  n_outputs: 1
+  model_class: EEGNeX
+  lr: 0.001
+
+# Data configuration
+data:
+  data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+  releases: [R1, R2, R3, R4, R6, R7, R8, R9, R10, R11]
+  batch_size: 512
+```
 
 **Benefits**:
-- No code changes to try new architectures/hyperparameters
-- Auto-generated output directories with timestamps
-- Config saved with each checkpoint for reproducibility
-- Easy sweeps: `hydra --multirun training.lr=0.001,0.0001,0.00001`
+- Complete experiment in one file
+- Lightning ecosystem integration (callbacks, loggers, profilers)
+- Built-in LR finder and batch size finder
+- Config saved with each checkpoint
+- Override any parameter via CLI: `--model.lr 0.0001`
+
+**Available configs**:
+- `challenge1_eegnex.yaml` - EEGNeX for RT prediction
+- `challenge1_jepa.yaml` - SignalJEPA for RT prediction
+- `challenge1_*_mini.yaml` - Fast prototyping with R1 mini
+- `challenge1_submission.yaml` - Final submission (all training data)
+
+## Model Autopsy & Diagnostics
+
+**Automatic comprehensive diagnostics** when early stopping fires or training completes.
+
+### ModelAutopsyCallback
+
+Configured in YAML via `trainer.callbacks`:
+
+```yaml
+callbacks:
+  - class_path: cerebro.callbacks.ModelAutopsyCallback
+    init_args:
+      run_on_training_end: true
+      run_on_early_stop: true
+      diagnostics:
+        - predictions          # Distribution, residuals, baseline comparisons
+        - gradients            # Per-layer gradient flow
+        - activations          # Dead neurons, layer statistics
+        - integrated_gradients # Captum IG (memory optimized)
+        - layer_gradcam        # Captum Layer GradCAM (memory optimized)
+        - failure_modes        # Top-K worst predictions
+      save_plots: true
+      log_to_wandb: true
+      generate_report: true
+      num_samples: 500         # Analyze 500 samples (not full val set)
+```
+
+### Diagnostic Modules
+
+**Tier 1 - Basic Diagnostics** (always enabled):
+- **predictions.py**: NRMSE, baseline comparisons, prediction distribution
+- **gradients.py**: Gradient flow, dead layers, grad/param ratios
+- **activations.py**: Dead neurons, layer statistics
+
+**Tier 2 - Attribution Analysis** (Captum):
+- **captum_attributions.py**: Integrated Gradients (IG) for input attribution
+  - Temporal profiles (when model attends)
+  - Spatial profiles (which channels important)
+  - Memory optimized (batched computation)
+- **captum_layers.py**: Layer GradCAM for layer-wise importance
+  - Auto-detects convolutional layers
+  - Layer hierarchy analysis
+
+**Tier 3 - Advanced Analysis** (opt-in):
+- **ablation.py**: Channel/temporal ablation studies
+- **failure_modes.py**: Top-K worst predictions with metadata analysis
+
+**Tier 4 - Visualization**:
+- **visualizations.py**: Plot generation for all diagnostics
+- Automatic wandb upload of plots
+
+### Outputs
+
+**1. Diagnostic plots** (saved to `outputs/TIMESTAMP/autopsy/`):
+- `prediction_distribution.png` - Predicted vs actual, residuals
+- `gradient_flow.png` - Per-layer gradient magnitudes
+- `activation_stats.png` - Dead neuron percentages
+- `integrated_gradients.png` - Temporal/spatial attribution
+- `layer_gradcam.png` - Layer importance hierarchy
+- `failure_modes.png` - Worst predictions analysis
+
+**2. Wandb artifacts**:
+- Plots uploaded to `autopsy/*` namespace
+- Markdown report uploaded as artifact
+- Summary metrics table for cross-run comparison
+- (Optional) Raw attribution data as compressed `.npz`
+
+**3. Autopsy report** (`autopsy_report.md`):
+- Prediction analysis (NRMSE, baseline comparisons)
+- Gradient health (dead layers, magnitude issues)
+- Activation health (dead neurons)
+- Captum insights (temporal/spatial patterns)
+- **Actionable recommendations** (increase LR, reduce weight decay, etc.)
+
+### Example Workflow
+
+```bash
+# Training with autopsy enabled (default in configs)
+uv run cerebro fit --config configs/challenge1_eegnex.yaml
+
+# After early stopping or training end:
+# → Autopsy runs automatically
+# → Plots saved to outputs/TIMESTAMP/autopsy/
+# → Report generated
+# → Artifacts uploaded to wandb
+```
+
+Check wandb for:
+- `autopsy/prediction_distribution` - Visual diagnostics
+- `autopsy/summary` - Table of metrics
+- `autopsy_report` artifact - Markdown report with recommendations
 
 ## Design Principles (10-Day Constraints)
 

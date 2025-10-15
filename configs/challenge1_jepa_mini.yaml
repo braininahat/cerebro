@@ -128,6 +128,7 @@ model:
   lr: 0.001
   weight_decay: 0.00001
   epochs: 2  # Must match trainer.max_epochs
+  input_scale: 1000.0  # Input scaling: 1.0 (volt, baseline), 1000.0 (millivolt, faster convergence)
 
 # Data configuration: MINI DATASET
 data:
@@ -156,3 +157,7 @@ data:
   sfreq: 100
   epoch_len_s: 2.0
   anchor: stimulus_anchor
+  # R5 Test Evaluation (Competition Validation Set)
+  mode: dev  # "dev" = split training releases for train/val/test
+  test_on_r5: true  # Use R5 as test set (even for mini prototyping to match competition evaluation)
+  r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data}  # R5 data location

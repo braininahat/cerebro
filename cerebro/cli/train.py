@@ -163,11 +163,13 @@ class CerebroCLI(LightningCLI):
         self._log_config_to_wandb()
 
         # Run tuners if enabled (read from root config, not trainer)
-        if self.config["fit"].get("run_lr_finder", False):
-            self._run_lr_finder()
-
+        # IMPORTANT: Batch size finder must run FIRST because optimal LR depends on batch size
+        # (larger batches → larger LR according to linear scaling rule)
         if self.config["fit"].get("run_batch_size_finder", False):
             self._run_batch_size_finder()
+
+        if self.config["fit"].get("run_lr_finder", False):
+            self._run_lr_finder()
 
     def _setup_logging(self):
         """Setup Rich logging to console and file."""

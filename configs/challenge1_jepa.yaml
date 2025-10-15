@@ -8,13 +8,13 @@
 seed_everything: 42
 
 # Tuning flags (root level, not under trainer)
-run_lr_finder: false
-run_batch_size_finder: false
+run_lr_finder: true
+run_batch_size_finder: true
 
 # LR finder parameters (used if run_lr_finder=true)
 lr_finder_min: 1.0e-07
 lr_finder_max: 0.1
-lr_finder_num_training: 100
+lr_finder_num_training: 40
 
 # Batch size finder parameters (used if run_batch_size_finder=true)
 bs_finder_mode: power
@@ -24,7 +24,7 @@ bs_finder_steps_per_trial: 3
 
 # Trainer configuration
 trainer:
-  max_epochs: 200
+  max_epochs: 50
   accelerator: auto  # Auto-detect GPU/CPU
   devices: 1
   precision: "32" # Options: "32" (full), "16-mixed" (fast), "bf16-mixed" (stable+fast, requires Ampere+)
@@ -142,6 +142,7 @@ model:
   lr: 0.001
   weight_decay: 0.00001
   epochs: 1000  # Must match trainer.max_epochs for scheduler
+  input_scale: 1000.0  # Input scaling: 1.0 (volt, baseline), 1000.0 (millivolt, faster convergence)
 
 # Data configuration (identical to challenge1_base.yaml)
 data:
@@ -179,3 +180,7 @@ data:
   sfreq: 100
   epoch_len_s: 2.0
   anchor: stimulus_anchor
+  # R5 Test Evaluation (Competition Validation Set)
+  mode: dev  # "dev" = split training releases for train/val/test, "submission" = train on all
+  test_on_r5: true  # Use R5 as test set (competition validation set for honest evaluation)
+  r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data}  # R5 data location

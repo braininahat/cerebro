@@ -54,16 +54,16 @@ Competition submission for NeurIPS 2025 EEG Foundation Challenge with a 10-day d
 **Examples**:
 ```python
 # Question: "How does Challenge 1 windowing work?"
-search_nodes(query="Challenge 1 windowing pipeline stimulus")
+search_nodes(query="Challenge 1 windowing")  # ✅ 3 keywords
 
 # Question: "What optimizer does movie_pretrain use?"
-search_nodes(query="movie_pretrain optimizer AdamW")
+search_nodes(query="movie_pretrain optimizer")  # ✅ 2 keywords
 
 # Question: "Where is NRMSE calculated?"
-search_nodes(query="NRMSE metric calculation local_scoring")
+search_nodes(query="NRMSE calculation")  # ✅ 2 keywords
 
 # Question: "What are the movie tasks?"
-search_nodes(query="movie tasks DespicableMe")
+search_nodes(query="movie tasks")  # ✅ 2 keywords
 ```
 
 ### Investigation Flow
@@ -72,6 +72,96 @@ search_nodes(query="movie tasks DespicableMe")
 2. **If found**: Use the information, cross-reference with code if needed
 3. **If not found**: Investigate using Read/Grep/Glob/notebooks
 4. **Capture findings**: ALWAYS update memory with what you learned
+
+### Project Filtering
+
+**The memory graph contains knowledge from multiple projects** (cerebro + ultraspeech-qt). Use relations to filter results by project.
+
+**How it works**:
+- `search_nodes()` returns **both entities AND relations**
+- Relations include `part_of` connections to project entities
+- Filter results by checking: `relation.to == "cerebro"` or `relation.to == "UltraSpeech-Qt"`
+
+**Example workflow**:
+```python
+# Search for something that might exist in both projects
+results = search_nodes("ONNX Runtime")
+
+# Results structure:
+{
+  "entities": [{"name": "ONNX Runtime", ...}],
+  "relations": [
+    {"from": "ONNX Runtime", "to": "UltraSpeech-Qt", "relationType": "part_of"}
+  ]
+}
+
+# Filter by project: Check relation.to field
+# If relation.to == "UltraSpeech-Qt" → skip (different project)
+# If relation.to == "cerebro" → relevant!
+```
+
+**When to filter**:
+- You're working on **cerebro** (this project) and search returns ultraspeech entities
+- Entity names are ambiguous (e.g., "ConfigurationService" could exist in multiple projects)
+- You want to avoid cross-project confusion
+
+**When NOT to filter**:
+- Entity names are project-specific (e.g., "Challenge 1", "EEGNeX" are obviously cerebro)
+- You're intentionally learning from another project's patterns
+- No ambiguity in search results
+
+**Quick check**: If an entity has `part_of → UltraSpeech-Qt` relation, it's from the ultrasound medical imaging project, not this EEG competition project.
+
+### Search Best Practices
+
+**The 1-3 keyword sweet spot** (empirical finding):
+- ✅ **1-2 keywords**: Broad search, returns many relevant entities
+  - Example: `search_nodes("Challenge 1")` → 23 entities
+  - Example: `search_nodes("movie contrastive")` → 12 entities
+- ✅ **2-3 keywords**: Focused search, returns targeted results
+  - Example: `search_nodes("data pipeline bottleneck")` → specific optimization entities
+  - Example: `search_nodes("R5 protection")` → R5 safeguards
+- ❌ **5+ keywords**: Returns nothing (too restrictive)
+  - `search_nodes("Challenge 1 windowing stimulus locked preprocessing")` → 0 results
+
+**Progressive refinement pattern** (recommended workflow):
+```python
+# Instead of one complex query:
+search_nodes("Challenge 1 windowing stimulus locked preprocessing")  # ❌ Returns nothing
+
+# Use progressive refinement:
+# Step 1: Start broad
+search_nodes("Challenge 1 windowing")
+# → Find: Challenge 1 entity, windowing strategies, mention of stimulus_anchor
+
+# Step 2: Drill down on specific detail
+search_nodes("stimulus anchor")
+# → Find: add_aux_anchors function, create_windows_from_events usage
+
+# Step 3: Look up exact function
+search_nodes("annotate_trials_with_target")
+# → Find: Function signature, parameters, pipeline position
+```
+
+**Entity name search pattern**:
+Once you find an entity name in search results, search for it directly:
+```python
+# Step 1: Broad search
+search_nodes("Challenge 1")
+# → Observations mention "annotate_trials_with_target"
+
+# Step 2: Direct entity search
+search_nodes("annotate_trials_with_target")
+# → Returns function entity with full details
+```
+
+**Search anti-patterns to avoid**:
+- ❌ Don't try to form one perfect query with all details
+- ❌ Don't assume Boolean operators work (AND, OR, NOT, quotes)
+- ❌ Don't use full sentences or questions
+- ✅ Do use simple 1-3 keyword phrases
+- ✅ Do iterate based on results
+- ✅ Do search for entity names found in observations
 
 ### What to Capture
 
@@ -88,6 +178,149 @@ search_nodes(query="movie tasks DespicableMe")
 - Vague descriptions: "model uses some optimizer" (too vague)
 - Obvious facts: "Python uses indentation" (not project-specific)
 - Temporary notes: "TODO: check this later" (not persistent knowledge)
+
+### How to Structure Captures
+
+**The atomic observation principle** (official MCP guidance): Each observation should answer exactly ONE question about an entity.
+
+#### Observation Atomicity
+
+**Test: "Can you update this independently?"**
+
+If one detail changes but others don't, can you update just this observation?
+- If YES → good atomicity ✅
+- If NO → split it ❌
+
+**Good examples (atomic facts with details)**:
+```
+✅ "Loss function: MSE (Mean Squared Error)"
+   → Answers: "What loss?" → One fact with clarification
+
+✅ "Optimizer: AdamW(lr=0.001, weight_decay=0.00001, betas=[0.9,0.999])"
+   → Answers: "What optimizer config?" → One conceptual unit
+
+✅ "Input shape: (batch_size, n_chans, n_times) where n_chans=129, n_times=200"
+   → Answers: "What input format?" → One fact with specification
+
+✅ "Pipeline: annotate → filter → window → label (from startkit lines 144-193)"
+   → Answers: "What's the pipeline?" → One conceptual unit with source
+
+✅ "9 excluded subjects: NDARWV769JM7, NDARME789TD2, NDARUA442ZVF, ..."
+   → Answers: "Which subjects excluded?" → One fact (list is one unit)
+```
+
+**Bad examples (compound facts - should split)**:
+```
+❌ "Uses AdamW optimizer (lr=1e-3, weight_decay=1e-5) and CosineAnnealingLR scheduler with T_max=epochs"
+   → Two facts: optimizer AND scheduler → Should be 2 observations
+
+❌ "Data scale: startkit uses R5 mini (~30 subjects), production uses 10 releases (~1000+ subjects)"
+   → Two facts: startkit scale AND production scale → Should be 2 observations
+
+❌ "Production uses FP16 mixed precision which is faster with negligible accuracy impact"
+   → Three facts: uses FP16, performance benefit, accuracy → Should be 3 observations
+```
+
+**The gray area: Conceptual units**
+
+Some facts are naturally bundled as one unit:
+- ✅ Function signature with parameters: `annotate_trials_with_target(target_field='rt_from_stimulus', epoch_length=2.0)`
+- ✅ Pipeline sequence: `annotate → filter → window → label`
+- ✅ Configuration set: `AdamW(lr=0.001, weight_decay=0.00001, betas=[0.9,0.999])`
+
+**When in doubt**: Ask "If I need to update this, would I change ALL of it or just PART of it?"
+
+#### Entity Granularity
+
+**The 15-observation rule**: When an entity grows beyond ~15 observations, consider splitting if:
+- Observations cover multiple distinct sub-topics
+- You find yourself searching for "entity AND specific_detail"
+- Observations could be grouped into 2-3 coherent themes
+
+**Example: Splitting Challenge 1 entity**
+
+Before (too broad):
+```
+Entity: "Challenge 1" (30 observations covering task, model, optimizer, pipeline, bottlenecks, constraints...)
+```
+
+After (focused entities):
+```
+Entity: "Challenge 1" (5-8 observations: task overview only)
+Entity: "Challenge 1 Windowing Constraint" (3-4 observations: fixed window requirement)
+Entity: "Challenge 1 Data Pipeline Bottlenecks" (4-6 observations: performance optimizations)
+Entity: "Challenge1Module" (6-8 observations: training module specifics)
+```
+
+**Benefits**: Each entity searchable with 2-3 keywords, clear content, easy to maintain.
+
+**When to merge entities**: Two entities with <3 observations each on same topic should be merged.
+
+#### Entity Naming Conventions
+
+**Use 2-4 word searchable phrases**:
+- ✅ "Challenge 1 Windowing Constraint" (3 words, searchable as "Challenge 1", "windowing", or "constraint")
+- ✅ "Movie Contrastive Pretraining Infrastructure" (4 words, multiple search angles)
+- ✅ "annotate_trials_with_target" (exact function name)
+- ❌ "The Windowing Constraint Issue for Challenge 1 That Was Discovered" (too long, needs 5+ keywords)
+- ❌ "Various Implementation Details" (too vague, not searchable)
+
+**Consistency matters**: Always use same terminology
+- Always "Challenge 1" (not sometimes "C1" or "Task 1")
+- Always "Movie Contrastive" (not "Contrastive Movie" or variations)
+
+#### Temporal Information Lifecycle
+
+**Avoid temporal markers without dates**:
+```
+❌ "Currently only contains __init__.py files"
+❌ "Will be implemented in future"
+❌ "Planned feature"
+```
+
+**Use lifecycle states with dates**:
+```
+✅ "Status as of 2025-10-13: Only contains __init__.py files (skeleton)"
+✅ "IMPLEMENTED 2025-10-13: Added pickle-based caching"
+✅ "DEPRECATED 2025-10-13: Old Hydra configs removed"
+✅ "RESOLVED 2025-10-14: Fixed preprocessing parallelization bug"
+```
+
+**Lifecycle state markers**:
+- `PLANNED:` → Feature not yet implemented
+- `IN_PROGRESS:` → Currently being developed
+- `IMPLEMENTED yyyy-mm-dd:` → Feature completed
+- `DEPRECATED yyyy-mm-dd:` → No longer used
+- `RESOLVED yyyy-mm-dd:` → Bug/issue fixed
+- `Status as of yyyy-mm-dd:` → Current state snapshot
+
+**Maintenance triggers** (check every session start):
+1. Observations with "currently", "planned", "future" → Add dates or update
+2. IMPLEMENTED observations >7 days old → Verify still accurate
+3. PLANNED observations >7 days old → Check if completed or abandoned
+
+**Update vs delete guidelines**:
+- **Update**: When fact changes but concept remains (e.g., learning rate tuned)
+- **Delete + Add**: When structure changes significantly (e.g., single model → dual heads)
+- **Delete only**: When no longer relevant (e.g., "PLANNED: add caching" after "IMPLEMENTED: added caching")
+
+#### Front-Loading Keywords
+
+Put searchable terms **at the beginning** of observations:
+
+```
+✅ "Uses stimulus-locked windowing via create_windows_from_events with offset=0.5s"
+   → Keywords "stimulus-locked", "windowing", "create_windows_from_events" appear early
+
+❌ "With an offset of 0.5s, the system uses stimulus-locked windowing implemented via create_windows_from_events"
+   → Keywords buried mid-sentence
+
+✅ "NRMSE (Normalized Root Mean Squared Error) is the primary competition metric"
+   → Acronym + full name + context early
+
+✅ "EEGNeX(n_chans=129, n_outputs=1, n_times=200, sfreq=100) architecture for baselines"
+   → Model name + key parameters first
+```
 
 ### Entity Types
 
@@ -123,31 +356,68 @@ Use these `entityType` values for consistency:
 
 ### Relation Types
 
-Use these `relationType` values for clarity:
+**Core relation types (prefer these)**:
+- **uses** - Generic usage (prefer over uses_model, uses_optimizer, uses_scheduler, uses_loss)
+- **implements** / **implemented_in** - Code implements concept (bidirectional pair)
+- **part_of** / **contains** - Component relationships (bidirectional pair)
+- **solves** - Model/approach solves task
+- **pretrains** - Pretraining strategy for model
+- **requires** / **required_for** - Dependencies
+- **provides** - Source provides resource
+- **analyzes** - Diagnostic analyzes component
+- **configures** - Config file configures entity
+- **from_library** - Imported from external library
 
-- **uses** / **uses_tool** / **uses_model** / **uses_optimizer** / **uses_scheduler** / **uses_loss** / **uses_dataset**
-- **implements** / **implemented_in**
-- **depends_on** / **required_for**
-- **part_of** / **part_of_phase** / **phase_of**
-- **from_library** / **provides**
-- **targets** / **solves** / **evaluates**
-- **loads** / **loaded_by**
-- **adapts_from** / **replicates**
-- **prototypes_for**
-- **configures** / **manages**
-- **submits_to** / **provided_by**
-- **developed_by**
-- **alternative_to**
-- **pretrains**
-- **follows**
-- **inspired** / **based_on**
-- **should_be_adapted_to**
-- **wraps_output_of**
-- **loss_function_for**
-- **calculates**
-- **framework_for**
-- **baseline_for**
-- **explored_in_phase**
+**Specialized relations (use sparingly)**:
+- **adapts_from** - When heavily modifying source
+- **replicates** - When exactly matching reference
+- **alternative_to** - When comparing approaches
+- **targets** / **evaluates** / **loads** / **loaded_by**
+- **prototypes_for** / **manages** / **submits_to** / **provided_by**
+- **developed_by** / **follows** / **inspired** / **based_on**
+- **loss_function_for** / **calculates** / **framework_for** / **baseline_for**
+- **phase_of** / **part_of_phase** / **explored_in_phase**
+
+**Relations to avoid** (describe in observations instead):
+- ❌ **should_be_adapted_to** - Too vague, use observation
+- ❌ **wraps_output_of** - Too complex, use observation
+- ❌ **uses_tool** / **uses_model** / **uses_optimizer** / **uses_scheduler** / **uses_loss** / **uses_dataset** - Use generic "uses" instead
+
+#### Relation Quality Guidelines
+
+**1. Prefer general over specific**
+
+Entity types already indicate what's being used:
+```python
+✅ "Challenge1Module" → uses → "AdamW"
+   (AdamW's entityType="optimizer" makes it clear)
+
+❌ "Challenge1Module" → uses_optimizer → "AdamW"
+   (Redundant specificity)
+```
+
+**2. Active voice test**
+
+Relations should read as natural sentences:
+```
+✅ "Challenge1Module" uses "AdamW" = "Challenge1Module uses AdamW" ✓
+✅ "movie_pretrain" pretrains "MultitaskModel" = "movie_pretrain pretrains MultitaskModel" ✓
+❌ "EEGNeX" baseline_for "Challenge 1" = "EEGNeX baseline for Challenge 1" (awkward)
+✅ Better: "EEGNeX" solves "Challenge 1" = "EEGNeX solves Challenge 1" ✓
+```
+
+**3. Bidirectional pairs consistency**
+
+When creating reverse relations, use established pairs:
+```
+✅ implements / implemented_in
+✅ part_of / contains
+✅ requires / required_for
+✅ loads / loaded_by
+
+❌ Don't create: depends_on / required_for (inconsistent pair)
+   Use: requires / required_for OR depends_on / depended_on_by
+```
 
 ### Memory Operations (MCP Tools)
 
@@ -205,6 +475,45 @@ mcp__memory__create_relations(relations=[{
 - **Living documentation**: Memory graph becomes paper/future work foundation
 
 **Memory is not optional—it's a productivity multiplier for time-constrained work.**
+
+### AI Time Estimation Guidelines
+
+**Critical**: Claude operates ~50-100x faster than humans for repetitive/parallelizable tasks. Always estimate AI time, not human time.
+
+**Examples:**
+- Memory graph audit (62 entities): AI ~5-6 min, Human ~2-3 hours
+- Refactor 10 config files: AI ~3-4 min, Human ~30-45 min
+- Search codebase + fix 5 bugs: AI ~8-10 min, Human ~2-4 hours
+- Read 20 files + summarize: AI ~2-3 min, Human ~1-2 hours
+
+**Why AI is faster:**
+- Parallel tool calls (read 10 files simultaneously)
+- No context switching overhead
+- Bulk memory operations (create 20 entities in one call)
+- No fatigue, breaks, or distractions
+- Instant recall from memory graph (no re-reading)
+
+**Planning rule**: Estimate AI time as ~1-2% of equivalent human time for:
+- File operations (read/write/edit in bulk)
+- Memory CRUD operations (search, create, update in parallel)
+- Code refactoring (non-creative, pattern-based)
+- Documentation updates (structured content)
+- Codebase exploration (grep, glob, read in parallel)
+
+**When AI is NOT faster:**
+- Creative design decisions (still need user input)
+- Debugging complex logic (bottlenecked by test execution time)
+- Training ML models (wall-clock time is wall-clock time)
+- Waiting for external processes (compilation, downloads, long-running scripts)
+
+**Example planning dialogue:**
+```
+❌ "This memory refactoring will take 2-3 hours"
+✅ "This memory refactoring will take 5-6 minutes"
+
+❌ "Updating 15 config files across the codebase will take 45 minutes"
+✅ "Updating 15 config files will take 3-4 minutes with parallel edits"
+```
 
 ## Documentation Lookup with Context7
 

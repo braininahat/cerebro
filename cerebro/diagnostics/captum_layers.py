@@ -25,20 +25,74 @@ class SqueezeOutputWrapper(nn.Module):
         return out
 
 
-def detect_conv_layers(model: nn.Module) -> list[str]:
-    """Auto-detect convolutional layers in model.
+def detect_conv_layers(model: nn.Module, max_layers: int = 10) -> list[str]:
+    """Auto-detect layers suitable for GradCAM analysis (architecture-agnostic).
+
+    Tries multiple strategies in priority order:
+    1. Convolutional layers (best for CNNs)
+    2. Attention/transformer layers (for attention-based models)
+    3. All parameterized layers (fallback for RNNs, etc.)
 
     Args:
         model: PyTorch model (not LightningModule)
+        max_layers: Maximum number of layers to return (default: 10)
 
     Returns:
         List of layer names suitable for GradCAM
+
+    Raises:
+        ValueError: If no suitable layers found
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Strategy 1: Convolutional layers (best for CNNs like EEGNeX)
     conv_layers = []
     for name, module in model.named_modules():
         if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
             conv_layers.append(name)
-    return conv_layers
+
+    if conv_layers:
+        logger.info(f"Detected {len(conv_layers)} convolutional layers for GradCAM")
+        return conv_layers[:max_layers]
+
+    # Strategy 2: Attention/Transformer layers (for SignalJEPA, Conformer)
+    attn_layers = []
+    for name, module in model.named_modules():
+        # Match common attention layer naming patterns
+        if any(keyword in name.lower() for keyword in ['attention', 'attn', 'multihead', 'self_attn']):
+            # Verify it has parameters
+            if len(list(module.parameters())) > 0:
+                attn_layers.append(name)
+
+    if attn_layers:
+        logger.warning(
+            f"No conv layers found. Using {len(attn_layers)} attention layers instead. "
+            f"GradCAM results may differ from CNN interpretations."
+        )
+        return attn_layers[:max_layers]
+
+    # Strategy 3: All parameterized layers (fallback for RNNs, custom architectures)
+    param_layers = []
+    for name, module in model.named_modules():
+        # Skip container modules (Sequential, ModuleList, etc.)
+        if len(list(module.children())) > 0:
+            continue
+        # Only include layers with parameters
+        if len(list(module.parameters())) > 0:
+            param_layers.append(name)
+
+    if param_layers:
+        logger.warning(
+            f"No conv/attention layers found. Using {len(param_layers)} parameterized layers. "
+            f"GradCAM results may be difficult to interpret for this architecture."
+        )
+        return param_layers[:max_layers]
+
+    # No suitable layers found
+    raise ValueError(
+        "No suitable layers found for GradCAM. Model may not be compatible with layer attribution."
+    )
 
 
 def get_layer_by_name(model: nn.Module, layer_name: str) -> nn.Module:
@@ -204,15 +258,33 @@ def interpret_layer_hierarchy(
         interpretation += f"  {i}. {layer_name}: {importance:.6f} (shape: {shape})\n"
 
     # Check if importance increases with depth (expected for hierarchical learning)
+    # Strategy: Infer layer depth from layer names (e.g., "feature_encoder.5" > "feature_encoder.1")
+    # Extract numeric indices from layer names to determine depth ordering
     layer_names = list(layer_importance.keys())
+
     if len(layer_names) >= 2:
-        early_importance = layer_importance[layer_names[0]]
-        late_importance = layer_importance[layer_names[-1]]
+        def extract_depth_idx(layer_name: str) -> int:
+            """Extract numeric depth indicator from layer name (e.g., 'encoder.5.0' -> 5)."""
+            import re
+            # Find all numbers in layer name
+            numbers = re.findall(r'\d+', layer_name)
+            # Use first number as depth proxy (higher = deeper)
+            return int(numbers[0]) if numbers else 0
+
+        # Sort layers by inferred depth (lowest depth = earliest layer)
+        layers_by_depth = sorted(layer_names, key=extract_depth_idx)
+        early_layer = layers_by_depth[0]
+        late_layer = layers_by_depth[-1]
+
+        early_importance = layer_importance[early_layer]
+        late_importance = layer_importance[late_layer]
 
         if late_importance > early_importance * 1.5:
-            interpretation += "\n✓ Late layers have higher importance (hierarchical feature learning detected)."
-        elif late_importance < early_importance * 0.5:
-            interpretation += "\n⚠ Early layers dominate (model may not be learning hierarchical features)."
+            interpretation += f"\n✓ Late layers have higher importance (hierarchical feature learning detected). "
+            interpretation += f"Late layer '{late_layer}' ({late_importance:.6f}) > Early layer '{early_layer}' ({early_importance:.6f})."
+        elif early_importance > late_importance * 1.5:
+            interpretation += f"\n⚠ Early layers dominate (model may not be learning hierarchical features). "
+            interpretation += f"Early layer '{early_layer}' ({early_importance:.6f}) > Late layer '{late_layer}' ({late_importance:.6f})."
         else:
             interpretation += "\n~ Importance distributed across layers (mixed hierarchical learning)."
 

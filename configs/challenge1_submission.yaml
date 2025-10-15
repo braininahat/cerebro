@@ -96,6 +96,7 @@ model:
   lr: 0.001  # Should be tuned in dev mode before submission
   weight_decay: 0.00001  # Should be tuned in dev mode before submission
   epochs: 1000  # Must match trainer.max_epochs for scheduler
+  input_scale: 1000.0  # Input scaling: 1.0 (volt, baseline), 1000.0 (millivolt, faster convergence)
 
 # Data configuration (class registered in CLI, just specify __init__ params)
 data:

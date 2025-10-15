@@ -911,17 +911,36 @@ Based on the diagnostic results:
 
         recommendations = []
 
+        # Check gradient magnitude first (takes priority over mode collapse)
+        import numpy as np
+        high_gradients = False
+        if "gradients" in diagnostics:
+            avg_grad_to_param = np.mean(diagnostics["gradients"]["grad_to_param_ratio"])
+            high_gradients = avg_grad_to_param > 0.1
+
+        # Mode collapse recommendations (unless high gradients detected)
         if (
             "predictions" in diagnostics
             and diagnostics["predictions"]["variance_ratio"] < 0.5
         ):
-            recommendations.append(
-                "1. **Increase learning rate** - predictions collapsed to narrow range"
-            )
-            recommendations.append(
-                "2. **Reduce weight decay** - model may be over-regularized"
-            )
-            recommendations.append("3. **Train longer** - may not have converged yet")
+            if high_gradients:
+                # Prioritize gradient magnitude warning
+                recommendations.append(
+                    "1. **Reduce learning rate** - very large gradients AND mode collapse indicate LR too high"
+                )
+                recommendations.append(
+                    "2. **Add gradient clipping** - stabilize training dynamics"
+                )
+                recommendations.append("3. **Train longer** - may not have converged yet")
+            else:
+                # Standard mode collapse recommendations
+                recommendations.append(
+                    "1. **Increase learning rate** - predictions collapsed to narrow range"
+                )
+                recommendations.append(
+                    "2. **Reduce weight decay** - model may be over-regularized"
+                )
+                recommendations.append("3. **Train longer** - may not have converged yet")
 
         if (
             "gradients" in diagnostics

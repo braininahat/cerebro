@@ -186,20 +186,22 @@ def interpret_temporal_pattern(
     Returns:
         Interpretation string
     """
+    interpretation = "📌 **Note**: P300 expectations based on oddball/decision tasks. Your task may have different ERP signatures.\n\n"
+
     # P300 component typically occurs 300-800ms post-stimulus
     # For RT tasks, expect peak in this window
     if 0.8 <= peak_time_sec <= 1.3:
-        interpretation = (
+        interpretation += (
             f"✓ Model attends to P300 window (peak at {peak_time_sec:.2f}s post-stimulus). "
             "This is neuroscientifically plausible for RT prediction tasks."
         )
     elif 0.5 <= peak_time_sec < 0.8:
-        interpretation = (
+        interpretation += (
             f"⚠ Model attends to early window (peak at {peak_time_sec:.2f}s post-stimulus). "
             "This is slightly early for P300 but may capture stimulus processing."
         )
     else:
-        interpretation = (
+        interpretation += (
             f"✗ Model attends to unexpected window (peak at {peak_time_sec:.2f}s post-stimulus). "
             "Expected peak in P300 window (0.8-1.3s). Model may be learning artifacts."
         )
@@ -239,7 +241,8 @@ def interpret_spatial_pattern(
     frontal_count = sum(idx <= 40 for idx in top_indices)
     central_count = sum(40 < idx < 60 for idx in top_indices)
 
-    interpretation = f"Top {top_k} channels by importance:\n"
+    interpretation = "⚠️ **Approximate regions** (no channel names available - using index-based estimates)\n\n"
+    interpretation += f"Top {top_k} channels by importance:\n"
     interpretation += f"  - Parietal region: {parietal_count}/{top_k}\n"
     interpretation += f"  - Frontal region: {frontal_count}/{top_k}\n"
     interpretation += f"  - Central region: {central_count}/{top_k}\n"

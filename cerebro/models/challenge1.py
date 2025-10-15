@@ -38,12 +38,19 @@ class Challenge1Module(L.LightningModule):
         lr: Learning rate for AdamW (default: 0.001)
         weight_decay: Weight decay for AdamW (default: 0.00001)
         epochs: Total training epochs for scheduler (default: 100)
+        input_scale: Multiplier to scale input from volt to other units (default: 1.0)
+            1.0 = volt scale (matches startkit baseline)
+            1000.0 = millivolt scale (faster initial convergence in tests)
+            1e6 = microvolt scale
 
     Example:
-        >>> # EEGNeX baseline
+        >>> # EEGNeX baseline (volt scale)
         >>> model = Challenge1Module(model_class="EEGNeX", lr=0.001)
         >>> trainer = Trainer(max_epochs=100)
         >>> trainer.fit(model, datamodule)
+
+        >>> # EEGNeX with millivolt scaling
+        >>> model = Challenge1Module(model_class="EEGNeX", input_scale=1000.0)
 
         >>> # SignalJEPA_PreLocal
         >>> model = Challenge1Module(
@@ -63,40 +70,51 @@ class Challenge1Module(L.LightningModule):
         lr: float = 1e-3,
         weight_decay: float = 1e-5,
         epochs: int = 100,
+        input_scale: float = 1.0,
     ):
         super().__init__()
         self.save_hyperparameters()
+
+        # Register input scale as buffer (part of model state, not trainable)
+        self.register_buffer('scale', torch.tensor(input_scale, dtype=torch.float32))
 
         # Handle None for model_kwargs
         if model_kwargs is None:
             model_kwargs = {}
 
-        # Model instantiation (factory pattern)
-        if model_class == "EEGNeX":
-            from braindecode.models import EEGNeX
-
-            self.model = EEGNeX(
-                n_chans=n_chans,
-                n_outputs=n_outputs,
-                n_times=n_times,
-                sfreq=sfreq,
-                **model_kwargs,
-            )
-        elif model_class == "SignalJEPA_PreLocal":
-            from braindecode.models import SignalJEPA_PreLocal
-
-            self.model = SignalJEPA_PreLocal(
-                n_chans=n_chans,
-                n_outputs=n_outputs,
-                n_times=n_times,
-                sfreq=sfreq,
-                **model_kwargs,
-            )
-        else:
+        # Model instantiation (dynamic import pattern)
+        # Supports all 40+ braindecode models without hardcoding
+        try:
+            import braindecode.models
+            model_cls = getattr(braindecode.models, model_class)
+        except AttributeError:
             raise ValueError(
-                f"Unknown model_class: {model_class}. "
-                f"Supported: 'EEGNeX', 'SignalJEPA_PreLocal'"
+                f"Model '{model_class}' not found in braindecode.models. "
+                f"Check braindecode documentation for available models: "
+                f"https://braindecode.org/stable/api.html#models"
             )
+
+        # Prepare base parameters (common to all braindecode models)
+        model_params = {
+            "n_chans": n_chans,
+            "n_outputs": n_outputs,
+            "n_times": n_times,
+            "sfreq": sfreq,
+        }
+
+        # Merge model-specific kwargs (overrides base params if duplicates)
+        model_params.update(model_kwargs)
+
+        # Instantiate model with helpful error messages
+        try:
+            self.model = model_cls(**model_params)
+        except TypeError as e:
+            raise ValueError(
+                f"Failed to instantiate {model_class}: {e}\n"
+                f"Check that model_kwargs contains all required parameters for this model.\n"
+                f"Base parameters provided: {list(model_params.keys())}\n"
+                f"See braindecode docs for {model_class} requirements."
+            ) from e
 
         # Loss
         self.loss_fn = torch.nn.MSELoss()
@@ -108,14 +126,19 @@ class Challenge1Module(L.LightningModule):
         self.test_targets: List[torch.Tensor] = []
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through EEGNeX.
+        """Forward pass through model with optional input scaling.
 
         Args:
             x: Input tensor of shape (batch_size, n_chans, n_times)
+               Expected in VOLT scale (e.g., -0.016 to 0.008 for typical EEG)
 
         Returns:
             Predictions of shape (batch_size, n_outputs)
         """
+        # Apply input scaling (e.g., volt → millivolt)
+        if self.scale != 1.0:
+            x = x * self.scale
+
         return self.model(x)
 
     def training_step(self, batch, batch_idx: int) -> torch.Tensor:
