@@ -20,6 +20,7 @@ lr_finder_num_training: 100
 bs_finder_mode: power
 bs_finder_init_val: 32
 bs_finder_max_trials: 6
+bs_finder_steps_per_trial: 3
 
 # Trainer configuration
 trainer:

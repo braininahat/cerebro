@@ -9,6 +9,12 @@ seed_everything: 42
 run_lr_finder: false
 run_batch_size_finder: false
 
+# Batch size finder parameters (used if run_batch_size_finder=true)
+bs_finder_mode: power
+bs_finder_init_val: 32
+bs_finder_max_trials: 6
+bs_finder_steps_per_trial: 3
+
 # Trainer configuration
 trainer:
   max_epochs: 2  # Fast iteration

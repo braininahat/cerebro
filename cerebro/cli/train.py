@@ -147,6 +147,12 @@ class CerebroCLI(LightningCLI):
             default=6,
             help="Maximum trials for batch size finder",
         )
+        parser.add_argument(
+            "--bs_finder_steps_per_trial",
+            type=int,
+            default=3,
+            help="Number of training steps per batch size trial",
+        )
 
     def before_fit(self):
         """Setup logging and optionally run tuners before training."""
@@ -319,6 +325,7 @@ class CerebroCLI(LightningCLI):
             model=self.model,
             datamodule=self.datamodule,
             mode=self.config["fit"].get("bs_finder_mode", "power"),
+            steps_per_trial=self.config["fit"].get("bs_finder_steps_per_trial", 3),
             init_val=self.config["fit"].get("bs_finder_init_val", 32),
             max_trials=self.config["fit"].get("bs_finder_max_trials", 6),
         )

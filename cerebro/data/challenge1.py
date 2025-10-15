@@ -229,6 +229,20 @@ class Challenge1DataModule(L.LightningDataModule):
         self.val_set = None
         self.test_set = None
 
+    @property
+    def batch_size(self) -> int:
+        """Batch size for DataLoaders.
+
+        Property accessor for Lightning's batch size scaler compatibility.
+        The actual value is stored in self.hparams.batch_size.
+        """
+        return self.hparams.batch_size
+
+    @batch_size.setter
+    def batch_size(self, value: int):
+        """Update batch size (modified by Lightning's batch size scaler)."""
+        self.hparams.batch_size = value
+
     def setup(self, stage: Optional[str] = None):
         """Setup datasets with caching support.
 
