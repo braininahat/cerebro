@@ -1,10 +1,5 @@
-# Lightning CLI configuration for Challenge 1 with R5 Test Evaluation
-# Usage: uv run cerebro fit --config configs/challenge1_r5test.yaml
-#
-# This config enables R5 test evaluation in development mode:
-# - Train/val splits from training releases (R1-R4, R6-R11)
-# - Test on R5 (matches local_scoring.py and competition evaluation)
-# - Use this to validate model performance on competition validation set
+# Lightning CLI configuration for Challenge 1 (Response Time Prediction)
+# Usage: uv run python src/cli/train.py fit --config configs/challenge1_base.yaml
 
 # Seed everything for reproducibility
 seed_everything: 42
@@ -39,13 +34,13 @@ trainer:
     init_args:
       project: eeg2025
       entity: ubcse-eeg2025  # Change to your wandb team/username
-      name: challenge1_r5test
+      name: challenge1_baseline
       tags:
         - challenge1
         - supervised
         - eegnex
-        - r5_test
-      notes: "EEGNeX baseline for Challenge 1 with R5 test evaluation (matches competition scoring)"
+        - baseline
+      notes: "EEGNeX baseline for Challenge 1 (RT prediction from CCD task)"
       log_model: all  # Upload all checkpoints as wandb artifacts
       save_dir: outputs/challenge1
 
@@ -88,13 +83,15 @@ trainer:
           - predictions
           - gradients
           - activations
-          # Captum diagnostics disabled due to integration issues - see docs/CAPTUM_INTEGRATION_ISSUE.md
-          # - integrated_gradients  # Captum: IG attribution analysis
-          # - layer_gradcam         # Captum: Layer-wise attention
+          - integrated_gradients  # Captum: IG attribution analysis (memory optimized)
+          - layer_gradcam         # Captum: Layer-wise attention (memory optimized)
           - failure_modes         # Phase 4: Top-K worst predictions and error analysis
         save_plots: true
         log_to_wandb: true
         generate_report: true
+        upload_report: true           # Upload markdown report to wandb (default: true)
+        upload_summary_table: true    # Upload metrics table for cross-run comparison (default: true)
+        upload_raw_artifacts: false   # Upload compressed .npz (~50 MB, ~40s upload, opt-in)
         num_samples: 500    # Analyze 500 samples (not full val set for speed)
         top_k_failures: 100 # Number of worst predictions to analyze in detail
         ig_n_steps: 50      # IG integration steps (50 = good tradeoff)
@@ -115,9 +112,9 @@ model:
 # Data configuration (class registered in CLI, just specify __init__ params)
 data:
   data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
-  # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training releases!
+  # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training!
   # Training releases: R1-R4, R6-R11 only (10 releases total)
-  # R5 is used ONLY for test evaluation via test_on_r5=true
+  # R5 is held out for competition leaderboard evaluation
   releases:
     - R1
     - R2
@@ -146,12 +143,12 @@ data:
   use_mini: false  # Set to true for fast prototyping
   cache_dir: null  # null = auto (data_dir/../cache/challenge1)
   val_frac: 0.1
-  test_frac: 0.1  # Ignored when test_on_r5=true
+  test_frac: 0.1
   seed: 2025
   sfreq: 100
   epoch_len_s: 2.0
   anchor: stimulus_anchor
-  # R5 test evaluation settings
-  mode: dev  # "dev" = split training releases, "submission" = train on all
-  test_on_r5: true  # Use R5 as test set (matches local_scoring.py)
-  r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data}  # R5 data location
+  # Mode settings (see challenge1_r5test.yaml or challenge1_submission.yaml for alternatives)
+  mode: dev  # "dev" = split training releases for train/val/test, "submission" = train on all
+  test_on_r5: false  # false = use local test split, true = use R5 (matches competition scoring)
+  r5_data_dir: null  # Only used if test_on_r5=true

@@ -59,6 +59,12 @@ class ModelAutopsyCallback(Callback):
         top_k_failures: Number of worst predictions to analyze in detail (default: 100)
         plot_dpi: DPI for saved plots (default: 150)
         plot_format: Plot format: "png", "pdf", "svg" (default: "png")
+        upload_report: Upload markdown report as wandb Artifact (default: True)
+        upload_summary_table: Upload metrics table for cross-run comparison (default: True)
+        upload_raw_artifacts: Upload compressed .npz with full attribution arrays (default: False)
+            - When enabled, adds ~50 MB per run and ~40s upload time
+            - Useful for key experiments where you need full post-hoc analysis
+            - Enable via CLI: --trainer.callbacks[1].init_args.upload_raw_artifacts=true
     """
 
     def __init__(
@@ -79,6 +85,9 @@ class ModelAutopsyCallback(Callback):
         top_k_failures: int = 100,
         plot_dpi: int = 150,
         plot_format: str = "png",
+        upload_report: bool = True,
+        upload_summary_table: bool = True,
+        upload_raw_artifacts: bool = False,
     ):
         super().__init__()
 
@@ -102,6 +111,9 @@ class ModelAutopsyCallback(Callback):
         self.top_k_failures = top_k_failures
         self.plot_dpi = plot_dpi
         self.plot_format = plot_format
+        self.upload_report = upload_report
+        self.upload_summary_table = upload_summary_table
+        self.upload_raw_artifacts = upload_raw_artifacts
 
         # State tracking
         self.autopsy_triggered = False
@@ -455,12 +467,281 @@ class ModelAutopsyCallback(Callback):
                     logger.warning(f"⚠️  Failed to upload to wandb: {e}")
 
             # 7. Generate report
+            report_path = None
             if self.generate_report:
                 logger.info("📋 Generating autopsy report...")
                 report = self._generate_report(results, trigger, best_ckpt)
                 report_path = output_dir / "autopsy_report.md"
                 report_path.write_text(report)
                 logger.info(f"  ✓ Report saved: {report_path}")
+
+            # 8. Upload artifacts to wandb
+            if (
+                self.log_to_wandb
+                and trainer.logger
+                and hasattr(trainer.logger, "experiment")
+            ):
+                try:
+                    import wandb
+                    import numpy as np
+
+                    run_name = trainer.logger.experiment.name or "unknown_run"
+
+                    # Upload markdown report as artifact
+                    if self.upload_report and report_path and report_path.exists():
+                        logger.info("📤 Uploading autopsy report to wandb...")
+                        report_artifact = wandb.Artifact(
+                            name=f"autopsy_report",
+                            type="report",
+                            description=f"Model autopsy report for {best_ckpt or 'current model'}",
+                            metadata={
+                                "trigger": trigger,
+                                "checkpoint": str(best_ckpt) if best_ckpt else "none",
+                                "timestamp": datetime.now().isoformat(),
+                                "num_samples": self.num_samples,
+                                "diagnostics": self.diagnostics,
+                            },
+                        )
+                        report_artifact.add_file(str(report_path))
+                        trainer.logger.experiment.log_artifact(report_artifact)
+                        logger.info("  ✓ Report artifact uploaded")
+
+                    # Upload summary metrics table
+                    if self.upload_summary_table:
+                        logger.info("📊 Uploading summary metrics table to wandb...")
+                        summary_data = []
+
+                        # Prediction metrics
+                        if "predictions" in results:
+                            pred = results["predictions"]
+                            summary_data.extend(
+                                [
+                                    ["nrmse", float(pred["nrmse"])],
+                                    ["rmse", float(pred["rmse"])],
+                                    ["variance_ratio", float(pred["variance_ratio"])],
+                                    ["pred_mean", float(pred["pred_mean"])],
+                                    ["pred_std", float(pred["pred_std"])],
+                                    ["target_mean", float(pred["target_mean"])],
+                                    ["target_std", float(pred["target_std"])],
+                                ]
+                            )
+
+                        # Baseline comparison
+                        if "baselines" in results:
+                            baseline = results["baselines"]
+                            summary_data.extend(
+                                [
+                                    [
+                                        "naive_mean_nrmse",
+                                        float(baseline["naive_mean_nrmse"]),
+                                    ],
+                                    [
+                                        "improvement_over_mean_pct",
+                                        float(baseline["improvement_over_mean"] * 100),
+                                    ],
+                                ]
+                            )
+
+                        # Integrated Gradients metrics
+                        if "integrated_gradients" in results:
+                            ig = results["integrated_gradients"]
+                            summary_data.extend(
+                                [
+                                    ["ig_peak_time_sec", float(ig["peak_time_sec"])],
+                                    ["ig_peak_channel", float(ig["peak_channel_idx"])],
+                                    [
+                                        "ig_in_p300_window",
+                                        float(1 if 0.8 <= ig["peak_time_sec"] <= 1.3 else 0),
+                                    ],
+                                ]
+                            )
+
+                        # Layer GradCAM metrics
+                        if "layer_gradcam" in results:
+                            gc = results["layer_gradcam"]
+                            summary_data.append(
+                                ["gc_num_layers_analyzed", float(len(gc["target_layers"]))]
+                            )
+
+                        # Gradient flow metrics
+                        if "gradients" in results:
+                            grad = results["gradients"]
+                            summary_data.extend(
+                                [
+                                    ["num_dead_layers", float(len(grad["dead_layers"]))],
+                                    ["total_layers", float(len(grad["layer_names"]))],
+                                ]
+                            )
+
+                        # Activation health metrics
+                        if "activations" in results:
+                            act = results["activations"]
+                            summary_data.append(
+                                ["avg_dead_neurons_pct", float(np.mean(act["dead_neuron_pcts"]))]
+                            )
+
+                        # Channel ablation metrics
+                        if "channel_ablation" in results:
+                            ch_abl = results["channel_ablation"]
+                            summary_data.append(
+                                ["ch_abl_baseline_nrmse", float(ch_abl["baseline_nrmse"])]
+                            )
+
+                        # Temporal ablation metrics
+                        if "temporal_ablation" in results:
+                            tmp_abl = results["temporal_ablation"]
+                            summary_data.extend(
+                                [
+                                    ["tmp_abl_baseline_nrmse", float(tmp_abl["baseline_nrmse"])],
+                                    [
+                                        "tmp_abl_critical_time_sec",
+                                        float(tmp_abl["most_important_time_sec"]),
+                                    ],
+                                ]
+                            )
+
+                        if summary_data:
+                            summary_table = wandb.Table(
+                                columns=["metric", "value"], data=summary_data
+                            )
+                            trainer.logger.experiment.log(
+                                {"autopsy/summary": summary_table}
+                            )
+                            logger.info(
+                                f"  ✓ Summary table uploaded ({len(summary_data)} metrics)"
+                            )
+
+                        # Log categorical metrics to wandb.summary (string values not allowed in table)
+                        if "layer_gradcam" in results:
+                            gc = results["layer_gradcam"]
+                            trainer.logger.experiment.summary["autopsy/gc_most_important_layer"] = str(gc.get("most_important_layer", "N/A"))
+
+                        if "channel_ablation" in results:
+                            ch_abl = results["channel_ablation"]
+                            trainer.logger.experiment.summary["autopsy/ch_abl_top3_channels"] = str(ch_abl["most_important_channels"][:3])
+
+                    # Upload raw attribution data (opt-in)
+                    if self.upload_raw_artifacts:
+                        logger.info(
+                            "💾 Uploading raw attribution data to wandb (this may take ~40s)..."
+                        )
+                        artifact_path = output_dir / "raw_diagnostics.npz"
+
+                        # Prepare data dictionary
+                        artifact_data = {}
+
+                        # Integrated Gradients data
+                        if "integrated_gradients" in results:
+                            ig = results["integrated_gradients"]
+                            artifact_data["ig_attributions"] = ig["attributions"]
+                            artifact_data["ig_temporal_profile"] = ig["temporal_profile"]
+                            artifact_data["ig_spatial_profile"] = ig["spatial_profile"]
+                            artifact_data["ig_predictions"] = ig["predictions"]
+                            artifact_data["ig_targets"] = ig["targets"]
+                            artifact_data["ig_peak_time_idx"] = ig["peak_time_idx"]
+                            artifact_data["ig_peak_channel_idx"] = ig["peak_channel_idx"]
+                            artifact_data["ig_peak_time_sec"] = ig["peak_time_sec"]
+
+                        # Layer GradCAM data
+                        if "layer_gradcam" in results:
+                            gc = results["layer_gradcam"]
+                            # Store layer attributions with layer name prefixes
+                            for layer_name, layer_attr in gc[
+                                "layer_attributions"
+                            ].items():
+                                # Replace dots with underscores for npz keys
+                                safe_layer_name = layer_name.replace(".", "_")
+                                artifact_data[
+                                    f"gc_attr_{safe_layer_name}"
+                                ] = layer_attr
+
+                            # Store layer importance as separate arrays
+                            gc_layer_names = list(gc["layer_importance"].keys())
+                            gc_layer_importances = [
+                                gc["layer_importance"][name] for name in gc_layer_names
+                            ]
+                            artifact_data["gc_layer_names"] = np.array(
+                                gc_layer_names, dtype=object
+                            )
+                            artifact_data["gc_layer_importances"] = np.array(
+                                gc_layer_importances
+                            )
+
+                        # Layer patterns (temporal/spatial profiles per layer)
+                        if "layer_patterns" in results:
+                            lp = results["layer_patterns"]
+                            for layer_name, temporal_profile in lp[
+                                "layer_temporal_profiles"
+                            ].items():
+                                safe_layer_name = layer_name.replace(".", "_")
+                                artifact_data[
+                                    f"gc_temporal_{safe_layer_name}"
+                                ] = temporal_profile
+
+                            for layer_name, spatial_profile in lp[
+                                "layer_spatial_profiles"
+                            ].items():
+                                safe_layer_name = layer_name.replace(".", "_")
+                                artifact_data[
+                                    f"gc_spatial_{safe_layer_name}"
+                                ] = spatial_profile
+
+                        # Channel ablation data
+                        if "channel_ablation" in results:
+                            ch_abl = results["channel_ablation"]
+                            artifact_data["ch_abl_importance"] = ch_abl[
+                                "channel_importance"
+                            ]
+                            artifact_data["ch_abl_most_important"] = np.array(
+                                ch_abl["most_important_channels"]
+                            )
+                            artifact_data["ch_abl_least_important"] = np.array(
+                                ch_abl["least_important_channels"]
+                            )
+
+                        # Temporal ablation data
+                        if "temporal_ablation" in results:
+                            tmp_abl = results["temporal_ablation"]
+                            artifact_data["tmp_abl_importance"] = tmp_abl[
+                                "window_importance"
+                            ]
+                            artifact_data["tmp_abl_centers_sec"] = tmp_abl[
+                                "window_centers_sec"
+                            ]
+
+                        # Save compressed npz
+                        if artifact_data:
+                            np.savez_compressed(artifact_path, **artifact_data)
+
+                            # Create and upload artifact
+                            data_artifact = wandb.Artifact(
+                                name=f"autopsy_data",
+                                type="diagnostics",
+                                description=f"Raw attribution data for {best_ckpt or 'current model'}",
+                                metadata={
+                                    "trigger": trigger,
+                                    "checkpoint": str(best_ckpt) if best_ckpt else "none",
+                                    "timestamp": datetime.now().isoformat(),
+                                    "num_samples": self.num_samples,
+                                    "diagnostics": self.diagnostics,
+                                    "file_size_mb": artifact_path.stat().st_size
+                                    / (1024 * 1024),
+                                },
+                            )
+                            data_artifact.add_file(str(artifact_path))
+                            trainer.logger.experiment.log_artifact(data_artifact)
+
+                            size_mb = artifact_path.stat().st_size / (1024 * 1024)
+                            logger.info(
+                                f"  ✓ Raw data artifact uploaded ({size_mb:.1f} MB)"
+                            )
+                        else:
+                            logger.info("  ⚠️  No attribution data available to upload")
+
+                except ImportError as e:
+                    logger.warning(f"⚠️  Wandb not available: {e}")
+                except Exception as e:
+                    logger.warning(f"⚠️  Failed to upload artifacts to wandb: {e}")
 
             logger.info("[bold green]✅ Model autopsy complete![/bold green]")
 

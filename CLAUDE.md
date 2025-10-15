@@ -392,19 +392,51 @@ uv run cerebro validate --config configs/challenge1_base.yaml
 uv run cerebro test --config configs/challenge1_base.yaml --ckpt_path outputs/.../best.ckpt
 ```
 
-### Scripts (future work)
+### Submission Preparation Workflow
+
+**Competition requirements**:
+- Single-level zip (NO folders): `submission.zip` containing `submission.py` + model files
+- Codabench environment: Python 3.10, braindecode, PyTorch, MNE-Python
+- Custom packages (mamba-ssm, neuralop) NOT available → use TorchScript
+
+**TorchScript approach** (recommended for models with heavy dependencies):
 
 ```bash
-# Local evaluation (critical for iteration)
-uv run python scripts/evaluate.py checkpoint=outputs/.../best.pt
-uv run python scripts/evaluate.py checkpoint=outputs/.../best.pt --fast-dev-run
+# 1. Train model (produces Lightning checkpoint)
+uv run cerebro fit --config configs/challenge1_submission.yaml
 
-# Package submission
-uv run python scripts/package_submission.py checkpoint=outputs/.../best.pt output=submission.zip
+# 2. Convert Lightning checkpoint to TorchScript
+uv run python -m cerebro.utils.checkpoint_to_torchscript \
+    --ckpt outputs/challenge1/.../best.ckpt \
+    --output model_challenge_1.pt \
+    --input-shape 1 129 200
 
-# Test submission locally before uploading
-uv run python startkit/local_scoring.py --submission-zip submission.zip --data-dir data/full --output-dir outputs/test --fast-dev-run
+# 3. Create submission.py (template in cerebro/submission/submission.py)
+# Minimal submission.py:
+#   def get_model_challenge_1(self):
+#       return torch.jit.load(resolve_path("model_challenge_1.pt"), map_location=self.device)
+
+# 4. Package submission (single-level zip)
+cd cerebro/submission
+zip -j ../../submission.zip submission.py model_challenge_1.pt model_challenge_2.pt
+
+# 5. Test submission locally
+uv run python startkit/local_scoring.py \
+    --submission-zip submission.zip \
+    --data-dir data \
+    --output-dir outputs/local_scoring
 ```
+
+**Why TorchScript?**
+- Bundles model architecture + weights in single `.pt` file
+- No dependency on mamba-ssm, neuralop, or cerebro package
+- Codabench environment only needs PyTorch to run `torch.jit.load()`
+- Smaller submission size than bundling compiled CUDA binaries
+
+**Alternative: State dict approach** (only for braindecode models without custom dependencies):
+- Extract `state_dict` from Lightning checkpoint
+- Recreate architecture in submission.py using braindecode
+- Load weights with `model.load_state_dict(torch.load("weights_challenge_1.pt"))`
 
 ## Critical Data Pipeline Differences
 
@@ -462,15 +494,17 @@ Experiment configs use `defaults` to inherit and `@package _global_` to override
 **cerebro/utils/**: Utilities
 - `logging.py`: Rich logging setup (console + file)
 - `tuning.py`: LR finder and batch size scaler wrappers
+- `checkpoint_to_torchscript.py`: Convert Lightning checkpoints to TorchScript for submission (future work)
 
 **cerebro/training/**: Training loops with different objectives (future work)
 - `supervised.py`: Single-task MSE/MAE training
 - `contrastive.py`: InfoNCE loss with pair sampling
 - `multitask.py`: Joint C1+C2 optimization with frozen encoder phase
 
-**cerebro/evaluation/**: Local scoring before submission (future work)
-- `local_scoring.py`: Adapted from startkit, runs full evaluation pipeline
-- `submission_wrapper.py`: Converts checkpoint to Submission class format expected by competition
+**cerebro/submission/**: Competition submission templates (future work)
+- `submission.py`: Template Submission class with `get_model_challenge_1/2()`
+- `package_submission.py`: Create competition-ready zip file
+- `test_submission.py`: Local testing before Codabench upload
 
 ## Startkit Integration
 
@@ -481,6 +515,117 @@ The `startkit/` directory contains reference implementations that MUST be replic
 - `submission.py`: Shows required Submission class interface with `get_model_challenge_1()` and `get_model_challenge_2()`
 
 **Critical**: Submission must be single-level zip (NO folder) containing submission.py + weights files.
+
+## Submission Packaging
+
+### TorchScript Conversion
+
+**Lightning checkpoint structure**:
+```python
+checkpoint = torch.load("best.ckpt")
+# Contains:
+# - state_dict: Model weights (prefixed with 'model.')
+# - optimizer_states: Not needed for inference
+# - lr_schedulers: Not needed for inference
+# - hparams: Not needed (architecture defined in submission.py)
+```
+
+**Conversion steps**:
+```python
+# 1. Load Lightning module
+from cerebro.models.challenge1 import Challenge1Module
+pl_module = Challenge1Module.load_from_checkpoint("best.ckpt")
+model = pl_module.model  # Extract raw PyTorch model
+
+# 2. Convert to TorchScript
+model.eval()
+dummy_input = torch.zeros(1, 129, 200)  # (batch, channels, time)
+scripted_model = torch.jit.trace(model, dummy_input)
+
+# 3. Optimize for inference
+scripted_model = torch.jit.optimize_for_inference(scripted_model)
+
+# 4. Save
+scripted_model.save("model_challenge_1.pt")
+```
+
+**Submission.py template**:
+```python
+from pathlib import Path
+import torch
+
+def resolve_path(name="model_file_name"):
+    """Handle Codabench mount points: /app/input/res/, /app/input/, etc."""
+    if Path(f"/app/input/res/{name}").exists():
+        return f"/app/input/res/{name}"
+    elif Path(f"/app/input/{name}").exists():
+        return f"/app/input/{name}"
+    elif Path(f"{name}").exists():
+        return f"{name}"
+    elif Path(__file__).parent.joinpath(f"{name}").exists():
+        return str(Path(__file__).parent.joinpath(f"{name}"))
+    else:
+        raise FileNotFoundError(f"Could not find {name}")
+
+class Submission:
+    def __init__(self, SFREQ, DEVICE):
+        self.sfreq = SFREQ
+        self.device = DEVICE
+
+    def get_model_challenge_1(self):
+        return torch.jit.load(
+            resolve_path("model_challenge_1.pt"),
+            map_location=self.device
+        )
+
+    def get_model_challenge_2(self):
+        return torch.jit.load(
+            resolve_path("model_challenge_2.pt"),
+            map_location=self.device
+        )
+```
+
+**Critical gotchas**:
+1. **Single-level zip**: Use `zip -j` to avoid nested folders
+2. **Model.eval()**: Must set eval mode before tracing (disables dropout/batchnorm)
+3. **Input shape**: Trace with exact input shape model expects (batch_size can be 1)
+4. **Device placement**: TorchScript preserves device, use map_location in submission.py
+5. **No cerebro imports**: submission.py cannot import cerebro package (not in Codabench)
+
+### Local Testing
+
+**Test TorchScript model before submission**:
+```python
+# Load TorchScript model
+model = torch.jit.load("model_challenge_1.pt")
+model.eval()
+
+# Test inference
+dummy_input = torch.zeros(16, 129, 200)  # Batch of 16
+with torch.inference_mode():
+    output = model(dummy_input)
+
+print(f"Input shape: {dummy_input.shape}")
+print(f"Output shape: {output.shape}")  # Should be (16, 1)
+assert output.shape == (16, 1), "Output shape mismatch!"
+```
+
+**Test full submission workflow**:
+```bash
+# 1. Extract submission.zip to temp directory
+unzip submission.zip -d /tmp/test_submission/
+
+# 2. Run local scoring (replicates Codabench evaluation)
+uv run python startkit/local_scoring.py \
+    --submission-dir /tmp/test_submission/ \
+    --data-dir data \
+    --output-dir outputs/local_scoring
+
+# 3. Check NRMSE scores
+# Challenge 1 NRMSE: X.XXXX
+# Challenge 2 NRMSE: X.XXXX
+# Overall score: 0.3 * C1_NRMSE + 0.7 * C2_NRMSE
+```
 
 ## Data Specifications
 

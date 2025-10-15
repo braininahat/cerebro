@@ -138,13 +138,19 @@ def compute_layer_gradcam(
 
         # Compute attributions (batched for memory)
         attributions_list = []
-        batch_size = 16
+        batch_size = 4  # Reduced for GradCAM memory efficiency (4x reduction from 16)
 
         for i in range(0, num_samples, batch_size):
             end_idx = min(i + batch_size, num_samples)
             batch_samples = samples[i:end_idx]
 
+            # Skip empty batches (edge case protection)
+            if batch_samples.shape[0] == 0:
+                continue
+
             # Forward func handles output squeezing, no target needed
+            # Note: LayerGradCam doesn't have internal_batch_size parameter like IG,
+            # so we rely on reduced batch_size for memory efficiency
             batch_attr = gradcam.attribute(
                 batch_samples,
             )

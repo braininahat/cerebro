@@ -66,13 +66,15 @@ trainer:
           - predictions
           - gradients
           - activations
-          # Captum diagnostics disabled due to integration issues - see docs/CAPTUM_INTEGRATION_ISSUE.md
-          # - integrated_gradients
-          # - layer_gradcam
+          - integrated_gradients  # Captum: IG attribution analysis (memory optimized)
+          - layer_gradcam         # Captum: Layer-wise attention (memory optimized)
           - failure_modes
         save_plots: true
         log_to_wandb: true
         generate_report: true
+        upload_report: true           # Upload markdown report to wandb (default: true)
+        upload_summary_table: true    # Upload metrics table for cross-run comparison (default: true)
+        upload_raw_artifacts: false   # Upload compressed .npz (~50 MB, ~40s upload, opt-in)
         num_samples: 500
         top_k_failures: 100
         ig_n_steps: 50
