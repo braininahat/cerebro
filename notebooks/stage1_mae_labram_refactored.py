@@ -1,9 +1,14 @@
 """
-Stage-1 MAE Pre-training for EEG-2025 using LabRAM
-Refactored version with proper dataset structure and PyTorch Lightning
+Route-B LaBraM-style pretraining for EEG-2025
+Stages:
+  1) tokenizer  : VQ-SNP tokenizer pretraining (predict spectrum amp + sin/cos phase)
+  2) dump_codes : offline code extraction to .npz shards (C,P) integer codes
+  3) masked     : masked code modeling transformer (predict code IDs for masked (channel,patch))
 """
 
 import os
+import glob
+import argparse
 from pathlib import Path
 from typing import Optional, Tuple
 from collections import Counter
@@ -11,38 +16,35 @@ import random
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.tuner import Tuner
 import wandb
 
 # Braindecode / EEGDash
 from braindecode.preprocessing import preprocess, Preprocessor
 from braindecode.preprocessing import create_fixed_length_windows
 from braindecode.datasets import BaseConcatDataset
-from braindecode.models import Labram
 from eegdash import EEGChallengeDataset
-from joblib import Parallel, delayed
+
+# Your modules
+from tokenizer_vq_snp import TokenizerVQSNP
+from masked_code_model import MaskedCodeModel
 
 
 # =============================
 # Configuration
 # =============================
 class Config:
-    """Centralized configuration for Stage 1 MAE pre-training"""
+    """Centralized configuration for Route-B pretraining"""
 
     # Data paths
     DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.getcwd(), "data"))
-    # Use "full" for complete dataset
-    CACHE_DIR = os.path.join(DATA_DIR, "mini")
+    CACHE_DIR = os.path.join(DATA_DIR, "mini")  # set to "full" when ready
 
-    # Releases (exclude R5 for testing)
+    # Releases (you can include R5 later if you don't need it as a warmup holdout)
     RELEASES = ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
-    # RELEASES = ["R1", "R2"]
 
     # Passive tasks for pre-training
     PASSIVE_TASKS = [
@@ -62,43 +64,48 @@ class Config:
     ]
 
     # Preprocessing
-    SFREQ = 100  # Target sampling frequency
+    SFREQ = 100
     L_FREQ = 0.5
     H_FREQ = 40.0
     MIN_DURATION_S = 4.0
-    N_CHANNELS = 129  # Expected channel count
+    N_CHANNELS = 129
 
     # Windowing
     WINDOW_SIZE_S = 4.0
     WINDOW_STRIDE_S = 2.0
-    CROP_SIZE_S = 2.0  # Random crop size for training
+    CROP_SIZE_S = 2.0  # 2s crop used by both tokenizer and code dumper
 
-    # Model architecture
-    EMB_SIZE = 256
-    N_LAYERS = 10
-    N_HEADS = 8
-    PATCH_LEN = 20  # 2s @ 100Hz = 200 samples; 200/20 = 10 patches
-    MASK_RATIO = 0.5
+    # Patch spec (used by tokenizer & masked-code model)
+    PATCH_LEN = 20  # 2s @100Hz → 200 samples; 200/20 = P=10 patches
+    N_FFT_BINS = 11  # number of frequency bins supervised (amp/sin/cos)
+
+    # Model sizes
+    TOK_DIM = 256           # tokenizer latent dim
+    CODEBOOK_SIZE = 8192    # VQ codes
+    MC_D = 256              # masked-code model width
+    MC_LAYERS = 8
+    MC_HEADS = 8
+    MASK_RATIO = 0.5        # fraction of (channel,patch) positions masked
 
     # Training
-    # Initial batch size (will be tuned if AUTO_BATCH_SIZE=True)
-    BATCH_SIZE = 4096
-    AUTO_BATCH_SIZE = False  # Automatically find optimal batch size
+    BATCH_SIZE = 128        # practical default; scale up if VRAM allows
     NUM_WORKERS = 8
     MAX_EPOCHS = 100
     LR = 1e-3
-    WEIGHT_DECAY = 1e-4
     VAL_RATIO = 0.1
 
-    # Checkpointing
-    CHECKPOINT_DIR = "./checkpoints/stage1_mae"
-    LOG_DIR = "./logs/stage1_mae"
+    # I/O
+    ROOT_DIR = "./checkpoints/routeB"
+    TOK_DIR = os.path.join(ROOT_DIR, "tokenizer")
+    CODES_DIR = os.path.join(ROOT_DIR, "codes_passive")  # shards written here
+    MC_DIR = os.path.join(ROOT_DIR, "masked")
 
-    # Weights & Biases
+    LOG_DIR = "./logs/routeB"
+
+    # WandB
     WANDB_PROJECT = "eeg-challenge-2025"
-    WANDB_ENTITY = None  # Set to your wandb username/team, or None for default
-    WANDB_NAME = "stage1_mae_labram"  # Run name
-    USE_WANDB = True  # Enable/disable wandb logging
+    WANDB_ENTITY = None
+    USE_WANDB = True
 
     # Seeds
     SEED = 42
@@ -109,9 +116,7 @@ class Config:
 # =============================
 def load_passive_task_data(config: Config, use_mini: bool = True) -> BaseConcatDataset:
     """Load all passive task datasets from specified releases"""
-
     all_datasets_list = []
-
     for release in config.RELEASES:
         for task in config.PASSIVE_TASKS:
             try:
@@ -134,27 +139,22 @@ def load_passive_task_data(config: Config, use_mini: bool = True) -> BaseConcatD
         raise ValueError("No datasets were loaded successfully!")
 
     all_datasets = BaseConcatDataset(all_datasets_list)
-    print(f"\n{'='*60}")
-    print(f"Total recordings loaded: {len(all_datasets.datasets)}")
-    print(f"{'='*60}")
-
+    print(
+        f"\n{'='*60}\nTotal recordings loaded: {len(all_datasets.datasets)}\n{'='*60}")
     return all_datasets
 
 
 def filter_datasets(datasets: BaseConcatDataset, config: Config) -> BaseConcatDataset:
     """Apply quality filters to datasets"""
-
     filtered = [
         ds for ds in datasets.datasets
         if ds.description.subject not in config.EXCLUDED_SUBJECTS
         and ds.raw.n_times >= config.MIN_DURATION_S * config.SFREQ
         and len(ds.raw.ch_names) == config.N_CHANNELS
     ]
-
     filtered_datasets = BaseConcatDataset(filtered)
     print(f"Recordings after filtering: {len(filtered_datasets.datasets)}")
 
-    # Show task distribution
     task_counts = Counter(
         [ds.description.task for ds in filtered_datasets.datasets])
     print("\nTask distribution:")
@@ -164,27 +164,8 @@ def filter_datasets(datasets: BaseConcatDataset, config: Config) -> BaseConcatDa
     return filtered_datasets
 
 
-def apply_preprocessing(datasets: BaseConcatDataset, config: Config) -> None:
-    """Apply standard EEG preprocessing pipeline"""
-
-    preprocessors = [
-        Preprocessor('pick_types', eeg=True, meg=False,
-                     stim=False, eog=False, ecg=False),
-        Preprocessor(lambda data: data.set_eeg_reference(
-            ref_channels='average'), apply_on_array=False),
-        Preprocessor('filter', l_freq=config.L_FREQ,
-                     h_freq=config.H_FREQ, method='iir'),
-        Preprocessor('resample', sfreq=config.SFREQ),
-    ]
-
-    print("Applying preprocessing...")
-    preprocess(datasets, preprocessors, n_jobs=-1)
-    print("✓ Preprocessing complete")
-
-
 def create_windows(datasets: BaseConcatDataset, config: Config) -> BaseConcatDataset:
     """Create fixed-length windows from continuous data"""
-
     windows_dataset = create_fixed_length_windows(
         datasets,
         start_offset_samples=0,
@@ -194,7 +175,6 @@ def create_windows(datasets: BaseConcatDataset, config: Config) -> BaseConcatDat
         drop_last_window=True,
         preload=False,
     )
-
     print(f"Total windows created: {len(windows_dataset)}")
     return windows_dataset
 
@@ -204,13 +184,9 @@ def split_by_subject(
     val_ratio: float = 0.1,
     seed: int = 42
 ) -> Tuple[BaseConcatDataset, BaseConcatDataset]:
-    """Split dataset by subject to prevent data leakage"""
-
-    # Get unique subjects
+    """Split dataset by subject to prevent leakage"""
     subjects = [ds.description["subject"] for ds in windows_dataset.datasets]
     unique_subjects = sorted(set(subjects))
-
-    # Shuffle and split
     rng = random.Random(seed)
     rng.shuffle(unique_subjects)
     n_val = max(1, int(round(len(unique_subjects) * val_ratio)))
@@ -218,824 +194,313 @@ def split_by_subject(
     val_subjects = set(unique_subjects[:n_val])
     train_subjects = set(unique_subjects[n_val:])
 
-    print(f"\nSubject split:")
-    print(f"  Training subjects: {len(train_subjects)}")
-    print(f"  Validation subjects: {len(val_subjects)}")
+    print(
+        f"\nSubject split: train={len(train_subjects)}  val={len(val_subjects)}")
 
-    # Split datasets
     train_list, val_list = [], []
     for ds in windows_dataset.datasets:
         subject = ds.description["subject"]
-        if subject in train_subjects:
-            train_list.append(ds)
-        else:
-            val_list.append(ds)
+        (train_list if subject in train_subjects else val_list).append(ds)
 
     train_set = BaseConcatDataset(train_list)
     val_set = BaseConcatDataset(val_list)
-
-    print(f"  Training windows: {len(train_set)}")
-    print(f"  Validation windows: {len(val_set)}")
-
+    print(
+        f"  Training windows: {len(train_set)} | Validation windows: {len(val_set)}")
     return train_set, val_set
 
 
 # =============================
-# Dataset with Random Cropping
+# Dataset with Random Cropping (2s)
 # =============================
 class CroppedWindowDataset(Dataset):
-    """
-    Wraps a windowed dataset and applies random temporal cropping.
+    """Wraps a windowed dataset and applies random 2s crop."""
 
-    This is useful for data augmentation - each 4s window is randomly
-    cropped to 2s during training.
-    """
-
-    def __init__(
-        self,
-        windows_dataset: BaseConcatDataset,
-        crop_size_samples: int,
-        seed: Optional[int] = None,
-        validate_all: bool = False,
-    ):
-        """
-        Parameters
-        ----------
-        windows_dataset : BaseConcatDataset
-            Source windows dataset
-        crop_size_samples : int
-            Size of random crop in samples
-        seed : int, optional
-            Random seed for reproducibility
-        validate_all : bool, default=False
-            If True, validate all windows (SLOW!). If False, only check first window.
-            Set to False when using create_fixed_length_windows (all windows same size).
-        """
+    def __init__(self, windows_dataset: BaseConcatDataset, crop_size_samples: int, seed: Optional[int] = None):
         self.windows_dataset = windows_dataset
         self.crop_size_samples = crop_size_samples
         self.rng = random.Random(seed)
-
         if len(windows_dataset) == 0:
             raise ValueError("Empty dataset provided!")
-
-        if validate_all:
-            # SLOW: Validate every window (use only if windows have variable sizes)
-            print(
-                f"  Validating all {len(windows_dataset)} windows (this may take a while)...")
-            self.valid_indices = []
-            for idx in range(len(windows_dataset)):
-                X, _, _ = windows_dataset[idx]
-                if X.shape[1] >= crop_size_samples:
-                    self.valid_indices.append(idx)
-
-            if not self.valid_indices:
-                raise ValueError(
-                    "No windows are large enough for the specified crop size!")
-
-            print(
-                f"  ✓ Found {len(self.valid_indices)}/{len(windows_dataset)} valid windows")
-        else:
-            # FAST: Only validate first window (assumes all windows have same size)
-            # This is safe when using create_fixed_length_windows()
-            print(f"  Fast initialization: validating first window only...")
-
-            first_X, _, _ = windows_dataset[0]
-            window_size = first_X.shape[1]
-
-            if window_size < crop_size_samples:
-                raise ValueError(
-                    f"Window size ({window_size}) < crop size ({crop_size_samples})! "
-                    f"Adjust CROP_SIZE_S or WINDOW_SIZE_S in Config."
-                )
-
-            # Assume all windows have the same size
-            self.valid_indices = list(range(len(windows_dataset)))
-            print(
-                f"  ✓ All {len(self.valid_indices)} windows assumed valid (window_size={window_size})")
+        first_X, _, _ = windows_dataset[0]
+        if first_X.shape[1] < crop_size_samples:
+            raise ValueError("Window shorter than crop size.")
+        self.valid_indices = list(range(len(windows_dataset)))
 
     def __len__(self):
         return len(self.valid_indices)
 
     def __getitem__(self, idx: int) -> torch.Tensor:
-        """
-        Returns
-        -------
-        X : torch.Tensor
-            Cropped EEG window of shape (n_channels, crop_size_samples)
-        """
         actual_idx = self.valid_indices[idx]
-        X, _, _ = self.windows_dataset[actual_idx]
+        X, _, _ = self.windows_dataset[actual_idx]  # (C,T)
+        C, T = X.shape
+        if T > self.crop_size_samples:
+            start = self.rng.randint(0, T - self.crop_size_samples)
+            X = X[:, start:start + self.crop_size_samples]
+        return torch.as_tensor(X, dtype=torch.float32)
 
-        # X shape: (n_channels, n_times)
-        n_channels, n_times = X.shape
 
-        # Random crop
-        if n_times > self.crop_size_samples:
-            max_start = n_times - self.crop_size_samples
-            start = self.rng.randint(0, max_start)
-            X_cropped = X[:, start:start + self.crop_size_samples]
-        else:
-            X_cropped = X
-
-        # Convert to tensor if needed
-        if isinstance(X_cropped, np.ndarray):
-            X_cropped = torch.from_numpy(X_cropped).float()
-        else:
-            X_cropped = X_cropped.float()
-
-        return X_cropped
+def collate_float(batch):
+    return torch.stack(batch, dim=0).float()  # (B,C,T)
 
 
 # =============================
-# Patchify & Masking Utils
+# Codes shards dataset (for masked-code stage)
 # =============================
-class TimePatchify(nn.Module):
-    """Splits time series into non-overlapping patches"""
-
-    def __init__(self, patch_len: int):
-        super().__init__()
-        self.patch_len = patch_len
-
-    def patchify(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters
-        ----------
-        x : (B, C, T)
-
-        Returns
-        -------
-        patches : (B, P, C, L) where P = T // L
-        """
-        B, C, T = x.shape
-        assert T % self.patch_len == 0, f"T={T} must be divisible by patch_len={self.patch_len}"
-        P = T // self.patch_len
-        return x.view(B, C, P, self.patch_len).permute(0, 2, 1, 3).contiguous()
-
-    def unpatchify(self, patches: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters
-        ----------
-        patches : (B, P, C, L)
-
-        Returns
-        -------
-        x : (B, C, T) where T = P * L
-        """
-        B, P, C, L = patches.shape
-        return patches.permute(0, 2, 1, 3).contiguous().view(B, C, P * L)
-
-
-def make_random_patch_mask(
-    batch_size: int,
-    num_patches: int,
-    mask_ratio: float,
-    device: torch.device = None
-) -> torch.BoolTensor:
+class CodesShardDataset(Dataset):
     """
-    Create random binary mask for patches.
-
-    Returns
-    -------
-    mask : (B, P) BoolTensor where True = masked
-    """
-    num_keep = max(1, int(round((1.0 - mask_ratio) * num_patches)))
-
-    masks = []
-    for _ in range(batch_size):
-        idx = torch.randperm(num_patches)
-        mask = torch.ones(num_patches, dtype=torch.bool)
-        mask[idx[:num_keep]] = False  # False = keep, True = mask
-        masks.append(mask)
-
-    mask_tensor = torch.stack(masks, dim=0)
-    if device is not None:
-        mask_tensor = mask_tensor.to(device)
-
-    return mask_tensor
-
-
-# =============================
-# MAE Lightning Module
-# =============================
-class MAELabRAM(pl.LightningModule):
-    """
-    Masked Autoencoder with LabRAM encoder for EEG pre-training.
-
-    Architecture:
-    1. Patchify input (C, T) -> (P, C, L)
-    2. Mask random patches
-    3. Encode with LabRAM -> (P, D) tokens
-    4. Decode to reconstruct patches
-    5. Compute loss only on masked patches
+    Reads *.npz shards with 'codes' arrays of shape (B,C,P) integers.
+    Each item returns {"codes": (C,P) LongTensor}.
     """
 
-    def __init__(
-        self,
-        n_chans: int,
-        n_times: int,
-        sfreq: float,
-        emb_size: int = 256,
-        n_layers: int = 10,
-        n_heads: int = 8,
-        patch_len: int = 20,
-        mask_ratio: float = 0.5,
-        lr: float = 1e-3,
-        weight_decay: float = 1e-4,
-        batch_size: int = 64,  # For tuner compatibility
-    ):
-        super().__init__()
-        self.save_hyperparameters()
+    def __init__(self, shards_dir: str):
+        self.files = sorted(glob.glob(os.path.join(shards_dir, "*.npz")))
+        if not self.files:
+            raise FileNotFoundError(f"No .npz shards found in {shards_dir}")
+        self._index = []  # (file_idx, item_idx)
+        for fi, f in enumerate(self.files):
+            with np.load(f) as npz:
+                n = npz["codes"].shape[0]
+            self._index.extend([(fi, i) for i in range(n)])
 
-        # Validate patch divisibility
-        assert n_times % patch_len == 0, \
-            f"n_times={n_times} must be divisible by patch_len={patch_len}"
+    def __len__(self):
+        return len(self._index)
 
-        self.n_chans = n_chans
-        self.n_times = n_times
-        self.sfreq = sfreq
-        self.patch_len = patch_len
-        self.num_patches = n_times // patch_len
-        self.mask_ratio = mask_ratio
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.batch_size = batch_size  # Store for tuner
+    def __getitem__(self, idx):
+        fi, i = self._index[idx]
+        with np.load(self.files[fi]) as npz:
+            codes = npz["codes"][i]  # (C,P)
+        return {"codes": torch.as_tensor(codes, dtype=torch.long)}
 
-        # Encoder: LabRAM in tokenizer mode
-        # Note: n_outputs is required by LabRAM but we won't use the final classification layer
-        # We'll extract features from the transformer before the final layer
-        self.encoder = Labram(
-            n_chans=n_chans,
-            n_times=n_times,
-            sfreq=sfreq,
-            input_window_seconds=n_times / sfreq,
-            neural_tokenizer=True,
-            emb_size=emb_size,
-            n_layers=n_layers,
-            att_num_heads=n_heads,
-            use_mean_pooling=False,  # Keep all tokens
-            n_outputs=0,  # Set to emb_size; we'll bypass the final layer
-        )
 
-        # Decoder: token -> patch reconstruction
-        self.decoder = nn.Sequential(
-            nn.LayerNorm(emb_size),
-            nn.Linear(emb_size, n_chans * patch_len),
-        )
-
-        # Token projection layer (if LabRAM outputs different dimension)
-        # Initialize as Identity to allow checkpoint loading, will be replaced
-        # with Linear projection if needed during first forward pass
-        self.token_projection = nn.Identity()
-        self._projection_initialized = False
-
-        # Patchify helper
-        self.patchify = TimePatchify(patch_len)
-
-    def encode_tokens(self, x_masked: torch.Tensor) -> torch.Tensor:
-        """
-        Return (B, P, D) time-patch tokens by pooling over channels.
-        Assumes LaBraM tokenizer emits one token per (channel × time-patch).
-        """
-        # Try to get raw patch tokens from LaBraM
-        # Some braindecode versions expose forward_features(..., return_patch_tokens=True).
-        # Fall back to self.encoder(x) if needed.
-        try:
-            tokens = self.encoder.forward_features(
-                x_masked, return_patch_tokens=True
-            )  # expected (B, N_tok, D)
-        except TypeError:
-            # may already be tokens (B, N_tok, D)
-            tokens = self.encoder(x_masked)
-
-        if tokens.dim() != 3:
-            raise RuntimeError(
-                f"Unexpected token shape from LaBraM: {tokens.shape}")
-
-        B, N_tok, D = tokens.shape
-        P = self.num_patches
-        C = self.n_chans
-        expected = C * P
-
-        # First batch: emit a helpful message once
-        if not getattr(self, "_shape_logged", False):
-            self._shape_logged = True
-            self.print(f"[LaBraM] tokens shape: (B={B}, N_tok={N_tok}, D={D}), "
-                       f"expected C*P={expected} with C={C}, P={P}")
-
-        if N_tok == expected:
-            # Reshape to (B, C, P, D) and pool across channels → (B, P, D)
-            tokens = tokens.view(B, C, P, D).mean(dim=1)
-            return tokens  # (B, P, D)
-
-        # Some builds produce an extra CLS or slightly different ordering.
-        # If N_tok == expected + 1, drop the first token (assume CLS).
-        if N_tok == expected + 1:
-            tokens = tokens[:, 1:, :]  # drop CLS
-            tokens = tokens.view(B, C, P, D).mean(dim=1)
-            return tokens
-
-        # Fallback: interpolate along the token axis to exactly P time tokens.
-        # This keeps you moving even if the internal layout differs.
-        self.print(f"[LaBraM] Warning: N_tok ({N_tok}) != C*P ({expected}). "
-                   f"Falling back to interpolation to P={P} time tokens.")
-        tokens = F.interpolate(tokens.transpose(1, 2),
-                               size=P, mode="linear", align_corners=False).transpose(1, 2)
-        return tokens  # (B, P, D)
-
-    def forward(self, x_masked: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass: encode and decode.
-
-        Parameters
-        ----------
-        x_masked : (B, C, T) masked input
-
-        Returns
-        -------
-        pred_patches : (B, P, C, L) reconstructed patches
-        """
-        # Encode
-        tokens = self.encode_tokens(x_masked)  # (B, P, D)
-
-        # Decode
-        pred_flat = self.decoder(tokens)  # (B, P, C*L)
-
-        # Reshape to patches
-        B = pred_flat.size(0)
-        pred_patches = pred_flat.view(
-            B, self.num_patches, self.n_chans, self.patch_len)
-
-        return pred_patches
-
-    def compute_loss(
-        self,
-        pred_patches: torch.Tensor,
-        target_patches: torch.Tensor,
-        mask: torch.BoolTensor
-    ) -> torch.Tensor:
-        """
-        Compute MSE loss only on masked patches.
-
-        Parameters
-        ----------
-        pred_patches : (B, P, C, L)
-        target_patches : (B, P, C, L)
-        mask : (B, P) where True = masked
-
-        Returns
-        -------
-        loss : scalar
-        """
-        # Expand mask to match patch dimensions
-        mask_expanded = mask[:, :, None, None]  # (B, P, 1, 1)
-
-        # Compute squared error
-        squared_error = (pred_patches - target_patches) ** 2
-
-        # Apply mask and average
-        masked_error = squared_error * mask_expanded
-        num_masked = mask.sum() * self.n_chans * self.patch_len
-
-        loss = masked_error.sum() / (num_masked + 1e-8)
-
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        """Training step"""
-        x = batch  # (B, C, T)
-
-        # Patchify
-        target_patches = self.patchify.patchify(x)  # (B, P, C, L)
-
-        # Create random mask
-        mask = make_random_patch_mask(
-            x.size(0),
-            self.num_patches,
-            self.mask_ratio,
-            device=self.device
-        )
-
-        # Apply mask (zero out masked patches)
-        masked_patches = target_patches.clone()
-        masked_patches[mask] = 0.0
-        x_masked = self.patchify.unpatchify(masked_patches)
-
-        # Forward pass
-        pred_patches = self.forward(x_masked)
-
-        # Compute loss
-        loss = self.compute_loss(pred_patches, target_patches, mask)
-
-        # Log
-        self.log('train_loss', loss, on_step=True, on_epoch=True,
-                 prog_bar=True, batch_size=x.size(0))
-        self.log('train_mask_ratio', mask.float().mean(), on_epoch=True)
-
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        """Validation step"""
-        x = batch  # (B, C, T)
-
-        # Patchify
-        target_patches = self.patchify.patchify(x)
-
-        # Create random mask
-        mask = make_random_patch_mask(
-            x.size(0),
-            self.num_patches,
-            self.mask_ratio,
-            device=self.device
-        )
-
-        # Apply mask
-        masked_patches = target_patches.clone()
-        masked_patches[mask] = 0.0
-        x_masked = self.patchify.unpatchify(masked_patches)
-
-        # Forward pass
-        pred_patches = self.forward(x_masked)
-
-        # Compute loss
-        loss = self.compute_loss(pred_patches, target_patches, mask)
-
-        # Log
-        self.log('val_loss', loss, on_epoch=True, prog_bar=True,
-                 batch_size=x.size(0))
-
-        return loss
-
-    def configure_optimizers(self):
-        """Configure optimizer and scheduler"""
-        optimizer = torch.optim.AdamW(
-            self.parameters(),
-            lr=self.lr,
-            weight_decay=self.weight_decay
-        )
-
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=self.trainer.max_epochs,
-            eta_min=1e-6
-        )
-
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "epoch",
-            }
-        }
+def collate_codes(batch):
+    codes = [b["codes"] for b in batch]
+    return {"codes": torch.stack(codes, dim=0).long()}  # (B,C,P)
 
 
 # =============================
-# Collate Function
+# Trainers / Runners for each stage
 # =============================
-def collate_fn(batch):
-    """Stack tensors from batch"""
-    tensors = []
-    for x in batch:
-        if isinstance(x, np.ndarray):
-            x = torch.from_numpy(x)
-        tensors.append(x.float())
-    return torch.stack(tensors, dim=0)
+def setup_logger_and_callbacks(run_name: str, monitor: str, ckpt_dir: str, use_wandb: bool):
+    os.makedirs(ckpt_dir, exist_ok=True)
 
-
-# =============================
-# Data Module for Batch Size Tuning
-# =============================
-class EEGDataModule(pl.LightningDataModule):
-    """
-    LightningDataModule wrapper for EEG datasets.
-    Required for automatic batch size finding.
-    """
-
-    def __init__(
-        self,
-        train_dataset: Dataset,
-        val_dataset: Dataset,
-        batch_size: int = 64,
-        num_workers: int = 8,
-    ):
-        super().__init__()
-        self.train_dataset = train_dataset
-        self.val_dataset = val_dataset
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-
-    def train_dataloader(self):
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            collate_fn=collate_fn,
-            drop_last=True,
-            persistent_workers=True if self.num_workers > 0 else False,
-        )
-
-    def val_dataloader(self):
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            collate_fn=collate_fn,
-            drop_last=False,
-            persistent_workers=True if self.num_workers > 0 else False,
-        )
-
-
-# =============================
-# Main Training Pipeline
-# =============================
-def main():
-    """Main training pipeline"""
-
-    # Set seeds
-    pl.seed_everything(Config.SEED)
-
-    # Configure TF32 precision (suppresses PyTorch 2.9+ deprecation warning)
-    if torch.cuda.is_available():
-        # Use TF32 for better performance on Ampere+ GPUs (A100, RTX 30xx, etc.)
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-
-    # Create output directories
-    os.makedirs(Config.CHECKPOINT_DIR, exist_ok=True)
-    os.makedirs(Config.LOG_DIR, exist_ok=True)
-
-    print("\n" + "="*60)
-    print("Stage 1: MAE Pre-training with LabRAM")
-    print("="*60)
-
-    # -------------------------
-    # 1. Load Data
-    # -------------------------
-    print("\n1. Loading passive task data...")
-    all_datasets = load_passive_task_data(Config, use_mini=True)
-
-    # -------------------------
-    # 2. Filter
-    # -------------------------
-    print("\n2. Filtering datasets...")
-    all_datasets = filter_datasets(all_datasets, Config)
-
-    # -------------------------
-    # 3. Preprocess
-    # -------------------------
-    # print("\n3. Preprocessing...")
-    # apply_preprocessing(all_datasets, Config)
-
-    # -------------------------
-    # 4. Create Windows
-    # -------------------------
-    print("\n4. Creating windows...")
-    windows_dataset = create_windows(all_datasets, Config)
-
-    # -------------------------
-    # 5. Split by Subject
-    # -------------------------
-    print("\n5. Splitting by subject...")
-    train_windows, val_windows = split_by_subject(
-        windows_dataset,
-        val_ratio=Config.VAL_RATIO,
-        seed=Config.SEED
-    )
-
-    # -------------------------
-    # 6. Create Cropped Datasets
-    # -------------------------
-    print("\n6. Creating cropped datasets...")
-    crop_samples = int(Config.CROP_SIZE_S * Config.SFREQ)
-
-    train_dataset = CroppedWindowDataset(
-        train_windows,
-        crop_size_samples=crop_samples,
-        seed=Config.SEED
-    )
-
-    val_dataset = CroppedWindowDataset(
-        val_windows,
-        crop_size_samples=crop_samples,
-        seed=Config.SEED + 1
-    )
-
-    # -------------------------
-    # 7. Create DataModule
-    # -------------------------
-    print("\n7. Creating data module...")
-    datamodule = EEGDataModule(
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        batch_size=Config.BATCH_SIZE,
-        num_workers=Config.NUM_WORKERS,
-    )
-
-    # Create initial dataloaders to show stats
-    train_loader = datamodule.train_dataloader()
-    val_loader = datamodule.val_dataloader()
-
-    print(f"  Initial batch size: {Config.BATCH_SIZE}")
-    print(f"  Train batches per epoch: {len(train_loader)}")
-    print(f"  Val batches: {len(val_loader)}")
-
-    # -------------------------
-    # 8. Initialize Model
-    # -------------------------
-    print("\n8. Initializing model...")
-
-    # Get dimensions from sample
-    sample_x = train_dataset[0]
-    n_chans = sample_x.shape[0]
-    n_times = sample_x.shape[1]
-
-    print(f"  Input shape: ({n_chans} channels, {n_times} time points)")
-    print(f"  Patches: {n_times // Config.PATCH_LEN}")
-
-    model = MAELabRAM(
-        n_chans=n_chans,
-        n_times=n_times,
-        sfreq=Config.SFREQ,
-        emb_size=Config.EMB_SIZE,
-        n_layers=Config.N_LAYERS,
-        n_heads=Config.N_HEADS,
-        patch_len=Config.PATCH_LEN,
-        mask_ratio=Config.MASK_RATIO,
-        lr=Config.LR,
-        weight_decay=Config.WEIGHT_DECAY,
-        batch_size=Config.BATCH_SIZE,  # For auto-tuning
-    )
-
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel()
-                           for p in model.parameters() if p.requires_grad)
-    print(f"  Total parameters: {total_params:,}")
-    print(f"  Trainable parameters: {trainable_params:,}")
-
-    # -------------------------
-    # 9. Setup Callbacks
-    # -------------------------
-    print("\n9. Setting up callbacks...")
-
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=Config.CHECKPOINT_DIR,
-        filename='mae-labram-{epoch:02d}-{val_loss:.4f}',
-        monitor='val_loss',
+    ckpt_cb = ModelCheckpoint(
+        dirpath=ckpt_dir,
+        filename=f'{run_name}-' + '{epoch:02d}-{' + monitor + ':.4f}',
+        monitor=monitor,
         mode='min',
         save_top_k=3,
         save_last=True,
         verbose=True,
     )
+    es_cb = EarlyStopping(monitor=monitor, patience=10,
+                          mode='min', verbose=True)
 
-    early_stopping_callback = EarlyStopping(
-        monitor='val_loss',
-        patience=10,
-        mode='min',
-        verbose=True,
-    )
-
-    # -------------------------
-    # 10. Setup Logger
-    # -------------------------
-    # 10. Setup Logger
-    # -------------------------
-    print("\n9. Setting up logger...")
-
-    # Weights & Biases Logger
-    if Config.USE_WANDB:
+    if use_wandb:
         logger = WandbLogger(
             project=Config.WANDB_PROJECT,
             entity=Config.WANDB_ENTITY,
-            name=Config.WANDB_NAME,
+            name=run_name,
             save_dir=Config.LOG_DIR,
-            log_model=True,  # Log model checkpoints to wandb
-            config={
-                # Data config
-                "releases": Config.RELEASES,
-                "passive_tasks": Config.PASSIVE_TASKS,
-                "sfreq": Config.SFREQ,
-                "window_size_s": Config.WINDOW_SIZE_S,
-                "window_stride_s": Config.WINDOW_STRIDE_S,
-                "crop_size_s": Config.CROP_SIZE_S,
-                "val_ratio": Config.VAL_RATIO,
-
-                # Model config
-                "emb_size": Config.EMB_SIZE,
-                "n_layers": Config.N_LAYERS,
-                "n_heads": Config.N_HEADS,
-                "patch_len": Config.PATCH_LEN,
-                "mask_ratio": Config.MASK_RATIO,
-
-                # Training config
-                "batch_size": Config.BATCH_SIZE,
-                "auto_batch_size": Config.AUTO_BATCH_SIZE,
-                "max_epochs": Config.MAX_EPOCHS,
-                "lr": Config.LR,
-                "weight_decay": Config.WEIGHT_DECAY,
-                "num_workers": Config.NUM_WORKERS,
-                "seed": Config.SEED,
-            }
+            log_model=True,
         )
-        print(f"  ✓ WandB logging enabled (project: {Config.WANDB_PROJECT})")
     else:
-        logger = False  # Disable logging
-        print("  ✓ Logging disabled")
+        logger = False
 
-    # -------------------------
-    # 11. Create Trainer
-    # -------------------------
-    print("\n10. Creating trainer...")
+    return logger, [ckpt_cb, es_cb], ckpt_cb
+
+
+def train_tokenizer(train_loader, val_loader, crop_len):
+    print("\n=== Stage 1: Tokenizer (VQ-SNP) ===")
+    model = TokenizerVQSNP(
+        n_chans=Config.N_CHANNELS,
+        crop_len=crop_len,
+        patch_len=Config.PATCH_LEN,
+        dim=Config.TOK_DIM,
+        num_codes=Config.CODEBOOK_SIZE,
+        n_fft_bins=Config.N_FFT_BINS,
+        lr=Config.LR,
+    )
+
+    logger, callbacks, ckpt_cb = setup_logger_and_callbacks(
+        run_name="tokenizer_vq_snp",
+        monitor="tok_loss",
+        ckpt_dir=Config.TOK_DIR,
+        use_wandb=Config.USE_WANDB,
+    )
 
     trainer = pl.Trainer(
         max_epochs=Config.MAX_EPOCHS,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=1,
         precision='16-mixed' if torch.cuda.is_available() else 32,
-        callbacks=[checkpoint_callback, early_stopping_callback],
+        callbacks=callbacks,
         logger=logger,
-        log_every_n_steps=1,  # Log every step (useful for small datasets)
+        log_every_n_steps=10,
         gradient_clip_val=1.0,
-        deterministic='warn',  # Use 'warn' instead of True to allow non-deterministic ops
+        deterministic='warn',
     )
 
-    # -------------------------
-    # 11.5. Auto Batch Size Tuning (Optional)
-    # -------------------------
-    if Config.AUTO_BATCH_SIZE and torch.cuda.is_available():
-        print("\n10.5. Running automatic batch size finder...")
-        print(
-            "  This will test different batch sizes to find the optimal one for your GPU.")
+    trainer.fit(model, train_loader, val_loader)
+    best = ckpt_cb.best_model_path
+    print(f"✓ Tokenizer best checkpoint: {best}")
+    return best
 
-        # Create a tuner
-        tuner = Tuner(trainer)
 
-        # Run batch size finder
-        # This will update both model.hparams.batch_size and datamodule.batch_size
-        tuner.scale_batch_size(
-            model,
-            datamodule=datamodule,
-            mode='power',  # 'power' tries powers of 2, 'binsearch' does binary search
-            init_val=Config.BATCH_SIZE,  # Starting batch size
-            max_trials=10,  # Maximum number of trials
-        )
+@torch.inference_mode()
+def dump_codes(ckpt_path: str, loader, out_dir: str):
+    print("\n=== Stage 2: Dump codes ===")
+    os.makedirs(out_dir, exist_ok=True)
 
-        # Get the optimal batch size found
-        optimal_batch_size = model.hparams.get('batch_size', Config.BATCH_SIZE)
-        print(f"  ✓ Optimal batch size found: {optimal_batch_size}")
-        print(
-            f"  ✓ Train batches per epoch: {len(datamodule.train_dataloader())}")
-        print(f"  ✓ Val batches: {len(datamodule.val_dataloader())}")
-    else:
-        if Config.AUTO_BATCH_SIZE:
-            print("\n10.5. Skipping batch size tuning (no GPU available)")
-        else:
-            print(f"\n10.5. Using configured batch size: {Config.BATCH_SIZE}")
+    # load tokenizer
+    model = TokenizerVQSNP.load_from_checkpoint(ckpt_path)
+    model.eval().cuda() if torch.cuda.is_available() else model.eval()
 
-    # -------------------------
-    # 12. Train
-    # -------------------------
-    print("\n11. Starting training...")
-    print("="*60)
+    shard_idx = 0
+    for xb in loader:
+        xb = xb.cuda() if torch.cuda.is_available() else xb
+        _, _, _, codes, _ = model(xb)  # (B,C,P) ints
+        codes = codes.cpu().numpy()
+        np.savez_compressed(os.path.join(
+            out_dir, f"shard_{shard_idx:06d}.npz"), codes=codes)
+        shard_idx += 1
+    print(f"✓ Wrote {shard_idx} shards to {out_dir}")
 
-    trainer.fit(model, datamodule=datamodule)
 
-    # -------------------------
-    # 13. Save Final Encoder
-    # -------------------------
-    print("\n12. Saving final encoder...")
+def train_masked_code(codes_train_loader, codes_val_loader):
+    print("\n=== Stage 3: Masked code modeling ===")
+    model = MaskedCodeModel(
+        num_codes=Config.CODEBOOK_SIZE,
+        C=Config.N_CHANNELS,
+        P=int(Config.CROP_SIZE_S * Config.SFREQ //
+              Config.PATCH_LEN),  # e.g. 200/20=10
+        D=Config.MC_D,
+        L=Config.MC_LAYERS,
+        H=Config.MC_HEADS,
+        mask_ratio=Config.MASK_RATIO,
+        lr=Config.LR,
+    )
 
-    encoder_path = os.path.join(Config.CHECKPOINT_DIR, "stage1_mae_encoder.pt")
-    torch.save({
-        'encoder_state_dict': model.encoder.state_dict(),
-        'hparams': model.hparams,
-        'config': {
-            'n_chans': n_chans,
-            'n_times': n_times,
-            'sfreq': Config.SFREQ,
-            'emb_size': Config.EMB_SIZE,
-            'n_layers': Config.N_LAYERS,
-            'n_heads': Config.N_HEADS,
-        }
-    }, encoder_path)
+    logger, callbacks, ckpt_cb = setup_logger_and_callbacks(
+        run_name="masked_code_model",
+        monitor="mc_loss",
+        ckpt_dir=Config.MC_DIR,
+        use_wandb=Config.USE_WANDB,
+    )
 
-    print(f"✓ Encoder saved to: {encoder_path}")
-    print(f"✓ Best checkpoint: {checkpoint_callback.best_model_path}")
-    print(f"✓ Best val_loss: {checkpoint_callback.best_model_score:.4f}")
+    trainer = pl.Trainer(
+        max_epochs=Config.MAX_EPOCHS,
+        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
+        devices=1,
+        precision='16-mixed' if torch.cuda.is_available() else 32,
+        callbacks=callbacks,
+        logger=logger,
+        log_every_n_steps=10,
+        gradient_clip_val=1.0,
+        deterministic='warn',
+    )
 
-    # -------------------------
-    # 14. Finish Logging
-    # -------------------------
-    if Config.USE_WANDB:
-        wandb.finish()
-        print("\n✓ WandB run finished")
+    trainer.fit(model, codes_train_loader, codes_val_loader)
+    best = ckpt_cb.best_model_path
+    print(f"✓ Masked-code best checkpoint: {best}")
+    return best
 
-    print("\n" + "="*60)
-    print("Training complete!")
-    print("="*60)
+
+# =============================
+# Main
+# =============================
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--stage", type=str, required=True,
+                        choices=["tokenizer", "dump_codes", "masked"],
+                        help="Which stage to run")
+    parser.add_argument("--use_mini", action="store_true",
+                        help="Use the MINI cache split")
+    parser.add_argument("--tokenizer-ckpt", type=str, default=None,
+                        help="Path to tokenizer checkpoint (required for dump_codes)")
+    parser.add_argument("--codes-dir", type=str, default=Config.CODES_DIR,
+                        help="Directory to read/write code shards")
+    parser.add_argument("--batch-size", type=int, default=Config.BATCH_SIZE)
+    args = parser.parse_args()
+
+    pl.seed_everything(Config.SEED)
+
+    # Make dirs
+    os.makedirs(Config.ROOT_DIR, exist_ok=True)
+    os.makedirs(Config.TOK_DIR, exist_ok=True)
+    os.makedirs(Config.MC_DIR, exist_ok=True)
+    os.makedirs(Config.LOG_DIR, exist_ok=True)
+
+    # Common: load passive → filter → windows → split by subject
+    print("\n1) Loading passive datasets…")
+    all_datasets = load_passive_task_data(
+        Config, use_mini=args.use_mini if hasattr(args, "use_mini") else True)
+    print("\n2) Filtering…")
+    all_datasets = filter_datasets(all_datasets, Config)
+    print("\n3) Creating windows…")
+    windows = create_windows(all_datasets, Config)
+    print("\n4) Subject split…")
+    train_win, val_win = split_by_subject(
+        windows, val_ratio=Config.VAL_RATIO, seed=Config.SEED)
+
+    crop_len = int(Config.CROP_SIZE_S * Config.SFREQ)
+    train_set = CroppedWindowDataset(
+        train_win, crop_size_samples=crop_len, seed=Config.SEED)
+    val_set = CroppedWindowDataset(
+        val_win,   crop_size_samples=crop_len, seed=Config.SEED+1)
+
+    if args.stage == "tokenizer":
+        train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
+                                  num_workers=Config.NUM_WORKERS, pin_memory=True,
+                                  drop_last=True, collate_fn=collate_float,
+                                  persistent_workers=Config.NUM_WORKERS > 0)
+        val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
+                                num_workers=Config.NUM_WORKERS, pin_memory=True,
+                                drop_last=False, collate_fn=collate_float,
+                                persistent_workers=Config.NUM_WORKERS > 0)
+
+        best_tok = train_tokenizer(train_loader, val_loader, crop_len)
+
+        if Config.USE_WANDB:
+            wandb.finish()
+
+    elif args.stage == "dump_codes":
+        if not args.tokenizer_ckpt:
+            raise ValueError("--tokenizer-ckpt is required for dump_codes")
+        # dump with SAME crops/splits
+        dump_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=False,
+                                 num_workers=Config.NUM_WORKERS, pin_memory=True,
+                                 drop_last=False, collate_fn=collate_float,
+                                 persistent_workers=Config.NUM_WORKERS > 0)
+        dump_loader_val = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
+                                     num_workers=Config.NUM_WORKERS, pin_memory=True,
+                                     drop_last=False, collate_fn=collate_float,
+                                     persistent_workers=Config.NUM_WORKERS > 0)
+
+        dump_codes(args.tokenizer_ckpt, dump_loader,
+                   os.path.join(args.codes_dir, "train"))
+        dump_codes(args.tokenizer_ckpt, dump_loader_val,
+                   os.path.join(args.codes_dir, "val"))
+
+    elif args.stage == "masked":
+        # Train masked-code model on dumped shards
+        train_codes = CodesShardDataset(os.path.join(args.codes_dir, "train"))
+        val_codes = CodesShardDataset(os.path.join(args.codes_dir, "val"))
+
+        train_loader = DataLoader(train_codes, batch_size=args.batch_size, shuffle=True,
+                                  num_workers=Config.NUM_WORKERS, pin_memory=True,
+                                  drop_last=True, collate_fn=collate_codes,
+                                  persistent_workers=Config.NUM_WORKERS > 0)
+        val_loader = DataLoader(val_codes, batch_size=args.batch_size, shuffle=False,
+                                num_workers=Config.NUM_WORKERS, pin_memory=True,
+                                drop_last=False, collate_fn=collate_codes,
+                                persistent_workers=Config.NUM_WORKERS > 0)
+
+        best_mc = train_masked_code(train_loader, val_loader)
+
+        if Config.USE_WANDB:
+            wandb.finish()
+
+    print("\n✓ Done.")
 
 
 if __name__ == "__main__":
