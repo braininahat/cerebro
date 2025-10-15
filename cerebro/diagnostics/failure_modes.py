@@ -224,19 +224,49 @@ def analyze_spatial_error_patterns(
     channel_amps = np.abs(inputs).mean(axis=(0, 2))  # (C,)
 
     # Per-channel correlation with error
-    channel_error_corr = np.zeros(n_channels)
+    channel_error_corr = np.full(n_channels, np.nan)
+    constant_channels = []
+
+    # Check if errors have variance
+    if np.std(errors) == 0:
+        logger.warning("⚠️  Errors have zero variance - all correlations will be NaN")
+        return {
+            "channel_amplitudes": channel_amps,
+            "channel_error_correlation": channel_error_corr,
+            "top_error_correlated_channels": np.array([]),
+        }
+
     for ch in range(n_channels):
         ch_features = np.abs(inputs[:, ch, :]).mean(
             axis=1
         )  # (N,) - mean amplitude per sample
-        channel_error_corr[ch], _ = stats.pearsonr(ch_features, errors)
+
+        # Only compute correlation if channel has variance
+        if np.std(ch_features) == 0:
+            constant_channels.append(ch)
+            # channel_error_corr[ch] already NaN from initialization
+        else:
+            channel_error_corr[ch], _ = stats.pearsonr(ch_features, errors)
+
+    if constant_channels:
+        logger.info(f"  Skipped {len(constant_channels)} channels with zero variance: {constant_channels[:10]}{'...' if len(constant_channels) > 10 else ''}")
+
+    # Get top error-correlated channels (excluding NaNs)
+    valid_corr_mask = ~np.isnan(channel_error_corr)
+    valid_indices = np.where(valid_corr_mask)[0]
+
+    if len(valid_indices) > 0:
+        valid_corrs = np.abs(channel_error_corr[valid_indices])
+        top_n = min(10, len(valid_indices))
+        top_valid_idx = np.argsort(valid_corrs)[-top_n:][::-1]
+        top_channels = valid_indices[top_valid_idx]
+    else:
+        top_channels = np.array([])
 
     return {
         "channel_amplitudes": channel_amps,
         "channel_error_correlation": channel_error_corr,
-        "top_error_correlated_channels": np.argsort(np.abs(channel_error_corr))[-10:][
-            ::-1
-        ],
+        "top_error_correlated_channels": top_channels,
     }
 
 
@@ -259,17 +289,43 @@ def analyze_temporal_error_patterns(
     time_amps = np.abs(inputs).mean(axis=(0, 1))  # (T,)
 
     # Per-timepoint correlation with error
-    time_error_corr = np.zeros(n_times)
+    time_error_corr = np.full(n_times, np.nan)
+    constant_timepoints = []
+
+    # Check if errors have variance
+    if np.std(errors) == 0:
+        logger.warning("⚠️  Errors have zero variance - all correlations will be NaN")
+        return {
+            "time_amplitudes": time_amps,
+            "time_error_correlation": time_error_corr,
+            "high_error_timepoints": np.array([]),
+        }
+
     for t in range(n_times):
         t_features = np.abs(inputs[:, :, t]).mean(
             axis=1
         )  # (N,) - mean amplitude per sample
-        time_error_corr[t], _ = stats.pearsonr(t_features, errors)
+
+        # Only compute correlation if timepoint has variance
+        if np.std(t_features) == 0:
+            constant_timepoints.append(t)
+            # time_error_corr[t] already NaN from initialization
+        else:
+            time_error_corr[t], _ = stats.pearsonr(t_features, errors)
+
+    if constant_timepoints:
+        logger.info(f"  Skipped {len(constant_timepoints)} timepoints with zero variance: {constant_timepoints[:10]}{'...' if len(constant_timepoints) > 10 else ''}")
+
+    # Get high error timepoints (excluding NaNs)
+    valid_corr_mask = ~np.isnan(time_error_corr)
+    high_error_timepoints = np.where(
+        valid_corr_mask & (np.abs(time_error_corr) > 0.1)
+    )[0]
 
     return {
         "time_amplitudes": time_amps,
         "time_error_correlation": time_error_corr,
-        "high_error_timepoints": np.where(np.abs(time_error_corr) > 0.1)[0],
+        "high_error_timepoints": high_error_timepoints,
     }
 
 
@@ -373,7 +429,7 @@ def plot_failure_modes(
     # Channel error correlation
     ax = axes[1]
     corr = spatial_patterns["channel_error_correlation"]
-    colors = ["red" if abs(c) > 0.1 else "#2E86AB" for c in corr]
+    colors = ["red" if not np.isnan(c) and abs(c) > 0.1 else "#2E86AB" for c in corr]
     ax.bar(range(len(corr)), corr, color=colors, alpha=0.7, edgecolor="black")
     ax.axhline(0, color="black", linewidth=1)
     ax.axhline(
