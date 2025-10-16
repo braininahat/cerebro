@@ -17,6 +17,10 @@ import pytorch_lightning as pl
 from timm.models import create_model
 import modeling_vqnsp
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
+
 
 class Config:
     """Centralized configuration for Route-B pretraining"""
@@ -350,7 +354,7 @@ def train_tokenizer(train_loader, val_loader, config: Config):
         max_epochs=config.MAX_EPOCHS,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=1,
-        precision="bf16-mixed",
+        precision="32-true",
         callbacks=callbacks,
         logger=logger,
         gradient_clip_val=1.0,
