@@ -6,6 +6,20 @@ Stages:
   3) masked     : masked code modeling transformer (predict code IDs for masked (channel,patch))
 """
 
+from joblib import Parallel, delayed
+from masked_code_model import MaskedCodeModel
+from tokenizer_vq_snp import TokenizerVQSNP
+from eegdash import EEGChallengeDataset
+from braindecode.datasets import BaseConcatDataset
+from braindecode.preprocessing import create_fixed_length_windows
+from braindecode.preprocessing import preprocess, Preprocessor
+import wandb
+from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+import pytorch_lightning as pl
+from torch.utils.data import DataLoader, Dataset
+import torch
+import numpy as np
 import os
 import glob
 import argparse
@@ -14,28 +28,24 @@ from typing import Optional, Tuple
 from collections import Counter
 import random
 
-import numpy as np
-import torch
-from torch.utils.data import DataLoader, Dataset
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from pytorch_lightning.loggers import WandbLogger
-import wandb
+# For debugging CUDA errors
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
 
 # Braindecode / EEGDash
-from braindecode.preprocessing import preprocess, Preprocessor
-from braindecode.preprocessing import create_fixed_length_windows
-from braindecode.datasets import BaseConcatDataset
-from eegdash import EEGChallengeDataset
 
 # Your modules
-from tokenizer_vq_snp import TokenizerVQSNP
-from masked_code_model import MaskedCodeModel
 
 
 # =============================
 # Configuration
 # =============================
+# Use TF32 where applicable (matmul/conv) for speed/accuracy balance
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("high")  # Hopper likes this
+
+
 class Config:
     """Centralized configuration for Route-B pretraining"""
 
@@ -105,7 +115,7 @@ class Config:
     # WandB
     WANDB_PROJECT = "eeg-challenge-2025"
     WANDB_ENTITY = None
-    USE_WANDB = True
+    USE_WANDB = False
 
     # Seeds
     SEED = 42
@@ -146,14 +156,48 @@ def load_passive_task_data(config: Config, use_mini: bool = True) -> BaseConcatD
 
 def filter_datasets(datasets: BaseConcatDataset, config: Config) -> BaseConcatDataset:
     """Apply quality filters to datasets"""
-    filtered = [
-        ds for ds in datasets.datasets
-        if ds.description.subject not in config.EXCLUDED_SUBJECTS
-        and ds.raw.n_times >= config.MIN_DURATION_S * config.SFREQ
-        and len(ds.raw.ch_names) == config.N_CHANNELS
-    ]
+    print(f"Filtering {len(datasets.datasets)} datasets...")
+
+    def check_dataset(ds):
+        """Check if dataset passes filters (returns ds or None)"""
+        try:
+            # Quick checks first (no data access)
+            if ds.description.subject in config.EXCLUDED_SUBJECTS:
+                return None
+
+            # Only access raw data if needed (this is the slow part)
+            # Use lazy evaluation - only load what's necessary
+            if hasattr(ds.raw, 'n_times'):
+                n_times = ds.raw.n_times
+            else:
+                # Fallback: try to get from info
+                n_times = ds.raw.info.get(
+                    'sfreq', config.SFREQ) * ds.raw.times[-1]
+
+            if n_times < config.MIN_DURATION_S * config.SFREQ:
+                return None
+
+            if len(ds.raw.ch_names) != config.N_CHANNELS:
+                return None
+
+            return ds
+        except Exception as e:
+            print(
+                f"  Warning: Failed to filter: {e}")
+            return None
+
+    # Filter in parallel for speed
+    print("  Running quality checks (this may take a moment)...")
+    filtered = Parallel(n_jobs=min(config.NUM_WORKERS, 4), backend='threading')(
+        delayed(check_dataset)(ds) for ds in datasets.datasets
+    )
+
+    # Remove None values
+    filtered = [ds for ds in filtered if ds is not None]
+
     filtered_datasets = BaseConcatDataset(filtered)
-    print(f"Recordings after filtering: {len(filtered_datasets.datasets)}")
+    print(
+        f"✓ Kept {len(filtered_datasets.datasets)}/{len(datasets.datasets)} recordings")
 
     task_counts = Counter(
         [ds.description.task for ds in filtered_datasets.datasets])
@@ -311,6 +355,9 @@ def setup_logger_and_callbacks(run_name: str, monitor: str, ckpt_dir: str, use_w
 
 def train_tokenizer(train_loader, val_loader, crop_len):
     print("\n=== Stage 1: Tokenizer (VQ-SNP) ===")
+    print(
+        f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+
     model = TokenizerVQSNP(
         n_chans=Config.N_CHANNELS,
         crop_len=crop_len,
@@ -332,14 +379,17 @@ def train_tokenizer(train_loader, val_loader, crop_len):
         max_epochs=Config.MAX_EPOCHS,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=1,
-        precision='16-mixed' if torch.cuda.is_available() else 32,
+        precision="bf16-mixed",
         callbacks=callbacks,
         logger=logger,
         log_every_n_steps=10,
         gradient_clip_val=1.0,
         deterministic='warn',
+        enable_progress_bar=True,  # Ensure progress bar is enabled
+        enable_model_summary=True,  # Show model summary
     )
 
+    print("\nStarting training...")
     trainer.fit(model, train_loader, val_loader)
     best = ckpt_cb.best_model_path
     print(f"✓ Tokenizer best checkpoint: {best}")
@@ -391,7 +441,7 @@ def train_masked_code(codes_train_loader, codes_val_loader):
         max_epochs=Config.MAX_EPOCHS,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=1,
-        precision='16-mixed' if torch.cuda.is_available() else 32,
+        precision="bf16-mixed",
         callbacks=callbacks,
         logger=logger,
         log_every_n_steps=10,
@@ -449,14 +499,20 @@ def main():
         val_win,   crop_size_samples=crop_len, seed=Config.SEED+1)
 
     if args.stage == "tokenizer":
+        # Reduce num_workers for tokenizer to avoid deadlocks with persistent_workers
+        # Tokenizer training is GPU-bound (FFT ops), so fewer workers is fine
+        tok_workers = min(4, Config.NUM_WORKERS)
+
         train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
-                                  num_workers=Config.NUM_WORKERS, pin_memory=True,
+                                  num_workers=tok_workers, pin_memory=True,
                                   drop_last=True, collate_fn=collate_float,
-                                  persistent_workers=Config.NUM_WORKERS > 0)
+                                  persistent_workers=False)  # Disable to avoid deadlocks
         val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
-                                num_workers=Config.NUM_WORKERS, pin_memory=True,
+                                num_workers=tok_workers, pin_memory=True,
                                 drop_last=False, collate_fn=collate_float,
-                                persistent_workers=Config.NUM_WORKERS > 0)
+                                persistent_workers=False)
+
+        print(f"✓ Using {tok_workers} workers for tokenizer dataloaders")
 
         best_tok = train_tokenizer(train_loader, val_loader, crop_len)
 
