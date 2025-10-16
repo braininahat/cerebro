@@ -1,3 +1,5 @@
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning.loggers import WandbLogger
 from braindecode.datasets import BaseConcatDataset
 from torch.utils.data import Dataset, DataLoader
 import torch
@@ -6,14 +8,14 @@ from typing import Tuple
 import random
 from collections import Counter
 from joblib import Parallel, delayed
-from braindecode.datasets import BaseConcatDataset, EEGChallengeDataset
+from braindecode.datasets import BaseConcatDataset
+from eegdash import EEGChallengeDataset
 from braindecode.preprocessing import create_fixed_length_windows
 import argparse
 import os
-
 import pytorch_lightning as pl
-
-from notebooks.stage1_mae_labram_refactored_v2 import train_tokenizer
+from timm.models import create_model
+import modeling_vqnsp
 
 
 class Config:
@@ -24,7 +26,8 @@ class Config:
     CACHE_DIR = os.path.join(DATA_DIR, "mini")
 
     # Releases
-    RELEASES = ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
+    # RELEASES = ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
+    RELEASES = ["R1", "R2"]
 
     # Passive tasks for pre-training
     PASSIVE_TASKS = [
@@ -54,6 +57,7 @@ class Config:
     WINDOW_SIZE_S = 4.0
     WINDOW_STRIDE_S = 2.0
     CROP_SIZE_S = 2.0
+    INPUT_SIZE = SFREQ * CROP_SIZE_S  # 200 samples
 
     # Patch spec
     PATCH_LEN = 20
@@ -63,6 +67,8 @@ class Config:
     # Model sizes
     TOK_DIM = 256
     CODEBOOK_SIZE = 8192
+    CODEBOOK_EMD_DIM = 64
+    EMA_DECAY = 0.99
     VQ_TYPE = "gumbel"  # "gumbel" or "ema"
     TEMPERATURE = 1.0
     KL_WEIGHT = 0.01
@@ -226,6 +232,8 @@ def filter_datasets(datasets: BaseConcatDataset, config: Config) -> BaseConcatDa
     for task, count in sorted(task_counts.items()):
         print(f"  {task}: {count}")
 
+    return filtered_datasets
+
 
 def create_windows(datasets: BaseConcatDataset, config: Config) -> BaseConcatDataset:
     """Create fixed-length windows from continuous data"""
@@ -275,6 +283,85 @@ def split_by_subject(
         f"       {len(unique_subjects) - n_val} train subjects, {n_val} val subjects")
 
     return train_ds, val_ds
+
+
+def setup_logger_and_callbacks(run_name: str, monitor: str, ckpt_dir: str, use_wandb: bool):
+    """Setup logging and callbacks"""
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    if use_wandb:
+        logger = WandbLogger(
+            project=Config.WANDB_PROJECT,
+            entity=Config.WANDB_ENTITY,
+            name=run_name,
+            save_dir=Config.LOG_DIR
+        )
+    else:
+        logger = None
+
+    ckpt_cb = ModelCheckpoint(
+        dirpath=ckpt_dir,
+        filename=f"{run_name}-{{epoch:02d}}-{{{monitor}:.4f}}",
+        monitor=monitor,
+        mode='min',
+        save_top_k=3,
+        save_last=True
+    )
+
+    early_stop = EarlyStopping(
+        monitor=monitor,
+        patience=15,
+        mode='min',
+        verbose=True
+    )
+
+    callbacks = [ckpt_cb, early_stop]
+
+    return logger, callbacks, ckpt_cb
+
+
+def train_tokenizer(train_loader, val_loader, config: Config):
+    """Train VQ-SNP tokenizer"""
+    print("\n" + "="*60)
+    print("Stage 1: Training VQ-SNP Tokenizer")
+    print("="*60)
+
+    crop_len = int(config.CROP_SIZE_S * config.SFREQ)
+
+    model = create_model(
+        "vqnsp_encoder_base_decoder_3x100x12",
+        pretrained=False,
+        as_tokenzer=False,
+        n_code=config.CODEBOOK_SIZE,
+        code_dim=config.CODEBOOK_EMD_DIM,
+        EEG_size=config.INPUT_SIZE,
+        decay=config.EMA_DECAY,
+        quantize_kmeans_init=True
+    )
+
+    logger, callbacks, ckpt_cb = setup_logger_and_callbacks(
+        run_name="tokenizer_vqsnp",
+        monitor="val_tok_loss",
+        ckpt_dir=config.TOK_DIR,
+        use_wandb=config.USE_WANDB
+    )
+
+    trainer = pl.Trainer(
+        max_epochs=config.MAX_EPOCHS,
+        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
+        devices=1,
+        precision="bf16-mixed",
+        callbacks=callbacks,
+        logger=logger,
+        gradient_clip_val=1.0,
+        log_every_n_steps=50,
+    )
+
+    trainer.fit(model, train_loader, val_loader)
+
+    best_ckpt = ckpt_cb.best_model_path
+    print(f"✓ Tokenizer training complete: {best_ckpt}")
+    return best_ckpt
 
 
 def main():
