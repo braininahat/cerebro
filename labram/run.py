@@ -420,7 +420,7 @@ def train_tokenizer(train_loader, val_loader, config: Config):
 
 
 def pre_train(train_loader, val_loader, config: Config,
-              tokenizer_ckpt: str = "tokenizer_vqsnp-epoch=94-val_tok_loss=1.6384.ckpt"):
+              tokenizer_ckpt: str = "best_tokenizer.ckpt"):
     cb_path = os.path.join(config.TOK_DIR, tokenizer_ckpt)
 
     vq_model = create_model(
