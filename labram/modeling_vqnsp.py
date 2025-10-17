@@ -390,7 +390,7 @@ def get_model_default_params():
 # -------- Registered builders (kept patch-size agnostic) --------
 
 @register_model
-def vqnsp_encoder_base_decoder_3x200x12(pretrained=False, pretrained_weight=None, as_tokenzer=False,
+def vqnsp_encoder_base_decoder_3x200x12(pretrained=False, pretrained_weight=None, as_tokenizer=False,
                                         EEG_size=1600, n_code=8192, code_dim=32,
                                         patch_size=200, **kwargs):
     encoder_config, decoder_config = get_model_default_params(), get_model_default_params()
@@ -409,7 +409,7 @@ def vqnsp_encoder_base_decoder_3x200x12(pretrained=False, pretrained_weight=None
         decoder_out_dim=patch_size, patch_len=patch_size, **kwargs
     )
 
-    if as_tokenzer:
+    if as_tokenizer:
         assert pretrained and pretrained_weight is not None
         if pretrained_weight.startswith('https'):
             weights = torch.hub.load_state_dict_from_url(
@@ -425,17 +425,17 @@ def vqnsp_encoder_base_decoder_3x200x12(pretrained=False, pretrained_weight=None
 
 
 @register_model
-def vqnsp_encoder_base_decoder_3x100x12(pretrained=False, pretrained_weight=None, as_tokenzer=False,
+def vqnsp_encoder_base_decoder_3x100x12(pretrained=False, pretrained_weight=None, as_tokenizer=False,
                                         EEG_size=1000, n_code=8192, code_dim=32,
                                         patch_size=100, **kwargs):
     return vqnsp_encoder_base_decoder_3x200x12(
-        pretrained=pretrained, pretrained_weight=pretrained_weight, as_tokenzer=as_tokenzer,
+        pretrained=pretrained, pretrained_weight=pretrained_weight, as_tokenizer=as_tokenizer,
         EEG_size=EEG_size, n_code=n_code, code_dim=code_dim, patch_size=patch_size, **kwargs
     )
 
 
 @register_model
-def vqnsp_encoder_large_decoder_3x200x24(pretrained=False, pretrained_weight=None, as_tokenzer=False,
+def vqnsp_encoder_large_decoder_3x200x24(pretrained=False, pretrained_weight=None, as_tokenizer=False,
                                          EEG_size=1600, n_code=8192, code_dim=32,
                                          patch_size=200, **kwargs):
     encoder_config, decoder_config = get_model_default_params(), get_model_default_params()
@@ -455,7 +455,7 @@ def vqnsp_encoder_large_decoder_3x200x24(pretrained=False, pretrained_weight=Non
         decoder_out_dim=patch_size, patch_len=patch_size, **kwargs
     )
 
-    if as_tokenzer:
+    if as_tokenizer:
         assert pretrained and pretrained_weight is not None
         if pretrained_weight.startswith('https'):
             weights = torch.hub.load_state_dict_from_url(

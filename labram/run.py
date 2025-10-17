@@ -20,6 +20,8 @@ import pickle
 import pytorch_lightning as pl
 from timm.models import create_model
 import modeling_vqnsp
+import modeling_pretrain
+from modeling_pretrain import MEMPretrainModule
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -87,7 +89,7 @@ class Config:
     MASK_STRATEGY = "spatial"  # "spatial", "channel", or "random"
 
     # Training
-    BATCH_SIZE = 512
+    BATCH_SIZE = 256
     NUM_WORKERS = 8
     MAX_EPOCHS = 100
     LR = 1e-3
@@ -96,6 +98,7 @@ class Config:
     # I/O
     ROOT_DIR = "./checkpoints/labram"
     TOK_DIR = os.path.join(ROOT_DIR, "tokenizer")
+    MEM_DIR = os.path.join(ROOT_DIR, "mem_pretrain")
     CODES_DIR = os.path.join(ROOT_DIR, "codes_passive")
     MC_DIR = os.path.join(ROOT_DIR, "masked")
     FT_DIR = os.path.join(ROOT_DIR, "finetune")
@@ -360,7 +363,7 @@ def train_tokenizer(train_loader, val_loader, config: Config):
     model = create_model(
         "vqnsp_encoder_base_decoder_3x100x12",
         pretrained=False,
-        as_tokenzer=False,
+        as_tokenizer=False,
         n_code=config.CODEBOOK_SIZE,
         code_dim=config.CODEBOOK_EMD_DIM,
         EEG_size=config.INPUT_SIZE,
@@ -416,6 +419,86 @@ def train_tokenizer(train_loader, val_loader, config: Config):
     return best_ckpt
 
 
+def pre_train(train_loader, val_loader, config: Config,
+              tokenizer_ckpt: str = "tokenizer_vqsnp-epoch=94-val_tok_loss=1.6384.ckpt"):
+    cb_path = os.path.join(config.TOK_DIR, tokenizer_ckpt)
+
+    vq_model = create_model(
+        "vqnsp_encoder_base_decoder_3x100x12",
+        pretrained=True,
+        pretrained_weight=cb_path,
+        as_tokenizer=True,
+        n_code=config.CODEBOOK_SIZE,
+        code_dim=config.CODEBOOK_EMD_DIM,
+        EEG_size=config.INPUT_SIZE,
+        decay=config.EMA_DECAY,
+        n_chans_hint=129,                # <-- add this to match your montage
+        max_time_window_hint=2).eval()
+
+    labram_model = create_model(
+        "labram_base_patch100_200_8k_vocab",
+        pretrained=False,
+        drop_path_rate=0.1,
+        drop_block_rate=None,
+        use_shared_rel_pos_bias=False,
+        use_abs_pos_emb=True,
+        init_values=0.1,
+        vocab_size=config.CODEBOOK_SIZE,
+        n_chans_hint=config.N_CHANNELS,     # 129
+        max_time_window_hint=2,
+    )
+
+    model = MEMPretrainModule(
+        labram_model,
+        tokenizer=vq_model,
+        patch_size=100,
+    )
+
+    logger, callbacks, ckpt_cb = setup_logger_and_callbacks(
+        run_name="pre-train_labram",
+        monitor="val_mem_loss",
+        ckpt_dir=config.MEM_DIR,
+        use_wandb=config.USE_WANDB
+    )
+
+    trainer = pl.Trainer(
+        max_epochs=config.MAX_EPOCHS,
+        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
+        devices=1,
+        precision="32-true",
+        callbacks=callbacks,
+        logger=logger,
+        gradient_clip_val=1.0,
+        log_every_n_steps=50,
+    )
+
+    print("About to call trainer.fit()...")
+    sys.stdout.flush()  # Force flush to ensure print appears
+
+    try:
+        trainer.fit(model, train_loader, val_loader)
+        print("trainer.fit() completed successfully!")
+        sys.stdout.flush()
+    except KeyboardInterrupt:
+        print("Training interrupted by user")
+        raise
+    except Exception as e:
+        print(f"\n{'='*60}")
+        print(f"ERROR in trainer.fit():")
+        print(f"{'='*60}")
+        print(f"Exception type: {type(e).__name__}")
+        print(f"Exception message: {e}")
+        print(f"{'='*60}")
+        print("\nFULL STACK TRACE:")
+        print(f"{'='*60}")
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
+        raise
+
+    best_ckpt = ckpt_cb.best_model_path
+    print(f"✓ Tokenizer training complete: {best_ckpt}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--use_mini", action="store_true", default=False,
@@ -424,6 +507,9 @@ def main():
                         help="Path to tokenizer checkpoint (for dump_codes/masked stages)")
     parser.add_argument("--skip_cache", action="store_true", default=False,
                         help="Skip loading from cache and reprocess data")
+    parser.add_argument("--stage", type=str, default="tokenizer",
+                        choices=["tokenizer", "pre-train", "finetune"],
+                        help="Training stage to run")
     args = parser.parse_args()
 
     # Set seeds
@@ -497,8 +583,13 @@ def main():
                             num_workers=Config.NUM_WORKERS, shuffle=False,
                             collate_fn=collate_float, pin_memory=True)
 
-    tokenizer_ckpt = train_tokenizer(train_loader, val_loader, Config)
-    print(f"Tokenizer checkpoint saved at: {tokenizer_ckpt}")
+    if args.stage == "tokenizer":
+        tokenizer_ckpt = train_tokenizer(train_loader, val_loader, Config)
+        print(f"Tokenizer checkpoint saved at: {tokenizer_ckpt}")
+
+    if args.stage == "pre-train":
+        encoder_ckpt = pre_train(train_loader, val_loader, Config)
+        print(f"Encoder checkpoint saved at: {encoder_ckpt}")
 
 
 if __name__ == "__main__":
