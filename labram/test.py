@@ -1,4 +1,6 @@
 import torch
+import torch.backends.cuda as cuda_back
+cuda_back.cufft_plan_cache.max_size = 0
 B, N, T = 8, 129, 200
 x = torch.randn(B, N, T, device='cuda', dtype=torch.float32) * 1e-3
 x = x.contiguous()

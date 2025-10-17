@@ -296,31 +296,43 @@ class NeuralTransformer(nn.Module):
                  use_mean_pooling=True, init_scale=0.001, **kwargs):
         super().__init__()
         self.num_classes = num_classes
-        # num_features for consistency with other models
         self.num_features = self.embed_dim = embed_dim
 
-        # To identify whether it is neural tokenizer or neural decoder.
-        # For the neural decoder, use linear projection (PatchEmbed) to project codebook dimension to hidden dimension.
-        # Otherwise, use TemporalConv to extract temporal features from EEG signals.
+        # tokenizer (TemporalConv) for raw EEG, PatchEmbed for decoder/code inputs
         self.patch_embed = TemporalConv(out_chans=out_chans) if in_chans == 1 else PatchEmbed(
             EEG_size=EEG_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         self.time_window = EEG_size // patch_size
         self.patch_size = patch_size
 
+        # ---- NEW: add a projection after TemporalConv when last-dim != embed_dim ----
+        # conv1 in TemporalConv: k=15, s=8, p=7 → L' = floor((T + 7)/8)
+        self._pre_embed_proj = None
+        if isinstance(self.patch_embed, TemporalConv):
+            Lp = (self.patch_size + 7) // 8
+            temporal_dim = Lp * out_chans            # e.g., T=100 → L'=13 → 13*8=104
+            if temporal_dim != embed_dim:
+                self._pre_embed_proj = nn.Linear(temporal_dim, embed_dim)
+
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        # self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
+        # ---- (OPTIONAL but recommended) make pos/time embeddings match your data ----
+        # pass 129 for your data
+        n_chans_hint = kwargs.get("n_chans_hint", 129)
+        max_time_window_hint = kwargs.get(
+            "max_time_window_hint", self.time_window)  # pass 2 for T=200,patch=100
+        print(
+            f"n_chans_hint: {n_chans_hint}, max_time_window_hint: {max_time_window_hint}")
         if use_abs_pos_emb:
             self.pos_embed = nn.Parameter(torch.zeros(
-                1, 128 + 1, embed_dim), requires_grad=True)
+                1, n_chans_hint + 1, embed_dim), requires_grad=True)
         else:
             self.pos_embed = None
         self.time_embed = nn.Parameter(torch.zeros(
-            1, 16, embed_dim), requires_grad=True)
-        self.pos_drop = nn.Dropout(p=drop_rate)
+            1, max_time_window_hint, embed_dim), requires_grad=True)
 
+        self.pos_drop = nn.Dropout(p=drop_rate)
         self.rel_pos_bias = None
 
-        # stochastic depth decay rule
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
         self.use_rel_pos_bias = use_rel_pos_bias
         self.blocks = nn.ModuleList([
@@ -339,7 +351,6 @@ class NeuralTransformer(nn.Module):
         if self.time_embed is not None:
             trunc_normal_(self.time_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
-        # trunc_normal_(self.mask_token, std=.02)
         if isinstance(self.head, nn.Linear):
             trunc_normal_(self.head.weight, std=.02)
         self.apply(self._init_weights)
@@ -384,15 +395,18 @@ class NeuralTransformer(nn.Module):
     def forward_features(self, x, input_chans=None, return_patch_tokens=False, return_all_tokens=False, **kwargs):
         batch_size, n, a, t = x.shape
         input_time_window = a if t == self.patch_size else t
-        x = self.patch_embed(x)
+        x = self.patch_embed(x)  # [B, tokens, last_dim]
 
-        # stole cls_tokens impl from Phil Wang, thanks
+        # ---- NEW: harmonize to embed_dim when TemporalConv output != embed_dim ----
+        if self._pre_embed_proj is not None:
+            x = self._pre_embed_proj(x)  # [B, tokens, embed_dim]
+
+        # cls + pos + time embeds (your original logic, with safe slicing below)
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-
         x = torch.cat((cls_tokens, x), dim=1)
 
-        pos_embed_used = self.pos_embed[:,
-                                        input_chans] if input_chans is not None else self.pos_embed
+        pos_embed_used = self.pos_embed[:, input_chans] if (
+            self.pos_embed is not None and input_chans is not None) else self.pos_embed
         if self.pos_embed is not None:
             pos_embed = pos_embed_used[:, 1:, :].unsqueeze(2).expand(
                 batch_size, -1, input_time_window, -1).flatten(1, 2)
@@ -406,7 +420,6 @@ class NeuralTransformer(nn.Module):
             x[:, 1:, :] += time_embed
 
         x = self.pos_drop(x)
-
         for blk in self.blocks:
             x = blk(x, rel_pos_bias=None)
 

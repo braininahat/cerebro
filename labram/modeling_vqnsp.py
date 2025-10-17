@@ -224,20 +224,8 @@ class VQNSP(pl.LightningModule):
     def forward(self, x, input_chans=None, **kwargs):
         # hygiene first
         x = x.to(self.device, non_blocking=True).to(torch.float32)
-        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # quick debug prints for the first few batches
-        if getattr(self, "_dbg_printed", 0) < 3 and (self.global_rank if hasattr(self, "global_rank") else 0) == 0:
-            self.print(f"[dbg] x shape={tuple(x.shape)} device={x.device} dtype={x.dtype} "
-                       f"min={float(x.min()) if x.numel() else 'NA'} max={float(x.max()) if x.numel() else 'NA'}")
-            self._dbg_printed = getattr(self, "_dbg_printed", 0) + 1
 
         x, A, T = self._chunk_to_patches(x)
-
-        # strict assertions help catch bogus shapes early
-        assert T == self.patch_len and T > 0, f"bad patch len: got {T}, expected {self.patch_len}"
-        assert x.isfinite().all(), "non-finite values after chunking"
-        x = x.contiguous()  # x: (B, N, T_total)
 
         x_fft = torch.fft.fft(x, dim=-1)
         amplitude = self.std_norm(torch.abs(x_fft))

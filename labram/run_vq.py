@@ -13,6 +13,8 @@ from eegdash import EEGChallengeDataset
 from braindecode.preprocessing import create_fixed_length_windows
 import argparse
 import os
+import sys
+import traceback
 import pytorch_lightning as pl
 from timm.models import create_model
 import modeling_vqnsp
@@ -27,11 +29,10 @@ class Config:
 
     # Data paths
     DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.getcwd(), "data"))
-    CACHE_DIR = os.path.join(DATA_DIR, "mini")
+    CACHE_DIR = os.path.join(DATA_DIR, "full")
 
     # Releases
-    # RELEASES = ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
-    RELEASES = ["R1", "R2"]
+    RELEASES = ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
 
     # Passive tasks for pre-training
     PASSIVE_TASKS = [
@@ -61,7 +62,7 @@ class Config:
     WINDOW_SIZE_S = 4.0
     WINDOW_STRIDE_S = 2.0
     CROP_SIZE_S = 2.0
-    INPUT_SIZE = SFREQ * CROP_SIZE_S  # 200 samples
+    INPUT_SIZE = int(SFREQ * CROP_SIZE_S)  # 200 samples
 
     # Patch spec
     PATCH_LEN = 20
@@ -84,7 +85,7 @@ class Config:
     MASK_STRATEGY = "spatial"  # "spatial", "channel", or "random"
 
     # Training
-    BATCH_SIZE = 128
+    BATCH_SIZE = 512
     NUM_WORKERS = 8
     MAX_EPOCHS = 100
     LR = 1e-3
@@ -216,7 +217,9 @@ def filter_datasets(datasets: BaseConcatDataset, config: Config) -> BaseConcatDa
                 return None
 
             return ds
-        except:
+        except Exception as e:
+            # Print stack trace for debugging
+            print(f"Error checking dataset: {e}")
             return None
 
     # Filter in parallel
@@ -340,7 +343,9 @@ def train_tokenizer(train_loader, val_loader, config: Config):
         code_dim=config.CODEBOOK_EMD_DIM,
         EEG_size=config.INPUT_SIZE,
         decay=config.EMA_DECAY,
-        quantize_kmeans_init=True
+        quantize_kmeans_init=True,
+        n_chans_hint=129,                # <-- add this to match your montage
+        max_time_window_hint=2
     )
 
     logger, callbacks, ckpt_cb = setup_logger_and_callbacks(
@@ -356,12 +361,32 @@ def train_tokenizer(train_loader, val_loader, config: Config):
         devices=1,
         precision="32-true",
         callbacks=callbacks,
-        logger=logger,
         gradient_clip_val=1.0,
         log_every_n_steps=50,
     )
 
-    trainer.fit(model, train_loader, val_loader)
+    print("About to call trainer.fit()...")
+    sys.stdout.flush()  # Force flush to ensure print appears
+
+    try:
+        trainer.fit(model, train_loader, val_loader)
+        print("trainer.fit() completed successfully!")
+        sys.stdout.flush()
+    except KeyboardInterrupt:
+        print("Training interrupted by user")
+        raise
+    except Exception as e:
+        print(f"\n{'='*60}")
+        print(f"ERROR in trainer.fit():")
+        print(f"{'='*60}")
+        print(f"Exception type: {type(e).__name__}")
+        print(f"Exception message: {e}")
+        print(f"{'='*60}")
+        print("\nFULL STACK TRACE:")
+        print(f"{'='*60}")
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
+        raise
 
     best_ckpt = ckpt_cb.best_model_path
     print(f"✓ Tokenizer training complete: {best_ckpt}")
@@ -370,7 +395,7 @@ def train_tokenizer(train_loader, val_loader, config: Config):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--use_mini", action="store_true", default=True,
+    parser.add_argument("--use_mini", action="store_true", default=False,
                         help="Use mini dataset")
     parser.add_argument("--tokenizer_ckpt", type=str, default=None,
                         help="Path to tokenizer checkpoint (for dump_codes/masked stages)")
@@ -409,7 +434,35 @@ def main():
                             collate_fn=collate_float, pin_memory=True)
 
     tokenizer_ckpt = train_tokenizer(train_loader, val_loader, Config)
+    print(f"Tokenizer checkpoint saved at: {tokenizer_ckpt}")
 
 
 if __name__ == "__main__":
-    main()
+    # Set up custom exception handler to catch all unhandled exceptions
+    def exception_handler(exc_type, exc_value, exc_traceback):
+        print(f"\n{'='*60}")
+        print("UNHANDLED EXCEPTION:")
+        print(f"{'='*60}")
+        print(f"Type: {exc_type.__name__}")
+        print(f"Value: {exc_value}")
+        print(f"{'='*60}")
+        traceback.print_exception(exc_type, exc_value, exc_traceback)
+        sys.stdout.flush()
+
+    sys.excepthook = exception_handler
+
+    try:
+        main()
+        print("\nScript completed successfully!")
+    except Exception as e:
+        print(f"\n{'='*60}")
+        print("EXCEPTION IN MAIN:")
+        print(f"{'='*60}")
+        print(f"Type: {type(e).__name__}")
+        print(f"Message: {e}")
+        print(f"{'='*60}")
+        print("\nFULL STACK TRACE:")
+        print(f"{'='*60}")
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
+        sys.exit(1)
