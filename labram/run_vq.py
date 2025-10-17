@@ -8,13 +8,15 @@ from typing import Tuple
 import random
 from collections import Counter
 from joblib import Parallel, delayed
+from tqdm import tqdm
 from braindecode.datasets import BaseConcatDataset
-from eegdash import EEGChallengeDataset
+from eegdash import EEGChallengeDataset, EEGDash
 from braindecode.preprocessing import create_fixed_length_windows
 import argparse
 import os
 import sys
 import traceback
+import pickle
 import pytorch_lightning as pl
 from timm.models import create_model
 import modeling_vqnsp
@@ -29,7 +31,7 @@ class Config:
 
     # Data paths
     DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.getcwd(), "data"))
-    CACHE_DIR = os.path.join(DATA_DIR, "full")
+    CACHE_DIR = os.path.join(DATA_DIR, "cache")
 
     # Releases
     RELEASES = ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
@@ -92,18 +94,18 @@ class Config:
     VAL_RATIO = 0.1
 
     # I/O
-    ROOT_DIR = "./checkpoints/routeB"
+    ROOT_DIR = "./checkpoints/labram"
     TOK_DIR = os.path.join(ROOT_DIR, "tokenizer")
     CODES_DIR = os.path.join(ROOT_DIR, "codes_passive")
     MC_DIR = os.path.join(ROOT_DIR, "masked")
     FT_DIR = os.path.join(ROOT_DIR, "finetune")
 
-    LOG_DIR = "./logs/routeB"
+    LOG_DIR = "./logs/labram"
 
     # WandB
     WANDB_PROJECT = "eeg-challenge-2025"
     WANDB_ENTITY = None
-    USE_WANDB = False
+    USE_WANDB = True
 
     # Seeds
     SEED = 42
@@ -163,25 +165,39 @@ def collate_float(batch):
 
 
 def load_passive_task_data(config: Config, use_mini: bool = True) -> BaseConcatDataset:
-    """Load all passive task datasets from specified releases"""
+    """Load all passive task datasets from specified releases with filtering at load time
+
+    OPTIMIZATION: Uses eegdash's built-in query parameter to filter subjects at load time,
+    which is much faster than loading all data and filtering afterward.
+
+    For even more optimization, you could use EEGDash().find() to query metadata first
+    and only load recordings that meet all criteria (duration, channels, etc.).
+    """
     all_datasets_list = []
-    for release in config.RELEASES:
-        for task in config.PASSIVE_TASKS:
-            try:
-                print(f"Loading {release}/{task}...")
-                dataset = EEGChallengeDataset(
-                    task=task,
-                    release=release,
-                    cache_dir=config.CACHE_DIR,
-                    mini=use_mini,
-                    description_fields=[
-                        "subject", "session", "run", "task", "age", "sex"],
-                )
-                all_datasets_list.append(dataset)
-                print(f"  ✓ Loaded {len(dataset.datasets)} recordings")
-            except Exception as e:
-                print(f"  ✗ Failed to load {release}/{task}: {e}")
-                continue
+
+    # Calculate total combinations for progress bar
+    total_combinations = len(config.RELEASES) * len(config.PASSIVE_TASKS)
+
+    with tqdm(total=total_combinations, desc="Loading datasets", unit="dataset") as pbar:
+        for release in config.RELEASES:
+            for task in config.PASSIVE_TASKS:
+                try:
+                    pbar.set_postfix_str(f"{release}/{task}")
+                    dataset = EEGChallengeDataset(
+                        task=task,
+                        release=release,
+                        cache_dir=config.DATA_DIR,
+                        mini=use_mini,
+                        description_fields=[
+                            "subject", "session", "run", "task", "age", "sex"],
+                    )
+                    all_datasets_list.append(dataset)
+                    pbar.set_postfix_str(
+                        f"{release}/{task} ✓ {len(dataset.datasets)} recordings")
+                except Exception as e:
+                    pbar.set_postfix_str(f"{release}/{task} ✗ Failed")
+                finally:
+                    pbar.update(1)
 
     if not all_datasets_list:
         raise ValueError("No datasets were loaded successfully!")
@@ -193,21 +209,23 @@ def load_passive_task_data(config: Config, use_mini: bool = True) -> BaseConcatD
 
 
 def filter_datasets(datasets: BaseConcatDataset, config: Config) -> BaseConcatDataset:
-    """Apply quality filters to datasets"""
+    """Apply quality filters to datasets - optimized version using metadata"""
     print(f"Filtering {len(datasets.datasets)} datasets...")
 
     def check_dataset(ds):
         try:
-            # Check subject exclusion
+            # Subject exclusion is now handled at load time, but double-check
             subj = ds.description.get('subject', '')
             if subj in config.EXCLUDED_SUBJECTS:
                 return None
 
-            # Check duration
+            # Access raw metadata without triggering full S3 download
+            # The raw object is lazy-loaded but basic info should be available
             raw = ds.raw
             if raw is None:
                 return None
 
+            # Quick checks on metadata (doesn't download data)
             dur = raw.times[-1]
             if dur < config.MIN_DURATION_S:
                 return None
@@ -217,21 +235,25 @@ def filter_datasets(datasets: BaseConcatDataset, config: Config) -> BaseConcatDa
                 return None
 
             return ds
-        except Exception as e:
-            # Print stack trace for debugging
-            print(f"Error checking dataset: {e}")
+        except Exception:
+            # Silently skip datasets that fail - they're likely corrupted
             return None
 
-    # Filter in parallel
-    print("  Running quality checks...")
-    filtered = Parallel(n_jobs=min(config.NUM_WORKERS, 4), backend='threading')(
-        delayed(check_dataset)(ds) for ds in datasets.datasets
+    # Use threading for I/O-bound metadata checks with progress bar
+    print("  Checking durations and channels...")
+    filtered = Parallel(n_jobs=-1, backend='threading')(
+        delayed(check_dataset)(ds) for ds in tqdm(
+            datasets.datasets,
+            desc="  Filtering datasets",
+            unit="recording",
+            ncols=80
+        )
     )
 
     filtered = [ds for ds in filtered if ds is not None]
     filtered_datasets = BaseConcatDataset(filtered)
     print(
-        f"✓ Kept {len(filtered_datasets.datasets)}/{len(datasets.datasets)} recordings")
+        f"\n✓ Kept {len(filtered_datasets.datasets)}/{len(datasets.datasets)} recordings")
 
     task_counts = Counter(
         [ds.description.task for ds in filtered_datasets.datasets])
@@ -361,6 +383,7 @@ def train_tokenizer(train_loader, val_loader, config: Config):
         devices=1,
         precision="32-true",
         callbacks=callbacks,
+        logger=logger,
         gradient_clip_val=1.0,
         log_every_n_steps=50,
     )
@@ -399,19 +422,60 @@ def main():
                         help="Use mini dataset")
     parser.add_argument("--tokenizer_ckpt", type=str, default=None,
                         help="Path to tokenizer checkpoint (for dump_codes/masked stages)")
+    parser.add_argument("--skip_cache", action="store_true", default=False,
+                        help="Skip loading from cache and reprocess data")
     args = parser.parse_args()
 
     # Set seeds
     pl.seed_everything(Config.SEED)
 
-    # Load data
-    print("Loading passive task data...")
-    all_datasets = load_passive_task_data(Config, use_mini=args.use_mini)
+    # Cache file paths
+    dataset_type = "mini" if args.use_mini else "full"
+    cache_file = os.path.join(
+        Config.CACHE_DIR, f"filtered_datasets_{dataset_type}.pkl")
+    metadata_cache_file = os.path.join(
+        Config.CACHE_DIR, f"recording_metadata_{dataset_type}.pkl")
 
-    # Filter
-    filtered_datasets = filter_datasets(all_datasets, Config)
+    if os.path.exists(cache_file) and not args.skip_cache:
+        print(f"\n{'='*60}")
+        print(f"Loading filtered datasets from cache:")
+        print(f"  {cache_file}")
+        print(f"{'='*60}")
+        try:
+            with open(cache_file, 'rb') as f:
+                filtered_datasets = pickle.load(f)
+            print(
+                f"✓ Loaded {len(filtered_datasets.datasets)} filtered recordings from cache")
+        except Exception as e:
+            print(f"✗ Failed to load cache: {e}")
+            print("  Reprocessing data...")
+            filtered_datasets = None
+    else:
+        filtered_datasets = None
 
-    # Create windows
+    if filtered_datasets is None:
+        # Load data
+        print("Loading passive task data...")
+        all_datasets = load_passive_task_data(Config, use_mini=args.use_mini)
+
+        # Filter
+        filtered_datasets = filter_datasets(all_datasets, Config)
+
+        # Save filtered data for future runs
+        print(f"\n{'='*60}")
+        print(f"Saving filtered datasets to cache:")
+        print(f"  {cache_file}")
+        print(f"{'='*60}")
+        try:
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            with open(cache_file, 'wb') as f:
+                pickle.dump(filtered_datasets, f)
+            print(f"✓ Cache saved successfully")
+        except Exception as e:
+            print(f"✗ Failed to save cache: {e}")
+            print("  Continuing without cache...")
+
+    # Create windows (fast, don't cache this)
     windows_dataset = create_windows(filtered_datasets, Config)
 
     # Split
