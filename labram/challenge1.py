@@ -1,30 +1,30 @@
+from sklearn.utils import check_random_state
+from sklearn.model_selection import train_test_split
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+import traceback
+import sys
 from pytorch_lightning.loggers import WandbLogger
-from braindecode.datasets import BaseConcatDataset
-from torch.utils.data import Dataset, DataLoader
-import torch
-import numpy as np
 from typing import Tuple
 import random
-from collections import Counter
-from joblib import Parallel, delayed
-from tqdm import tqdm
-from eegdash import EEGChallengeDataset, EEGDash
-from braindecode.preprocessing import create_fixed_length_windows
+import pickle
 import argparse
 import os
-import sys
-import traceback
-import pickle
 import pytorch_lightning as pl
-from timm.models import create_model
-import modeling_vqnsp
-import modeling_pretrain
-from modeling_pretrain import MEMPretrainModule
+from collections import Counter
 from config_util import Config
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.set_float32_matmul_precision("high")
+from eegdash import EEGChallengeDataset
+from braindecode.datasets import BaseConcatDataset
+from tqdm import tqdm
+from eegdash.hbn.windows import (
+    add_extras_columns,
+    annotate_trials_with_target,
+    add_aux_anchors, keep_only_recordings_with)
+from braindecode.preprocessing import preprocess, Preprocessor, create_windows_from_events
+from joblib import Parallel, delayed
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import torch
+from modeling_finetune import EEGRegressorPL, labram_base_patch100_200_reg
 
 
 class CroppedWindowDataset(Dataset):
@@ -73,14 +73,17 @@ class CroppedWindowDataset(Dataset):
                 pad = self.crop_len - x_crop.shape[1]
                 x_crop = np.pad(x_crop, ((0, 0), (0, pad)), mode="constant")
 
-        return torch.from_numpy(x_crop).float()
+        return torch.from_numpy(x_crop).float(), torch.tensor(y).float()
 
 
 def collate_float(batch):
-    return torch.stack(batch, dim=0)
+    """Collate function that handles (x, y) tuples"""
+    x_batch = torch.stack([item[0] for item in batch], dim=0)
+    y_batch = torch.stack([item[1] for item in batch], dim=0)
+    return x_batch, y_batch
 
 
-def load_passive_task_data(config: Config, use_mini: bool = True) -> BaseConcatDataset:
+def load_active_task_data(use_mini: bool = True) -> BaseConcatDataset:
     """Load all passive task datasets from specified releases with filtering at load time
 
     OPTIMIZATION: Uses eegdash's built-in query parameter to filter subjects at load time,
@@ -92,28 +95,27 @@ def load_passive_task_data(config: Config, use_mini: bool = True) -> BaseConcatD
     all_datasets_list = []
 
     # Calculate total combinations for progress bar
-    total_combinations = len(config.RELEASES) * len(config.PASSIVE_TASKS)
-
+    total_combinations = len(Config.RELEASES) * len(Config.PASSIVE_TASKS)
+    task = Config.CHALLENGE_1_TASK
     with tqdm(total=total_combinations, desc="Loading datasets", unit="dataset") as pbar:
-        for release in config.RELEASES:
-            for task in config.PASSIVE_TASKS:
-                try:
-                    pbar.set_postfix_str(f"{release}/{task}")
-                    dataset = EEGChallengeDataset(
-                        task=task,
-                        release=release,
-                        cache_dir=str(config.DATA_DIR),
-                        mini=use_mini,
-                        description_fields=[
-                            "subject", "session", "run", "task", "age", "sex"],
-                    )
-                    all_datasets_list.append(dataset)
-                    pbar.set_postfix_str(
-                        f"{release}/{task} ✓ {len(dataset.datasets)} recordings")
-                except Exception as e:
-                    pbar.set_postfix_str(f"{release}/{task} ✗ Failed")
-                finally:
-                    pbar.update(1)
+        for release in Config.RELEASES:
+            try:
+                pbar.set_postfix_str(f"{release}/{task}")
+                dataset = EEGChallengeDataset(
+                    task=task,
+                    release=release,
+                    cache_dir=str(Config.DATA_DIR),
+                    mini=use_mini,
+                    description_fields=[
+                        "subject", "session", "run", "task", "age", "sex"],
+                )
+                all_datasets_list.append(dataset)
+                pbar.set_postfix_str(
+                    f"{release}/{task} ✓ {len(dataset.datasets)} recordings")
+            except Exception as e:
+                pbar.set_postfix_str(f"{release}/{task} ✗ Failed")
+            finally:
+                pbar.update(1)
 
     if not all_datasets_list:
         raise ValueError("No datasets were loaded successfully!")
@@ -121,10 +123,13 @@ def load_passive_task_data(config: Config, use_mini: bool = True) -> BaseConcatD
     all_datasets = BaseConcatDataset(all_datasets_list)
     print(
         f"\n{'='*60}\nTotal recordings loaded: {len(all_datasets.datasets)}\n{'='*60}")
+
+    # print("Preprocess dataset")
+
     return all_datasets
 
 
-def filter_datasets(datasets: BaseConcatDataset, config: Config) -> BaseConcatDataset:
+def filter_datasets(datasets: BaseConcatDataset) -> BaseConcatDataset:
     """Apply quality filters to datasets - optimized version using metadata"""
     print(f"Filtering {len(datasets.datasets)} datasets...")
 
@@ -132,7 +137,7 @@ def filter_datasets(datasets: BaseConcatDataset, config: Config) -> BaseConcatDa
         try:
             # Subject exclusion is now handled at load time, but double-check
             subj = ds.description.get('subject', '')
-            if subj in config.EXCLUDED_SUBJECTS:
+            if subj in Config.EXCLUDED_SUBJECTS:
                 return None
 
             # Access raw metadata without triggering full S3 download
@@ -143,11 +148,11 @@ def filter_datasets(datasets: BaseConcatDataset, config: Config) -> BaseConcatDa
 
             # Quick checks on metadata (doesn't download data)
             dur = raw.times[-1]
-            if dur < config.MIN_DURATION_S:
+            if dur < Config.MIN_DURATION_S:
                 return None
 
             # Check channels
-            if len(raw.ch_names) != config.N_CHANNELS:
+            if len(raw.ch_names) != Config.N_CHANNELS:
                 return None
 
             return ds
@@ -180,22 +185,43 @@ def filter_datasets(datasets: BaseConcatDataset, config: Config) -> BaseConcatDa
     return filtered_datasets
 
 
-def create_windows(datasets: BaseConcatDataset, config: Config) -> BaseConcatDataset:
-    """Create fixed-length windows from continuous data"""
-    print("\nCreating fixed-length windows...")
-    window_size_samples = int(config.WINDOW_SIZE_S * config.SFREQ)
-    window_stride_samples = int(config.WINDOW_STRIDE_S * config.SFREQ)
+def create_active_windows(datasets: BaseConcatDataset,
+                          target="rt_from_stimulus") -> BaseConcatDataset:
+    preprocessors = [
+        Preprocessor(
+            annotate_trials_with_target,
+            apply_on_array=False,
+            target_field=target,
+            epoch_length=Config.CROP_SIZE_S,
+            require_stimulus=True,
+            require_response=True,
+        ),
+        Preprocessor(add_aux_anchors, apply_on_array=False),
+    ]
+    data = preprocess(datasets, preprocessors, n_jobs=-1)
+    dataset_2 = keep_only_recordings_with("stimulus_anchor", data)
 
-    windows = create_fixed_length_windows(
-        datasets,
-        window_size_samples=window_size_samples,
-        window_stride_samples=window_stride_samples,
-        drop_last_window=True,
-        preload=False
+    # Create single-interval windows (stim-locked, long enough to include the response)
+    windows = create_windows_from_events(
+        dataset_2,
+        mapping={"stimulus_anchor": 0},
+        trial_start_offset_samples=int(
+            Config.SHIFT_AFTER_STIM * Config.SFREQ),  # +0.5 s
+        trial_stop_offset_samples=int(
+            (Config.SHIFT_AFTER_STIM + Config.WINDOW_STRIDE_S) * Config.SFREQ
+        ),  # +2.5 s
+        window_size_samples=int(Config.CROP_SIZE_S * Config.SFREQ),
+        window_stride_samples=Config.SFREQ,
+        preload=True,
     )
-
-    print(f"✓ Created {len(windows.datasets)} windows")
-    return windows
+    single_windows = add_extras_columns(
+        windows,
+        dataset_2,
+        desc="stimulus_anchor",
+        keys=("target", "rt_from_stimulus", "rt_from_trialstart",
+              "stimulus_onset", "response_onset", "correct", "response_type")
+    )
+    return single_windows
 
 
 def split_by_subject(
@@ -265,117 +291,29 @@ def setup_logger_and_callbacks(run_name: str, monitor: str, ckpt_dir: str, use_w
     return logger, callbacks, ckpt_cb
 
 
-def train_tokenizer(train_loader, val_loader, config: Config):
-    """Train VQ-SNP tokenizer"""
-    print("\n" + "="*60)
-    print("Stage 1: Training VQ-SNP Tokenizer")
-    print("="*60)
-
-    crop_len = int(config.CROP_SIZE_S * config.SFREQ)
-
-    model = create_model(
-        "vqnsp_encoder_base_decoder_3x100x12",
-        pretrained=False,
-        as_tokenizer=False,
-        n_code=config.CODEBOOK_SIZE,
-        code_dim=config.CODEBOOK_EMD_DIM,
-        EEG_size=config.INPUT_SIZE,
-        decay=config.EMA_DECAY,
-        quantize_kmeans_init=True,
-        n_chans_hint=129,                # <-- add this to match your montage
-        max_time_window_hint=2
-    )
-
-    logger, callbacks, ckpt_cb = setup_logger_and_callbacks(
-        run_name="tokenizer_vqsnp",
-        monitor="val_tok_loss",
-        ckpt_dir=config.TOK_DIR,
-        use_wandb=config.USE_WANDB
-    )
-
-    trainer = pl.Trainer(
-        max_epochs=config.MAX_EPOCHS,
-        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-        devices=1,
-        precision="32-true",
-        callbacks=callbacks,
-        logger=logger,
-        gradient_clip_val=1.0,
-        log_every_n_steps=50,
-    )
-
-    print("About to call trainer.fit()...")
-    sys.stdout.flush()  # Force flush to ensure print appears
-
-    try:
-        trainer.fit(model, train_loader, val_loader)
-        print("trainer.fit() completed successfully!")
-        sys.stdout.flush()
-    except KeyboardInterrupt:
-        print("Training interrupted by user")
-        raise
-    except Exception as e:
-        print(f"\n{'='*60}")
-        print(f"ERROR in trainer.fit():")
-        print(f"{'='*60}")
-        print(f"Exception type: {type(e).__name__}")
-        print(f"Exception message: {e}")
-        print(f"{'='*60}")
-        print("\nFULL STACK TRACE:")
-        print(f"{'='*60}")
-        traceback.print_exc(file=sys.stdout)
-        sys.stdout.flush()
-        raise
-
-    best_ckpt = ckpt_cb.best_model_path
-    print(f"✓ Tokenizer training complete: {best_ckpt}")
-    return best_ckpt
-
-
-def pre_train(train_loader, val_loader, config: Config,
-              tokenizer_ckpt: str = "best_tokenizer.ckpt"):
-    cb_path = os.path.join(config.TOK_DIR, tokenizer_ckpt)
-
-    vq_model = create_model(
-        "vqnsp_encoder_base_decoder_3x100x12",
+def finetune(train_loader, val_loader, labram_ckpt: str = "best_mem.ckpt"):
+    cb_path = os.path.join(Config.MEM_DIR, labram_ckpt)
+    backbone = labram_base_patch100_200_reg(
         pretrained=True,
-        pretrained_weight=cb_path,
-        as_tokenizer=True,
-        n_code=config.CODEBOOK_SIZE,
-        code_dim=config.CODEBOOK_EMD_DIM,
-        EEG_size=config.INPUT_SIZE,
-        decay=config.EMA_DECAY,
-        n_chans_hint=129,                # <-- add this to match your montage
-        max_time_window_hint=2).eval()
-
-    labram_model = create_model(
-        "labram_base_patch100_200_8k_vocab",
-        pretrained=False,
-        drop_path_rate=0.1,
-        drop_block_rate=None,
-        use_shared_rel_pos_bias=False,
-        use_abs_pos_emb=True,
-        init_values=0.1,
-        vocab_size=config.CODEBOOK_SIZE,
-        n_chans_hint=config.N_CHANNELS,     # 129
-        max_time_window_hint=2,
+        init_ckpt=cb_path,
+        ignore_mlp_head=True,   # drop old head if shape differs
+        load_strict=False,      # be forgiving across variants
     )
 
-    model = MEMPretrainModule(
-        labram_model,
-        tokenizer=vq_model,
-        patch_size=100,
+    model = EEGRegressorPL(
+        backbone=backbone,
+        patch_size=100, lr=1e-4
     )
 
     logger, callbacks, ckpt_cb = setup_logger_and_callbacks(
-        run_name="pre-train_labram",
+        run_name="challenge1_labram",
         monitor="val_mem_loss",
-        ckpt_dir=config.MEM_DIR,
-        use_wandb=config.USE_WANDB
+        ckpt_dir=Config.FINETUNE_DIR,
+        use_wandb=Config.USE_WANDB
     )
 
     trainer = pl.Trainer(
-        max_epochs=config.MAX_EPOCHS,
+        max_epochs=Config.MAX_EPOCHS,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=1,
         precision="32-true",
@@ -411,6 +349,7 @@ def pre_train(train_loader, val_loader, config: Config,
     best_ckpt = ckpt_cb.best_model_path
     print(f"✓ Tokenizer training complete: {best_ckpt}")
     return best_ckpt
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -420,9 +359,6 @@ def main():
                         help="Path to tokenizer checkpoint (for dump_codes/masked stages)")
     parser.add_argument("--skip_cache", action="store_true", default=False,
                         help="Skip loading from cache and reprocess data")
-    parser.add_argument("--stage", type=str, default="tokenizer",
-                        choices=["tokenizer", "pre-train", "finetune"],
-                        help="Training stage to run")
     args = parser.parse_args()
 
     # Set seeds
@@ -431,9 +367,7 @@ def main():
     # Cache file paths
     dataset_type = "mini" if args.use_mini else "full"
     cache_file = os.path.join(
-        Config.CACHE_DIR, f"filtered_datasets_{dataset_type}.pkl")
-    metadata_cache_file = os.path.join(
-        Config.CACHE_DIR, f"recording_metadata_{dataset_type}.pkl")
+        Config.CACHE_DIR, f"filtered_datasets_ccd_{dataset_type}.pkl")
 
     if os.path.exists(cache_file) and not args.skip_cache:
         print(f"\n{'='*60}")
@@ -442,23 +376,24 @@ def main():
         print(f"{'='*60}")
         try:
             with open(cache_file, 'rb') as f:
-                filtered_datasets = pickle.load(f)
+                active_windows = pickle.load(f)
             print(
-                f"✓ Loaded {len(filtered_datasets.datasets)} filtered recordings from cache")
+                f"✓ Loaded {len(active_windows.datasets)} filtered recordings from cache")
         except Exception as e:
             print(f"✗ Failed to load cache: {e}")
             print("  Reprocessing data...")
-            filtered_datasets = None
+            active_windows = None
     else:
-        filtered_datasets = None
+        active_windows = None
 
-    if filtered_datasets is None:
+    if active_windows is None:
         # Load data
-        print("Loading passive task data...")
-        all_datasets = load_passive_task_data(Config, use_mini=args.use_mini)
+        print("Loading active task data...")
+        all_datasets = load_active_task_data(use_mini=args.use_mini)
 
         # Filter
-        filtered_datasets = filter_datasets(all_datasets, Config)
+        filtered_datasets = filter_datasets(all_datasets)
+        active_windows = create_active_windows(filtered_datasets)
 
         # Save filtered data for future runs
         print(f"\n{'='*60}")
@@ -468,19 +403,24 @@ def main():
         try:
             os.makedirs(os.path.dirname(cache_file), exist_ok=True)
             with open(cache_file, 'wb') as f:
-                pickle.dump(filtered_datasets, f)
+                pickle.dump(active_windows, f)
             print(f"✓ Cache saved successfully")
         except Exception as e:
             print(f"✗ Failed to save cache: {e}")
             print("  Continuing without cache...")
 
-    # Create windows (fast, don't cache this)
-    windows_dataset = create_windows(filtered_datasets, Config)
+    meta_information = active_windows.get_metadata()
+    subjects = meta_information["subject"].unique()
 
-    # Split
-    train_windows, val_windows = split_by_subject(
-        windows_dataset, val_ratio=Config.VAL_RATIO, seed=Config.SEED
-    )
+    train_subj, valid_subj = train_test_split(
+        subjects, test_size=Config.VAL_RATIO,
+        random_state=check_random_state(Config.SEED), shuffle=True)
+    subject_split = active_windows.split("subject")
+
+    train_windows = BaseConcatDataset(
+        [subject_split[s] for s in train_subj])
+    val_windows = BaseConcatDataset(
+        [subject_split[s] for s in valid_subj])
 
     crop_len = int(Config.CROP_SIZE_S * Config.SFREQ)
 
@@ -496,41 +436,9 @@ def main():
                             num_workers=Config.NUM_WORKERS, shuffle=False,
                             collate_fn=collate_float, pin_memory=True)
 
-    if args.stage == "tokenizer":
-        tokenizer_ckpt = train_tokenizer(train_loader, val_loader, Config)
-        print(f"Tokenizer checkpoint saved at: {tokenizer_ckpt}")
-
-    if args.stage == "pre-train":
-        encoder_ckpt = pre_train(train_loader, val_loader, Config)
-        print(f"Encoder checkpoint saved at: {encoder_ckpt}")
+    best_ckpt = finetune(train_loader, val_loader)
+    print("All done!")
 
 
 if __name__ == "__main__":
-    # Set up custom exception handler to catch all unhandled exceptions
-    def exception_handler(exc_type, exc_value, exc_traceback):
-        print(f"\n{'='*60}")
-        print("UNHANDLED EXCEPTION:")
-        print(f"{'='*60}")
-        print(f"Type: {exc_type.__name__}")
-        print(f"Value: {exc_value}")
-        print(f"{'='*60}")
-        traceback.print_exception(exc_type, exc_value, exc_traceback)
-        sys.stdout.flush()
-
-    sys.excepthook = exception_handler
-
-    try:
-        main()
-        print("\nScript completed successfully!")
-    except Exception as e:
-        print(f"\n{'='*60}")
-        print("EXCEPTION IN MAIN:")
-        print(f"{'='*60}")
-        print(f"Type: {type(e).__name__}")
-        print(f"Message: {e}")
-        print(f"{'='*60}")
-        print("\nFULL STACK TRACE:")
-        print(f"{'='*60}")
-        traceback.print_exc(file=sys.stdout)
-        sys.stdout.flush()
-        sys.exit(1)
+    main()
