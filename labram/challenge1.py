@@ -33,7 +33,8 @@ from modeling_finetune import EEGRegressorPL, labram_base_patch100_200_reg
 class CroppedWindowDataset(Dataset):
     """Wraps a windows dataset with random or deterministic temporal cropping."""
 
-    def __init__(self, windows_dataset: BaseConcatDataset, crop_len: int, sfreq: int = 100, mode: str = "train"):
+    def __init__(self, windows_dataset: BaseConcatDataset, crop_len: int,
+                 sfreq: int = 100, mode: str = "train", challenge_part=1):
         """
         Parameters
         ----------
@@ -50,8 +51,16 @@ class CroppedWindowDataset(Dataset):
         self.crop_len = crop_len
         self.sfreq = sfreq
         self.mode = mode.lower()
+        self.challenge_part = challenge_part
         assert self.mode in {"train", "val",
                              "test"}, f"Invalid mode: {self.mode}"
+        self.meta = self.windows_dataset.get_metadata().reset_index(drop=True)
+        if self.challenge_part == 2:
+            if "externalizing" not in self.meta.columns:
+                raise KeyError(
+                    f"Target column 'externalizing' not found in windows metadata. "
+                    f"Available columns: {list(self.meta.columns)}"
+                )
 
     def __len__(self):
         return len(self.windows_dataset.datasets)
@@ -76,6 +85,12 @@ class CroppedWindowDataset(Dataset):
                 pad = self.crop_len - x_crop.shape[1]
                 x_crop = np.pad(x_crop, ((0, 0), (0, pad)), mode="constant")
 
+        if self.challenge_part == 2:
+            # Pull y from metadata (e.g., externalizing), not from the dataset's default label
+            y_val = self.meta.iloc[idx]["externalizing"]
+            # Ensure scalar float
+            y = float(np.asarray(y_val))
+
         return torch.from_numpy(x_crop).float(), torch.tensor(y).float()
 
 
@@ -87,7 +102,7 @@ def collate_float(batch):
 
 
 def load_active_task_data(use_mini: bool = True,
-                          releases: Sequence[str] | None = None) -> BaseConcatDataset:
+                          releases: Sequence[str] | None = None, challenge_part=1) -> BaseConcatDataset:
     """Load all passive task datasets from specified releases with filtering at load time
 
     OPTIMIZATION: Uses eegdash's built-in query parameter to filter subjects at load time,
@@ -99,7 +114,7 @@ def load_active_task_data(use_mini: bool = True,
     all_datasets_list = []
     releases = list(releases) if releases is not None else list(
         Config.RELEASES)
-
+    description = Config.CHALLENGE_2_DESCRIPTION if challenge_part == 2 else Config.CHALLENGE_1_DESCRIPTION
     # Calculate total combinations for progress bar
     total_combinations = len(releases)
     task = Config.CHALLENGE_TASK
@@ -112,8 +127,7 @@ def load_active_task_data(use_mini: bool = True,
                     release=release,
                     cache_dir=str(Config.DATA_DIR),
                     mini=use_mini,
-                    description_fields=[
-                        "subject", "session", "run", "task", "age", "sex"],
+                    description_fields=description,
                 )
                 all_datasets_list.append(dataset)
                 pbar.set_postfix_str(
@@ -135,7 +149,7 @@ def load_active_task_data(use_mini: bool = True,
     return all_datasets
 
 
-def filter_datasets(datasets: BaseConcatDataset, check_challenge2=False) -> BaseConcatDataset:
+def filter_datasets(datasets: BaseConcatDataset, challenge_part=1) -> BaseConcatDataset:
     """Apply quality filters to datasets - optimized version using metadata"""
     print(f"Filtering {len(datasets.datasets)} datasets...")
 
@@ -143,8 +157,9 @@ def filter_datasets(datasets: BaseConcatDataset, check_challenge2=False) -> Base
         try:
             # Subject exclusion is now handled at load time, but double-check
             subj = ds.description.get('subject', '')
-            if check_challenge2 and math.isnan(ds.description["externalizing"]):
-                return None
+            if challenge_part == 2:
+                if math.isnan(ds.description["externalizing"]):
+                    return None
             if subj in Config.EXCLUDED_SUBJECTS:
                 return None
 
@@ -184,19 +199,13 @@ def filter_datasets(datasets: BaseConcatDataset, check_challenge2=False) -> Base
     print(
         f"\n✓ Kept {len(filtered_datasets.datasets)}/{len(datasets.datasets)} recordings")
 
-    task_counts = Counter(
-        [ds.description.task for ds in filtered_datasets.datasets])
-    print("\nTask distribution:")
-    for task, count in sorted(task_counts.items()):
-        print(f"  {task}: {count}")
-
     return filtered_datasets
 
 
 def create_active_windows(datasets: BaseConcatDataset,
-                          target="rt_from_stimulus", check_challenge2=False) -> BaseConcatDataset:
+                          target="rt_from_stimulus", challenge_part=1) -> BaseConcatDataset:
     single_windows = None
-    if not check_challenge2:
+    if challenge_part == 1:
         preprocessors = [
             Preprocessor(
                 annotate_trials_with_target,
@@ -244,7 +253,8 @@ def create_active_windows(datasets: BaseConcatDataset,
 def load_cached_active_windows(cache_file: str,
                                use_mini: bool,
                                skip_cache: bool,
-                               releases: Sequence[str]) -> BaseConcatDataset:
+                               releases: Sequence[str],
+                               challenge_part: int = 1) -> BaseConcatDataset:
     """Load active windows for specific releases, using a pickle cache when available."""
     releases = list(releases)
     release_label = "+".join(releases)
@@ -266,11 +276,14 @@ def load_cached_active_windows(cache_file: str,
             print("  Reprocessing data...")
 
     print("Loading active task data...")
-    all_datasets = load_active_task_data(use_mini=use_mini, releases=releases)
+    all_datasets = load_active_task_data(
+        use_mini=use_mini, releases=releases, challenge_part=challenge_part)
 
     # Filter and window the datasets
-    filtered_datasets = filter_datasets(all_datasets)
-    active_windows = create_active_windows(filtered_datasets)
+    filtered_datasets = filter_datasets(
+        all_datasets, challenge_part=challenge_part)
+    active_windows = create_active_windows(
+        filtered_datasets, challenge_part=challenge_part)
 
     # Save filtered data for future runs
     print(f"\n{'='*60}")
@@ -325,7 +338,8 @@ def setup_logger_and_callbacks(run_name: str, monitor: str, ckpt_dir: str, use_w
     return logger, callbacks, ckpt_cb
 
 
-def finetune(train_loader, val_loader, labram_ckpt: str = "best_mem.ckpt", test_loader=None):
+def finetune(train_loader, val_loader, labram_ckpt: str = "best_mem.ckpt",
+             test_loader=None, challenge_part=1) -> Tuple[str, dict | None]:
     cb_path = os.path.join(Config.MEM_DIR, labram_ckpt)
     backbone = labram_base_patch100_200_reg(
         pretrained=True,
@@ -340,7 +354,7 @@ def finetune(train_loader, val_loader, labram_ckpt: str = "best_mem.ckpt", test_
     )
 
     logger, callbacks, ckpt_cb = setup_logger_and_callbacks(
-        run_name="challenge1_labram",
+        run_name=f"challenge{challenge_part}_labram",
         monitor="val/loss",
         ckpt_dir=Config.FINETUNE_DIR,
         use_wandb=Config.USE_WANDB
@@ -403,6 +417,8 @@ def main():
                         help="Path to tokenizer checkpoint (for dump_codes/masked stages)")
     parser.add_argument("--skip_cache", action="store_true", default=False,
                         help="Skip loading from cache and reprocess data")
+    parser.add_argument("--challenge_part", type=int, choices=[1, 2], default=1,
+                        help="Specify which challenge part to run (1 or 2)")
     args = parser.parse_args()
 
     # Set seeds
@@ -410,15 +426,16 @@ def main():
 
     dataset_type = "mini" if args.use_mini else "full"
     train_cache = os.path.join(
-        Config.CACHE_DIR, f"filtered_datasets_ccd_{dataset_type}.pkl")
+        Config.CACHE_DIR, f"challenge{args.challenge_part}", f"filtered_datasets_ccd_{dataset_type}.pkl")
     test_cache = os.path.join(
-        Config.CACHE_DIR, f"filtered_datasets_ccd_{dataset_type}_{Config.TEST_RELEASE.lower()}.pkl")
+        Config.CACHE_DIR, f"challenge{args.challenge_part}", f"filtered_datasets_ccd_{dataset_type}_{Config.TEST_RELEASE.lower()}.pkl")
 
     active_windows = load_cached_active_windows(
         cache_file=train_cache,
         use_mini=args.use_mini,
         skip_cache=args.skip_cache,
         releases=Config.RELEASES,
+        challenge_part=args.challenge_part
     )
 
     test_windows = load_cached_active_windows(
@@ -426,6 +443,7 @@ def main():
         use_mini=args.use_mini,
         skip_cache=args.skip_cache,
         releases=[Config.TEST_RELEASE],
+        challenge_part=args.challenge_part
     )
 
     # Ensure test data only comes from the designated release when metadata allows checking
@@ -455,11 +473,14 @@ def main():
     crop_len = int(Config.CROP_SIZE_S * Config.SFREQ)
 
     train_ds = CroppedWindowDataset(
-        train_windows, crop_len=crop_len, sfreq=Config.SFREQ, mode="train")
+        train_windows, crop_len=crop_len, sfreq=Config.SFREQ,
+        mode="train", challenge_part=args.challenge_part)
     val_ds = CroppedWindowDataset(
-        val_windows, crop_len=crop_len, sfreq=Config.SFREQ, mode="val")
+        val_windows, crop_len=crop_len, sfreq=Config.SFREQ,
+        mode="val", challenge_part=args.challenge_part)
     test_ds = CroppedWindowDataset(
-        test_windows, crop_len=crop_len, sfreq=Config.SFREQ, mode="test")
+        test_windows, crop_len=crop_len, sfreq=Config.SFREQ,
+        mode="test", challenge_part=args.challenge_part)
 
     if len(test_ds) == 0:
         raise ValueError(
@@ -476,7 +497,8 @@ def main():
                              collate_fn=collate_float, pin_memory=True)
 
     best_ckpt, test_results = finetune(
-        train_loader, val_loader, test_loader=test_loader)
+        train_loader, val_loader, test_loader=test_loader,
+        challenge_part=args.challenge_part)
     if test_results:
         print("Test metrics:")
         for key, value in test_results[0].items():

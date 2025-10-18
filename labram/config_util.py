@@ -13,7 +13,10 @@ class Config:
     TEST_RELEASE = "R5"
 
     CHALLENGE_TASK = "contrastChangeDetection"
-    CHALLENGE_2_DESCRIPTION = "externalizing"
+    CHALLENGE_2_DESCRIPTION = ["externalizing", "subject",
+                               "session", "run", "task", "age", "sex"]
+    CHALLENGE_1_DESCRIPTION = ["subject",
+                               "session", "run", "task", "age", "sex"]
     # Passive tasks for pre-training
     PASSIVE_TASKS = [
         "restingState",
