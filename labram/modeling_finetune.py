@@ -6,6 +6,9 @@
 # - LightningModule wrapper for regression (CCD reaction times)
 # --------------------------------------------------------
 
+from typing import Tuple
+from torchmetrics import MeanMetric
+from torchmetrics.regression import MeanSquaredError
 import math
 from functools import partial
 from typing import Optional, Tuple
@@ -457,23 +460,24 @@ class NeuralTransformer(nn.Module):
 # -----------------------
 # Lightning wrapper
 # -----------------------
+
+
 class EEGRegressorPL(pl.LightningModule):
     """
     Finetuning wrapper for regression:
       - Expects batch as (x, y) with x:[B,N,T_total] (T_total=200), y:[B] or [B,1]
       - Chunks to [B,N,A=2,T=100], scales by /100 like pretrain
+      - Logs global RMSE and NRMSE (= RMSE / std(y_true)) for train/val/test
     """
-
     def __init__(self,
-                 backbone: NeuralTransformer,
+                 backbone,
                  patch_size: int = 100,
                  lr: float = 1e-4,
                  weight_decay: float = 0.05,
                  betas: Tuple[float, float] = (0.9, 0.95),
                  use_cosine_per_step: bool = True,
                  eta_min: float = 1e-6,
-                 scale_input: bool = True,
-                 ):
+                 scale_input: bool = True):
         super().__init__()
         self.save_hyperparameters(ignore=['backbone'])
         self.model = backbone
@@ -485,11 +489,22 @@ class EEGRegressorPL(pl.LightningModule):
         self.eta_min = eta_min
         self.scale_input = scale_input
         self.loss_fn = nn.MSELoss()
-        self.train_sum_sq_err = 0.0
-        self.train_n_samples = 0
-        self.val_sum_sq_err = 0.0
-        self.val_n_samples = 0
 
+        # ---- TorchMetrics for global RMSE/NRMSE (per stage) ----
+        # Train
+        self.train_rmse = MeanSquaredError(squared=False)
+        self.train_y_mean = MeanMetric()
+        self.train_y_sq_mean = MeanMetric()
+        # Val
+        self.val_rmse = MeanSquaredError(squared=False)
+        self.val_y_mean = MeanMetric()
+        self.val_y_sq_mean = MeanMetric()
+        # Test
+        self.test_rmse = MeanSquaredError(squared=False)
+        self.test_y_mean = MeanMetric()
+        self.test_y_sq_mean = MeanMetric()
+
+    # -------- data shaping --------
     def _chunk_to_patches(self, x_2d: torch.Tensor) -> torch.Tensor:
         # [B, N, T_total] -> [B, N, A, T]
         B, N, Ttotal = x_2d.shape
@@ -500,7 +515,6 @@ class EEGRegressorPL(pl.LightningModule):
         A = Ttotal // T
         rem = Ttotal - A * T
         if rem != 0:
-            # crop down to multiple (we use exact 200 so no pad needed)
             x_2d = x_2d[..., :A * T]
         x_4d = rearrange(x_2d, 'B N (A T) -> B N A T', A=A, T=T)
         return x_4d  # expect A==2 for 2s@100Hz with T=100
@@ -511,6 +525,7 @@ class EEGRegressorPL(pl.LightningModule):
             x = x / 100.0
         return self.model(x)  # [B, 1]
 
+    # -------- training --------
     def training_step(self, batch, batch_idx):
         if isinstance(batch, (tuple, list)):
             x, y = batch
@@ -520,49 +535,105 @@ class EEGRegressorPL(pl.LightningModule):
         preds = self(x)
         loss = self.loss_fn(preds, y)
 
-        # Calculate RMSE for this batch
-        preds_flat = preds.detach().view(-1)
-        y_flat = y.detach().view(-1)
-        batch_rmse = torch.sqrt(F.mse_loss(preds_flat, y_flat))
+        # Update global train metrics
+        y_flat = y.squeeze(-1)
+        p_flat = preds.squeeze(-1)
+        self.train_rmse.update(p_flat, y_flat)
+        self.train_y_mean.update(y_flat)
+        self.train_y_sq_mean.update(y_flat ** 2)
 
+        # Usual loss logging (batch + epoch-avg)
         self.log("train/loss", loss, on_step=True,
-                 on_epoch=True, prog_bar=True)
-        self.log("train/rmse", batch_rmse, on_step=False,
-                 on_epoch=True, prog_bar=True)
+                 on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
+    def on_train_epoch_end(self):
+        # Compute true epoch-level RMSE and NRMSE
+        rmse = self.train_rmse.compute()
+        Ey = self.train_y_mean.compute()
+        Ey2 = self.train_y_sq_mean.compute()
+        y_std = torch.sqrt(torch.clamp(Ey2 - Ey**2, min=1e-12))
+        nrmse = rmse / y_std
+
+        self.log("train/rmse_epoch", rmse.float(),
+                 prog_bar=True, sync_dist=True)
+        self.log("train/nrmse_epoch", nrmse.float(),
+                 prog_bar=True, sync_dist=True)
+
+        # Reset for next epoch
+        self.train_rmse.reset()
+        self.train_y_mean.reset()
+        self.train_y_sq_mean.reset()
+
+    # -------- validation --------
     def validation_step(self, batch, batch_idx):
         x, y = batch if isinstance(batch, (tuple, list)) else (batch, None)
         y = y.view(-1, 1).float()
         preds = self(x)
         loss = self.loss_fn(preds, y)
 
-        # Calculate RMSE for this batch
-        preds_flat = preds.detach().view(-1)
-        y_flat = y.detach().view(-1)
-        batch_rmse = torch.sqrt(F.mse_loss(preds_flat, y_flat))
+        # Update global val metrics
+        y_flat = y.squeeze(-1)
+        p_flat = preds.squeeze(-1)
+        self.val_rmse.update(p_flat, y_flat)
+        self.val_y_mean.update(y_flat)
+        self.val_y_sq_mean.update(y_flat ** 2)
 
-        self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("val/rmse", batch_rmse, on_step=False,
-                 on_epoch=True, prog_bar=True)
+        # Per-epoch loss (averaged by Lightning)
+        self.log("val/loss", loss, on_step=False,
+                 on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
+    def on_validation_epoch_end(self):
+        rmse = self.val_rmse.compute()
+        Ey = self.val_y_mean.compute()
+        Ey2 = self.val_y_sq_mean.compute()
+        y_std = torch.sqrt(torch.clamp(Ey2 - Ey**2, min=1e-12))
+        nrmse = rmse / y_std
+
+        self.log("val/rmse_epoch", rmse.float(), prog_bar=True, sync_dist=True)
+        self.log("val/nrmse_epoch", nrmse.float(),
+                 prog_bar=True, sync_dist=True)
+
+        self.val_rmse.reset()
+        self.val_y_mean.reset()
+        self.val_y_sq_mean.reset()
+
+    # -------- test --------
     def test_step(self, batch, batch_idx):
         x, y = batch if isinstance(batch, (tuple, list)) else (batch, None)
         y = y.view(-1, 1).float()
         preds = self(x)
         loss = self.loss_fn(preds, y)
 
-        preds_flat = preds.detach().view(-1)
-        y_flat = y.detach().view(-1)
-        batch_rmse = torch.sqrt(F.mse_loss(preds_flat, y_flat))
+        # Update global test metrics
+        y_flat = y.squeeze(-1)
+        p_flat = preds.squeeze(-1)
+        self.test_rmse.update(p_flat, y_flat)
+        self.test_y_mean.update(y_flat)
+        self.test_y_sq_mean.update(y_flat ** 2)
 
         self.log("test/loss", loss, on_step=False,
-                 on_epoch=True, prog_bar=True)
-        self.log("test/rmse", batch_rmse, on_step=False,
-                 on_epoch=True, prog_bar=True)
-        return {"test_loss": loss, "test_rmse": batch_rmse}
+                 on_epoch=True, prog_bar=True, sync_dist=True)
+        return loss
 
+    def on_test_epoch_end(self):
+        rmse = self.test_rmse.compute()
+        Ey = self.test_y_mean.compute()
+        Ey2 = self.test_y_sq_mean.compute()
+        y_std = torch.sqrt(torch.clamp(Ey2 - Ey**2, min=1e-12))
+        nrmse = rmse / y_std
+
+        self.log("test/rmse_epoch", rmse.float(),
+                 prog_bar=True, sync_dist=True)
+        self.log("test/nrmse_epoch", nrmse.float(),
+                 prog_bar=True, sync_dist=True)
+
+        self.test_rmse.reset()
+        self.test_y_mean.reset()
+        self.test_y_sq_mean.reset()
+
+    # -------- optim --------
     def configure_optimizers(self):
         opt = torch.optim.AdamW(
             self.parameters(), lr=self.lr, betas=self.betas, weight_decay=self.weight_decay)

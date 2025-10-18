@@ -1,3 +1,4 @@
+import math
 from sklearn.utils import check_random_state
 from sklearn.model_selection import train_test_split
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
@@ -19,7 +20,9 @@ from eegdash.hbn.windows import (
     add_extras_columns,
     annotate_trials_with_target,
     add_aux_anchors, keep_only_recordings_with)
-from braindecode.preprocessing import preprocess, Preprocessor, create_windows_from_events
+from braindecode.preprocessing import (
+    preprocess, Preprocessor,
+    create_windows_from_events, create_fixed_length_windows)
 from joblib import Parallel, delayed
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
@@ -99,7 +102,7 @@ def load_active_task_data(use_mini: bool = True,
 
     # Calculate total combinations for progress bar
     total_combinations = len(releases)
-    task = Config.CHALLENGE_1_TASK
+    task = Config.CHALLENGE_TASK
     with tqdm(total=total_combinations, desc="Loading datasets", unit="dataset") as pbar:
         for release in releases:
             try:
@@ -132,7 +135,7 @@ def load_active_task_data(use_mini: bool = True,
     return all_datasets
 
 
-def filter_datasets(datasets: BaseConcatDataset) -> BaseConcatDataset:
+def filter_datasets(datasets: BaseConcatDataset, check_challenge2=False) -> BaseConcatDataset:
     """Apply quality filters to datasets - optimized version using metadata"""
     print(f"Filtering {len(datasets.datasets)} datasets...")
 
@@ -140,6 +143,8 @@ def filter_datasets(datasets: BaseConcatDataset) -> BaseConcatDataset:
         try:
             # Subject exclusion is now handled at load time, but double-check
             subj = ds.description.get('subject', '')
+            if check_challenge2 and math.isnan(ds.description["externalizing"]):
+                return None
             if subj in Config.EXCLUDED_SUBJECTS:
                 return None
 
@@ -189,41 +194,50 @@ def filter_datasets(datasets: BaseConcatDataset) -> BaseConcatDataset:
 
 
 def create_active_windows(datasets: BaseConcatDataset,
-                          target="rt_from_stimulus") -> BaseConcatDataset:
-    preprocessors = [
-        Preprocessor(
-            annotate_trials_with_target,
-            apply_on_array=False,
-            target_field=target,
-            epoch_length=Config.CROP_SIZE_S,
-            require_stimulus=True,
-            require_response=True,
-        ),
-        Preprocessor(add_aux_anchors, apply_on_array=False),
-    ]
-    data = preprocess(datasets, preprocessors, n_jobs=-1)
-    dataset_2 = keep_only_recordings_with("stimulus_anchor", data)
+                          target="rt_from_stimulus", check_challenge2=False) -> BaseConcatDataset:
+    single_windows = None
+    if not check_challenge2:
+        preprocessors = [
+            Preprocessor(
+                annotate_trials_with_target,
+                apply_on_array=False,
+                target_field=target,
+                epoch_length=Config.CROP_SIZE_S,
+                require_stimulus=True,
+                require_response=True,
+            ),
+            Preprocessor(add_aux_anchors, apply_on_array=False),
+        ]
+        data = preprocess(datasets, preprocessors, n_jobs=-1)
+        dataset_2 = keep_only_recordings_with("stimulus_anchor", data)
 
-    # Create single-interval windows (stim-locked, long enough to include the response)
-    windows = create_windows_from_events(
-        dataset_2,
-        mapping={"stimulus_anchor": 0},
-        trial_start_offset_samples=int(
-            Config.SHIFT_AFTER_STIM * Config.SFREQ),  # +0.5 s
-        trial_stop_offset_samples=int(
-            (Config.SHIFT_AFTER_STIM + Config.WINDOW_STRIDE_S) * Config.SFREQ
-        ),  # +2.5 s
-        window_size_samples=int(Config.CROP_SIZE_S * Config.SFREQ),
-        window_stride_samples=Config.SFREQ,
-        preload=True,
-    )
-    single_windows = add_extras_columns(
-        windows,
-        dataset_2,
-        desc="stimulus_anchor",
-        keys=("target", "rt_from_stimulus", "rt_from_trialstart",
-              "stimulus_onset", "response_onset", "correct", "response_type")
-    )
+        # Create single-interval windows (stim-locked, long enough to include the response)
+        windows = create_windows_from_events(
+            dataset_2,
+            mapping={"stimulus_anchor": 0},
+            trial_start_offset_samples=int(
+                Config.SHIFT_AFTER_STIM * Config.SFREQ),  # +0.5 s
+            trial_stop_offset_samples=int(
+                (Config.SHIFT_AFTER_STIM + Config.WINDOW_STRIDE_S) * Config.SFREQ
+            ),  # +2.5 s
+            window_size_samples=int(Config.CROP_SIZE_S * Config.SFREQ),
+            window_stride_samples=Config.SFREQ,
+            preload=True,
+        )
+        single_windows = add_extras_columns(
+            windows,
+            dataset_2,
+            desc="stimulus_anchor",
+            keys=("target", "rt_from_stimulus", "rt_from_trialstart",
+                  "stimulus_onset", "response_onset", "correct", "response_type")
+        )
+    else:
+        single_windows = create_fixed_length_windows(
+            datasets,
+            window_size_samples=4 * Config.SFREQ,
+            window_stride_samples=2 * Config.SFREQ,
+            drop_last_window=True,
+        )
     return single_windows
 
 
