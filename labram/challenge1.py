@@ -4,7 +4,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 import traceback
 import sys
 from pytorch_lightning.loggers import WandbLogger
-from typing import Tuple
+from typing import Tuple, Sequence
 import random
 import pickle
 import argparse
@@ -83,7 +83,8 @@ def collate_float(batch):
     return x_batch, y_batch
 
 
-def load_active_task_data(use_mini: bool = True) -> BaseConcatDataset:
+def load_active_task_data(use_mini: bool = True,
+                          releases: Sequence[str] | None = None) -> BaseConcatDataset:
     """Load all passive task datasets from specified releases with filtering at load time
 
     OPTIMIZATION: Uses eegdash's built-in query parameter to filter subjects at load time,
@@ -93,12 +94,14 @@ def load_active_task_data(use_mini: bool = True) -> BaseConcatDataset:
     and only load recordings that meet all criteria (duration, channels, etc.).
     """
     all_datasets_list = []
+    releases = list(releases) if releases is not None else list(
+        Config.RELEASES)
 
     # Calculate total combinations for progress bar
-    total_combinations = len(Config.RELEASES) * len(Config.PASSIVE_TASKS)
+    total_combinations = len(releases)
     task = Config.CHALLENGE_1_TASK
     with tqdm(total=total_combinations, desc="Loading datasets", unit="dataset") as pbar:
-        for release in Config.RELEASES:
+        for release in releases:
             try:
                 pbar.set_postfix_str(f"{release}/{task}")
                 dataset = EEGChallengeDataset(
@@ -224,36 +227,53 @@ def create_active_windows(datasets: BaseConcatDataset,
     return single_windows
 
 
-def split_by_subject(
-    windows_dataset: BaseConcatDataset,
-    val_ratio: float = 0.1,
-    seed: int = 42
-) -> Tuple[BaseConcatDataset, BaseConcatDataset]:
-    """Split windows by subject to avoid leakage"""
-    subjects = [ds.description['subject'] for ds in windows_dataset.datasets]
-    unique_subjects = list(set(subjects))
+def load_cached_active_windows(cache_file: str,
+                               use_mini: bool,
+                               skip_cache: bool,
+                               releases: Sequence[str]) -> BaseConcatDataset:
+    """Load active windows for specific releases, using a pickle cache when available."""
+    releases = list(releases)
+    release_label = "+".join(releases)
 
-    rng = random.Random(seed)
-    rng.shuffle(unique_subjects)
+    if os.path.exists(cache_file) and not skip_cache:
+        print(f"\n{'='*60}")
+        print("Loading filtered datasets from cache:")
+        print(f"  {cache_file}")
+        print(f"  Releases: {release_label}")
+        print(f"{'='*60}")
+        try:
+            with open(cache_file, 'rb') as f:
+                active_windows = pickle.load(f)
+            print(
+                f"✓ Loaded {len(active_windows.datasets)} filtered recordings from cache")
+            return active_windows
+        except Exception as e:
+            print(f"✗ Failed to load cache: {e}")
+            print("  Reprocessing data...")
 
-    n_val = max(1, int(len(unique_subjects) * val_ratio))
-    val_subjects = set(unique_subjects[:n_val])
+    print("Loading active task data...")
+    all_datasets = load_active_task_data(use_mini=use_mini, releases=releases)
 
-    train_indices = [i for i, s in enumerate(
-        subjects) if s not in val_subjects]
-    val_indices = [i for i, s in enumerate(subjects) if s in val_subjects]
+    # Filter and window the datasets
+    filtered_datasets = filter_datasets(all_datasets)
+    active_windows = create_active_windows(filtered_datasets)
 
-    train_ds = BaseConcatDataset(
-        [windows_dataset.datasets[i] for i in train_indices])
-    val_ds = BaseConcatDataset(
-        [windows_dataset.datasets[i] for i in val_indices])
+    # Save filtered data for future runs
+    print(f"\n{'='*60}")
+    print("Saving filtered datasets to cache:")
+    print(f"  {cache_file}")
+    print(f"  Releases: {release_label}")
+    print(f"{'='*60}")
+    try:
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        with open(cache_file, 'wb') as f:
+            pickle.dump(active_windows, f)
+        print("✓ Cache saved successfully")
+    except Exception as e:
+        print(f"✗ Failed to save cache: {e}")
+        print("  Continuing without cache...")
 
-    print(
-        f"\nSplit: {len(train_ds.datasets)} train, {len(val_ds.datasets)} val windows")
-    print(
-        f"       {len(unique_subjects) - n_val} train subjects, {n_val} val subjects")
-
-    return train_ds, val_ds
+    return active_windows
 
 
 def setup_logger_and_callbacks(run_name: str, monitor: str, ckpt_dir: str, use_wandb: bool):
@@ -291,7 +311,7 @@ def setup_logger_and_callbacks(run_name: str, monitor: str, ckpt_dir: str, use_w
     return logger, callbacks, ckpt_cb
 
 
-def finetune(train_loader, val_loader, labram_ckpt: str = "best_mem.ckpt"):
+def finetune(train_loader, val_loader, labram_ckpt: str = "best_mem.ckpt", test_loader=None):
     cb_path = os.path.join(Config.MEM_DIR, labram_ckpt)
     backbone = labram_base_patch100_200_reg(
         pretrained=True,
@@ -348,7 +368,17 @@ def finetune(train_loader, val_loader, labram_ckpt: str = "best_mem.ckpt"):
 
     best_ckpt = ckpt_cb.best_model_path
     print(f"✓ Tokenizer training complete: {best_ckpt}")
-    return best_ckpt
+
+    test_results = None
+    if test_loader is not None:
+        ckpt_path = best_ckpt if best_ckpt else "last"
+        print("Evaluating on held-out test set...")
+        test_results = trainer.test(model, dataloaders=test_loader,
+                                    ckpt_path=ckpt_path)
+        if test_results:
+            print("✓ Test evaluation complete.")
+
+    return best_ckpt, test_results
 
 
 def main():
@@ -364,50 +394,36 @@ def main():
     # Set seeds
     pl.seed_everything(Config.SEED)
 
-    # Cache file paths
     dataset_type = "mini" if args.use_mini else "full"
-    cache_file = os.path.join(
+    train_cache = os.path.join(
         Config.CACHE_DIR, f"filtered_datasets_ccd_{dataset_type}.pkl")
+    test_cache = os.path.join(
+        Config.CACHE_DIR, f"filtered_datasets_ccd_{dataset_type}_{Config.TEST_RELEASE.lower()}.pkl")
 
-    if os.path.exists(cache_file) and not args.skip_cache:
-        print(f"\n{'='*60}")
-        print(f"Loading filtered datasets from cache:")
-        print(f"  {cache_file}")
-        print(f"{'='*60}")
-        try:
-            with open(cache_file, 'rb') as f:
-                active_windows = pickle.load(f)
-            print(
-                f"✓ Loaded {len(active_windows.datasets)} filtered recordings from cache")
-        except Exception as e:
-            print(f"✗ Failed to load cache: {e}")
-            print("  Reprocessing data...")
-            active_windows = None
-    else:
-        active_windows = None
+    active_windows = load_cached_active_windows(
+        cache_file=train_cache,
+        use_mini=args.use_mini,
+        skip_cache=args.skip_cache,
+        releases=Config.RELEASES,
+    )
 
-    if active_windows is None:
-        # Load data
-        print("Loading active task data...")
-        all_datasets = load_active_task_data(use_mini=args.use_mini)
+    test_windows = load_cached_active_windows(
+        cache_file=test_cache,
+        use_mini=args.use_mini,
+        skip_cache=args.skip_cache,
+        releases=[Config.TEST_RELEASE],
+    )
 
-        # Filter
-        filtered_datasets = filter_datasets(all_datasets)
-        active_windows = create_active_windows(filtered_datasets)
-
-        # Save filtered data for future runs
-        print(f"\n{'='*60}")
-        print(f"Saving filtered datasets to cache:")
-        print(f"  {cache_file}")
-        print(f"{'='*60}")
-        try:
-            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-            with open(cache_file, 'wb') as f:
-                pickle.dump(active_windows, f)
-            print(f"✓ Cache saved successfully")
-        except Exception as e:
-            print(f"✗ Failed to save cache: {e}")
-            print("  Continuing without cache...")
+    # Ensure test data only comes from the designated release when metadata allows checking
+    release_values = {
+        ds.description.get("release")
+        for ds in getattr(test_windows, "datasets", [])
+        if getattr(ds, "description", None) is not None
+    }
+    release_values = {rel for rel in release_values if rel is not None}
+    if release_values and release_values != {Config.TEST_RELEASE}:
+        raise ValueError(
+            f"Test set must only contain release {Config.TEST_RELEASE}, found: {sorted(release_values)}")
 
     meta_information = active_windows.get_metadata()
     subjects = meta_information["subject"].unique()
@@ -428,6 +444,12 @@ def main():
         train_windows, crop_len=crop_len, sfreq=Config.SFREQ, mode="train")
     val_ds = CroppedWindowDataset(
         val_windows, crop_len=crop_len, sfreq=Config.SFREQ, mode="val")
+    test_ds = CroppedWindowDataset(
+        test_windows, crop_len=crop_len, sfreq=Config.SFREQ, mode="test")
+
+    if len(test_ds) == 0:
+        raise ValueError(
+            f"No test windows were generated for release {Config.TEST_RELEASE}")
 
     train_loader = DataLoader(train_ds, batch_size=Config.BATCH_SIZE,
                               num_workers=Config.NUM_WORKERS, shuffle=True,
@@ -435,8 +457,19 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=Config.BATCH_SIZE,
                             num_workers=Config.NUM_WORKERS, shuffle=False,
                             collate_fn=collate_float, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=Config.BATCH_SIZE,
+                             num_workers=Config.NUM_WORKERS, shuffle=False,
+                             collate_fn=collate_float, pin_memory=True)
 
-    best_ckpt = finetune(train_loader, val_loader)
+    best_ckpt, test_results = finetune(
+        train_loader, val_loader, test_loader=test_loader)
+    if test_results:
+        print("Test metrics:")
+        for key, value in test_results[0].items():
+            if isinstance(value, torch.Tensor):
+                value = value.item()
+            print(f"  {key}: {value}")
+
     print("All done!")
 
 

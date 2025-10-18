@@ -547,6 +547,22 @@ class EEGRegressorPL(pl.LightningModule):
                  on_epoch=True, prog_bar=True)
         return loss
 
+    def test_step(self, batch, batch_idx):
+        x, y = batch if isinstance(batch, (tuple, list)) else (batch, None)
+        y = y.view(-1, 1).float()
+        preds = self(x)
+        loss = self.loss_fn(preds, y)
+
+        preds_flat = preds.detach().view(-1)
+        y_flat = y.detach().view(-1)
+        batch_rmse = torch.sqrt(F.mse_loss(preds_flat, y_flat))
+
+        self.log("test/loss", loss, on_step=False,
+                 on_epoch=True, prog_bar=True)
+        self.log("test/rmse", batch_rmse, on_step=False,
+                 on_epoch=True, prog_bar=True)
+        return {"test_loss": loss, "test_rmse": batch_rmse}
+
     def configure_optimizers(self):
         opt = torch.optim.AdamW(
             self.parameters(), lr=self.lr, betas=self.betas, weight_decay=self.weight_decay)
