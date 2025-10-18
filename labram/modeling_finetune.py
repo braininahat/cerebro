@@ -511,22 +511,6 @@ class EEGRegressorPL(pl.LightningModule):
             x = x / 100.0
         return self.model(x)  # [B, 1]
 
-    def on_train_epoch_start(self):
-        """Reset accumulators at the start of each epoch"""
-        self.train_sum_sq_err = 0.0
-        self.train_n_samples = 0
-
-    def on_validation_epoch_start(self):
-        """Reset accumulators at the start of validation"""
-        self.val_sum_sq_err = 0.0
-        self.val_n_samples = 0
-
-    def on_train_epoch_end(self):
-        """Calculate RMSE over entire epoch"""
-        if self.train_n_samples > 0:
-            epoch_rmse = (self.train_sum_sq_err / self.train_n_samples) ** 0.5
-            self.log("train/rmse", epoch_rmse, on_epoch=True, prog_bar=True)
-
     def training_step(self, batch, batch_idx):
         if isinstance(batch, (tuple, list)):
             x, y = batch
@@ -536,22 +520,16 @@ class EEGRegressorPL(pl.LightningModule):
         preds = self(x)
         loss = self.loss_fn(preds, y)
 
-        # Accumulate squared errors (matching starter kit)
+        # Calculate RMSE for this batch
         preds_flat = preds.detach().view(-1)
         y_flat = y.detach().view(-1)
-        batch_sq_err = torch.sum((preds_flat - y_flat) ** 2).item()
-        self.train_sum_sq_err += batch_sq_err
-        self.train_n_samples += y_flat.numel()
+        batch_rmse = torch.sqrt(F.mse_loss(preds_flat, y_flat))
 
         self.log("train/loss", loss, on_step=True,
                  on_epoch=True, prog_bar=True)
+        self.log("train/rmse", batch_rmse, on_step=False,
+                 on_epoch=True, prog_bar=True)
         return loss
-
-    def on_train_epoch_end(self):
-        """Calculate RMSE over entire epoch"""
-        if self.train_n_samples > 0:
-            epoch_rmse = (self.train_sum_sq_err / self.train_n_samples) ** 0.5
-            self.log("train/rmse", epoch_rmse, on_epoch=True, prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
         x, y = batch if isinstance(batch, (tuple, list)) else (batch, None)
@@ -559,21 +537,15 @@ class EEGRegressorPL(pl.LightningModule):
         preds = self(x)
         loss = self.loss_fn(preds, y)
 
-        # Accumulate squared errors (matching starter kit)
+        # Calculate RMSE for this batch
         preds_flat = preds.detach().view(-1)
         y_flat = y.detach().view(-1)
-        batch_sq_err = torch.sum((preds_flat - y_flat) ** 2).item()
-        self.val_sum_sq_err += batch_sq_err
-        self.val_n_samples += y_flat.numel()
+        batch_rmse = torch.sqrt(F.mse_loss(preds_flat, y_flat))
 
         self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/rmse", batch_rmse, on_step=False,
+                 on_epoch=True, prog_bar=True)
         return loss
-
-    def on_validation_epoch_end(self):
-        """Calculate RMSE over entire epoch"""
-        if self.val_n_samples > 0:
-            epoch_rmse = (self.val_sum_sq_err / self.val_n_samples) ** 0.5
-            self.log("val/rmse", epoch_rmse, on_epoch=True, prog_bar=True)
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(

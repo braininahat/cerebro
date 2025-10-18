@@ -307,7 +307,7 @@ def finetune(train_loader, val_loader, labram_ckpt: str = "best_mem.ckpt"):
 
     logger, callbacks, ckpt_cb = setup_logger_and_callbacks(
         run_name="challenge1_labram",
-        monitor="val_mem_loss",
+        monitor="val/loss",
         ckpt_dir=Config.FINETUNE_DIR,
         use_wandb=Config.USE_WANDB
     )
