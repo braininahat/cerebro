@@ -1,0 +1,27 @@
+data:
+  data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+  # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training!
+  # Using R1 for mini prototyping (small enough for fast iteration)
+  excluded_subjects:
+    - NDARWV769JM7
+    - NDARME789TD2
+    - NDARUA442ZVF
+    - NDARJP304NK1
+    - NDARTY128YLU
+    - NDARDW550GU6
+    - NDARLD243KRE
+    - NDARUJ292JXV
+    - NDARBA381JGH
+  shift_after_stim: 0.5
+  window_len: 2.0
+  cache_dir: null
+  val_frac: 0.1
+  test_frac: 0.1
+  seed: 2025
+  sfreq: 100
+  epoch_len_s: 2.0
+  anchor: stimulus_anchor
+  # R5 Test Evaluation (Competition Validation Set)
+  mode: dev  # "dev" = split training releases for train/val/test
+  test_on_r5: true  # Use R5 as test set (even for mini prototyping to match competition evaluation)
+  r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data}  # R5 data location

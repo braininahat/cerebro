@@ -25,6 +25,10 @@ Usage:
     uv run python cerebro/cli/train.py fit --config configs/challenge1_base.yaml
 """
 
+from cerebro.utils.tuning import run_batch_size_finder, run_lr_finder
+from cerebro.utils.logging import setup_logging
+from cerebro.models.challenge1 import Challenge1Module
+from cerebro.data.challenge1 import Challenge1DataModule
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -38,10 +42,6 @@ torch.set_float32_matmul_precision(
 )  # Trades minimal precision for 30-50% speedup
 
 # Import modules to register with CLI
-from cerebro.data.challenge1 import Challenge1DataModule
-from cerebro.models.challenge1 import Challenge1Module
-from cerebro.utils.logging import setup_logging
-from cerebro.utils.tuning import run_batch_size_finder, run_lr_finder
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,36 @@ class CerebroCLI(LightningCLI):
                             "outputs/challenge1",
                             f"outputs/challenge1/{self.run_timestamp}",
                         )
+
+    # def instantiate_classes(self):
+    #     """Override to handle both config-driven (class_path) and hardcoded class modes.
+
+    #     If model/data config has 'class_path', use that. Otherwise fallback to default classes.
+    #     """
+    #     # Check if model has class_path (config-driven mode)
+    #     model_cfg = self.config.get(self.subcommand, {}).get("model")
+    #     has_model_class_path = (
+    #         model_cfg is not None
+    #         and isinstance(model_cfg, dict)
+    #         and "class_path" in model_cfg
+    #     )
+
+    #     data_cfg = self.config.get(self.subcommand, {}).get("data")
+    #     has_data_class_path = (
+    #         data_cfg is not None
+    #         and isinstance(data_cfg, dict)
+    #         and "class_path" in data_cfg
+    #     )
+
+    #     # If no class_path found, fallback to default classes (Challenge1Module, Challenge1DataModule)
+    #     if not has_model_class_path and not has_data_class_path:
+    #         if not self.model_class:
+    #             self.model_class = Challenge1Module
+    #         if not self.datamodule_class:
+    #             self.datamodule_class = Challenge1DataModule
+
+    #     # Call parent instantiation
+    #     super().instantiate_classes()
 
     def add_arguments_to_parser(self, parser):
         """Add custom arguments to parser.
@@ -217,53 +247,50 @@ class CerebroCLI(LightningCLI):
         data_hparams = self.datamodule.hparams
         model_hparams = self.model.hparams
 
-        # Build comprehensive config dict
+        # Build comprehensive config dict - start with trainer config
         config_dict = {
-            # Data settings
-            "data_dir": str(data_hparams.data_dir),
-            "releases": data_hparams.releases,
-            "num_releases": len(data_hparams.releases),
-            "use_mini": data_hparams.use_mini,
-            "excluded_subjects": data_hparams.excluded_subjects,
-            # Windowing parameters
-            "epoch_len_s": data_hparams.epoch_len_s,
-            "sfreq": data_hparams.sfreq,
-            "anchor": data_hparams.anchor,
-            "shift_after_stim": data_hparams.shift_after_stim,
-            "window_len": data_hparams.window_len,
             # Training parameters
-            "batch_size": data_hparams.batch_size,
             "epochs": self.trainer.max_epochs,
-            "lr": model_hparams.lr,
-            "weight_decay": model_hparams.weight_decay,
             "precision": str(self.trainer.precision),
             # Hyperparameter tuning switches
             "run_lr_finder": self.config["fit"].get("run_lr_finder", False),
             "run_batch_size_finder": self.config["fit"].get(
                 "run_batch_size_finder", False
             ),
-            # Splits
-            "val_frac": data_hparams.val_frac,
-            "test_frac": data_hparams.test_frac,
-            "seed": data_hparams.seed,
-            # Dataset sizes (will be populated after setup)
-            "num_train_windows": (
-                len(self.datamodule.train_set) if self.datamodule.train_set else 0
-            ),
-            "num_val_windows": (
-                len(self.datamodule.val_set) if self.datamodule.val_set else 0
-            ),
-            "num_test_windows": (
-                len(self.datamodule.test_set) if self.datamodule.test_set else 0
-            ),
-            # Model architecture
-            "model_class": model_hparams.model_class,  # Architecture choice (EEGNeX, SignalJEPA_PreLocal, etc.)
-            "model_kwargs": model_hparams.model_kwargs,  # Model-specific hyperparameters
-            "model_name": self.model.model.__class__.__name__,
-            "n_chans": model_hparams.n_chans,
-            "n_times": model_hparams.n_times,
             "num_parameters": sum(p.numel() for p in self.model.parameters()),
         }
+
+        # Add all datamodule hyperparameters (converted to dict)
+        if hasattr(data_hparams, "__dict__"):
+            for key, value in data_hparams.__dict__.items():
+                if not key.startswith("_"):  # Skip private attributes
+                    # Convert Path objects to strings for serialization
+                    if hasattr(value, "__fspath__"):
+                        value = str(value)
+                    config_dict[f"data_{key}"] = value
+
+        # Add all model hyperparameters (converted to dict)
+        if hasattr(model_hparams, "__dict__"):
+            for key, value in model_hparams.__dict__.items():
+                if not key.startswith("_"):  # Skip private attributes
+                    # Convert Path objects to strings for serialization
+                    if hasattr(value, "__fspath__"):
+                        value = str(value)
+                    config_dict[f"model_{key}"] = value
+
+        # Add dataset sizes if available
+        if hasattr(self.datamodule, "train_set") and self.datamodule.train_set:
+            config_dict["num_train_windows"] = len(self.datamodule.train_set)
+        if hasattr(self.datamodule, "val_set") and self.datamodule.val_set:
+            config_dict["num_val_windows"] = len(self.datamodule.val_set)
+        if hasattr(self.datamodule, "test_set") and self.datamodule.test_set:
+            config_dict["num_test_windows"] = len(self.datamodule.test_set)
+
+        # Add model name if available
+        if hasattr(self.model, "model") and hasattr(self.model.model, "__class__"):
+            config_dict["model_name"] = self.model.model.__class__.__name__
+        else:
+            config_dict["model_name"] = self.model.__class__.__name__
 
         # Upload to wandb (only if experiment is initialized)
         try:
@@ -277,7 +304,8 @@ class CerebroCLI(LightningCLI):
                     "[yellow]Wandb config upload skipped (offline/fast_dev_run mode)[/yellow]"
                 )
         except Exception as e:
-            logger.warning(f"[yellow]Could not upload config to wandb: {e}[/yellow]")
+            logger.warning(
+                f"[yellow]Could not upload config to wandb: {e}[/yellow]")
 
     def _run_lr_finder(self):
         """Run learning rate finder with wandb plot upload."""
@@ -327,7 +355,8 @@ class CerebroCLI(LightningCLI):
             model=self.model,
             datamodule=self.datamodule,
             mode=self.config["fit"].get("bs_finder_mode", "power"),
-            steps_per_trial=self.config["fit"].get("bs_finder_steps_per_trial", 3),
+            steps_per_trial=self.config["fit"].get(
+                "bs_finder_steps_per_trial", 3),
             init_val=self.config["fit"].get("bs_finder_init_val", 32),
             max_trials=self.config["fit"].get("bs_finder_max_trials", 6),
         )
@@ -350,12 +379,21 @@ class CerebroCLI(LightningCLI):
 
 
 def cli_main():
-    """CLI entry point."""
+    """CLI entry point.
+
+    Supports two modes:
+    1. Config-driven (recommended): Use class_path in model/data sections of YAML
+       Example: model: {class_path: "cerebro.models.labram.tokenizer.VQNSP", ...}
+
+    2. Hardcoded: If no class_path, uses Challenge1Module and Challenge1DataModule
+       Example: model: {n_chans: 129, lr: 0.001, ...}
+    """
     CerebroCLI(
-        Challenge1Module,
-        Challenge1DataModule,
+        model_class=None,
+        datamodule_class=Challenge1DataModule,
         save_config_callback=None,  # Wandb handles config saving
-        parser_kwargs={"parser_mode": "omegaconf"},  # Use OmegaConf for interpolation
+        # Use OmegaConf for interpolation
+        parser_kwargs={"parser_mode": "omegaconf"},
     )
 
 
