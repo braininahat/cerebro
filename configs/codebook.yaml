@@ -65,6 +65,7 @@ trainer:
       notes: "Testing"
       log_model: all # Upload all checkpoints as wandb artifacts
       save_dir: outputs/pretrain
+      mode: online # "online" or "offline" or "disabled" (for debugging without internet)
 
   # Callbacks
   callbacks:

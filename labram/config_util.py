@@ -9,7 +9,8 @@ class Config:
     CACHE_DIR = os.path.join(DATA_DIR, "cache")
 
     # Releases
-    RELEASES = ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
+    # RELEASES = ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
+    RELEASES = ["R1"]
     TEST_RELEASE = "R5"
 
     CHALLENGE_TASK = "contrastChangeDetection"

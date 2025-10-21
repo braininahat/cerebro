@@ -324,7 +324,7 @@ class NeuralTransformer(nn.Module):
             nn.Linear(embed_dim, embed_dim // 2),
             nn.GELU(),
             nn.Linear(embed_dim // 2, 1)
-        )
+        ) if num_classes > 0 else nn.Identity()
 
         # Init
         if self.pos_embed is not None:
@@ -399,8 +399,7 @@ class NeuralTransformer(nn.Module):
         x: [B, N, A, T] with T==self.patch_size (here 100), A==2 for 2s @ 100Hz
         """
         B, N, A, T = x.shape
-        assert T == self.patch_size, f"Expected T={self.patch_size}, got {T}"
-        input_time_window = A
+        input_time_window = A if T == self.patch_size else T
 
         # [B, N*A, L'*C] or [B, N*A, embed_dim]
         x = self.patch_embed(x)
