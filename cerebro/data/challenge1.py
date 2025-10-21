@@ -177,10 +177,13 @@ class Challenge1DataModule(L.LightningDataModule):
         mode: str = "dev",
         test_on_r5: bool = False,
         r5_data_dir: Optional[str] = None,
+        data_req: str = "challenge1",
+        passive_tasks: Optional[List[str]] = None,
     ):
         super().__init__()
         self.save_hyperparameters()
 
+        self.data_req = data_req
         # Validate mode
         if mode not in ["dev", "submission"]:
             raise ValueError(
@@ -202,7 +205,8 @@ class Challenge1DataModule(L.LightningDataModule):
 
         # Convert to Path objects
         self.data_dir = Path(data_dir)
-        self.r5_data_dir = Path(r5_data_dir) if r5_data_dir is not None else self.data_dir
+        self.r5_data_dir = Path(
+            r5_data_dir) if r5_data_dir is not None else self.data_dir
 
         # Setup cache directory
         if cache_dir is None:
@@ -253,7 +257,8 @@ class Challenge1DataModule(L.LightningDataModule):
             stage: 'fit', 'validate', 'test', or 'predict' (unused, loads all)
         """
         logger.info("\n" + "="*60)
-        logger.info(f"[bold cyan]CHALLENGE 1 DATA SETUP (mode={self.hparams.mode}, test_on_r5={self.hparams.test_on_r5})[/bold cyan]")
+        logger.info(
+            f"[bold cyan]CHALLENGE 1 DATA SETUP (mode={self.hparams.mode}, test_on_r5={self.hparams.test_on_r5})[/bold cyan]")
         logger.info("="*60)
 
         # Create cache key from windowing parameters
@@ -265,22 +270,27 @@ class Challenge1DataModule(L.LightningDataModule):
         # Try loading from cache
         if cache_path.exists():
             logger.info("[bold cyan]LOADING FROM CACHE[/bold cyan]")
-            logger.info(f"[green]✓[/green] Loading cached windows from: {cache_key}")
+            logger.info(
+                f"[green]✓[/green] Loading cached windows from: {cache_key}")
             with open(cache_path, "rb") as f:
                 single_windows = pickle.load(f)
-            logger.info(f"[green]✓[/green] Loaded {len(single_windows)} windows from cache")
+            logger.info(
+                f"[green]✓[/green] Loaded {len(single_windows)} windows from cache")
         else:
             # Cache miss - run full pipeline
             single_windows = self._load_and_preprocess(cache_path)
 
         # Inspect metadata
         metadata = single_windows.get_metadata()
-        logger.info(f"\n[bold]Metadata columns:[/bold] {len(list(metadata.columns))} columns")
+        logger.info(
+            f"\n[bold]Metadata columns:[/bold] {len(list(metadata.columns))} columns")
         logger.info(f"\n[bold]Sample metadata:[/bold]")
-        logger.info(metadata[["subject", "target", "rt_from_stimulus", "correct"]].head().to_string())
+        logger.info(metadata[["subject", "target",
+                    "rt_from_stimulus", "correct"]].head().to_string())
 
         # RT distribution statistics
-        logger.info(f"\n[bold]Response Time Statistics (training releases):[/bold]")
+        logger.info(
+            f"\n[bold]Response Time Statistics (training releases):[/bold]")
         logger.info(f"  Mean: {metadata['target'].mean():.4f}s")
         logger.info(f"  Std: {metadata['target'].std():.4f}s")
         logger.info(f"  Min: {metadata['target'].min():.4f}s")
@@ -299,25 +309,32 @@ class Challenge1DataModule(L.LightningDataModule):
     def _load_and_preprocess(self, cache_path: Path):
         """Load raw data, preprocess, create windows, and cache."""
         logger.info("[bold cyan]LOADING DATA[/bold cyan]")
-
+        tasks = []
+        if self.data_req == "pretrain":
+            tasks = self.hparams.passive_tasks if self.hparams.passive_tasks is not None else []
+        elif self.data_req == "challenge1":
+            tasks = self.hparams.active_task
+        # task =
         # Load all releases
         all_datasets_list = []
         for release in self.hparams.releases:
-            logger.info(f"Loading {release}...")
-            dataset = EEGChallengeDataset(
-                task="contrastChangeDetection",
-                release=release,
-                cache_dir=str(self.data_dir),
-                mini=self.hparams.use_mini,
-                description_fields=[
-                    "subject", "session", "run", "task", "age", "sex", "p_factor",
-                ],
-            )
-            all_datasets_list.append(dataset)
+            for task in tasks:
+                logger.info(f"Loading {release}...")
+                datFaset = EEGChallengeDataset(
+                    task="contrastChangeDetection",
+                    release=release,
+                    cache_dir=str(self.data_dir),
+                    mini=self.hparams.use_mini,
+                    description_fields=[
+                        "subject", "session", "run", "task", "age", "sex", "p_factor",
+                    ],
+                )
+                all_datasets_list.append(datFaset)
 
         # Combine datasets
         dataset_ccd = BaseConcatDataset(all_datasets_list)
-        logger.info(f"[bold]Total recordings:[/bold] {len(dataset_ccd.datasets)}")
+        logger.info(
+            f"[bold]Total recordings:[/bold] {len(dataset_ccd.datasets)}")
 
         # Preload raws in parallel
         logger.info("Preloading raw data...")
@@ -344,8 +361,10 @@ class Challenge1DataModule(L.LightningDataModule):
         preprocess(dataset_ccd, transformation_offline, n_jobs=-1)
 
         # Keep only recordings with stimulus anchors
-        dataset_ccd = keep_only_recordings_with(self.hparams.anchor, dataset_ccd)
-        logger.info(f"[bold]Recordings with stimulus anchors:[/bold] {len(dataset_ccd.datasets)}")
+        dataset_ccd = keep_only_recordings_with(
+            self.hparams.anchor, dataset_ccd)
+        logger.info(
+            f"[bold]Recordings with stimulus anchors:[/bold] {len(dataset_ccd.datasets)}")
 
         # Filter out recordings where stimulus anchors violate window boundaries
         dataset_ccd = filter_recordings_with_valid_windows(
@@ -355,7 +374,8 @@ class Challenge1DataModule(L.LightningDataModule):
             self.hparams.window_len,
             self.hparams.sfreq,
         )
-        logger.info(f"[bold]Recordings with valid windows:[/bold] {len(dataset_ccd.datasets)}")
+        logger.info(
+            f"[bold]Recordings with valid windows:[/bold] {len(dataset_ccd.datasets)}")
 
         # Create stimulus-locked windows
         logger.info("\n[bold cyan]CREATING WINDOWS[/bold cyan]")
@@ -371,11 +391,14 @@ class Challenge1DataModule(L.LightningDataModule):
         single_windows = create_windows_from_events(
             dataset_ccd,
             mapping={self.hparams.anchor: 0},
-            trial_start_offset_samples=int(self.hparams.shift_after_stim * self.hparams.sfreq),
+            trial_start_offset_samples=int(
+                self.hparams.shift_after_stim * self.hparams.sfreq),
             trial_stop_offset_samples=int(
-                (self.hparams.shift_after_stim + self.hparams.window_len) * self.hparams.sfreq
+                (self.hparams.shift_after_stim +
+                 self.hparams.window_len) * self.hparams.sfreq
             ),
-            window_size_samples=int(self.hparams.epoch_len_s * self.hparams.sfreq),
+            window_size_samples=int(
+                self.hparams.epoch_len_s * self.hparams.sfreq),
             window_stride_samples=self.hparams.sfreq,
             preload=True,
         )
@@ -392,10 +415,12 @@ class Challenge1DataModule(L.LightningDataModule):
         )
 
         # Save to cache
-        logger.info(f"[yellow]⚠[/yellow] Caching windows to: {cache_path.name}")
+        logger.info(
+            f"[yellow]⚠[/yellow] Caching windows to: {cache_path.name}")
         with open(cache_path, "wb") as f:
             pickle.dump(single_windows, f)
-        logger.info(f"[yellow]⚠[/yellow] Delete cache if windowing params change: rm {cache_path}")
+        logger.info(
+            f"[yellow]⚠[/yellow] Delete cache if windowing params change: rm {cache_path}")
 
         return single_windows
 
@@ -408,12 +433,15 @@ class Challenge1DataModule(L.LightningDataModule):
         logger.info("\n[bold cyan]SPLITTING DATA[/bold cyan]")
 
         subjects = metadata["subject"].unique()
-        subjects = [s for s in subjects if s not in self.hparams.excluded_subjects]
-        logger.info(f"[bold]Total subjects (after exclusion):[/bold] {len(subjects)}")
+        subjects = [
+            s for s in subjects if s not in self.hparams.excluded_subjects]
+        logger.info(
+            f"[bold]Total subjects (after exclusion):[/bold] {len(subjects)}")
 
         if self.hparams.mode == "submission":
             # Submission mode: Train on ALL subjects (no val/test split from training releases)
-            logger.info("[yellow]Submission mode: Using ALL subjects for training[/yellow]")
+            logger.info(
+                "[yellow]Submission mode: Using ALL subjects for training[/yellow]")
             train_subj = subjects
             valid_subj = []
             test_subj = []
@@ -430,17 +458,20 @@ class Challenge1DataModule(L.LightningDataModule):
             # Split: val / test
             valid_subj, test_subj = train_test_split(
                 valid_test_subj,
-                test_size=self.hparams.test_frac / (self.hparams.val_frac + self.hparams.test_frac),
+                test_size=self.hparams.test_frac /
+                (self.hparams.val_frac + self.hparams.test_frac),
                 random_state=check_random_state(self.hparams.seed + 1),
                 shuffle=True
             )
 
             # Sanity check
-            assert (set(valid_subj) | set(test_subj) | set(train_subj)) == set(subjects)
+            assert (set(valid_subj) | set(test_subj) |
+                    set(train_subj)) == set(subjects)
 
         logger.info(f"Train subjects: {len(train_subj)}")
         logger.info(f"Val subjects: {len(valid_subj)}")
-        logger.info(f"Test subjects: {len(test_subj)} {'(will be replaced by R5)' if self.hparams.test_on_r5 else ''}")
+        logger.info(
+            f"Test subjects: {len(test_subj)} {'(will be replaced by R5)' if self.hparams.test_on_r5 else ''}")
 
         # Create splits
         subject_split = single_windows.split("subject")
@@ -487,14 +518,18 @@ class Challenge1DataModule(L.LightningDataModule):
 
         # Try loading from cache
         if r5_cache_path.exists():
-            logger.info(f"[green]✓[/green] Loading R5 from cache: {r5_cache_key}")
+            logger.info(
+                f"[green]✓[/green] Loading R5 from cache: {r5_cache_key}")
             with open(r5_cache_path, "rb") as f:
                 r5_windows = pickle.load(f)
-            logger.info(f"[green]✓[/green] Loaded {len(r5_windows)} R5 windows from cache")
+            logger.info(
+                f"[green]✓[/green] Loaded {len(r5_windows)} R5 windows from cache")
         else:
             # Cache miss - load R5 with identical preprocessing to local_scoring.py
-            logger.info("[yellow]Loading R5 (competition validation set)[/yellow]")
-            logger.info("[yellow]This matches local_scoring.py preprocessing exactly[/yellow]")
+            logger.info(
+                "[yellow]Loading R5 (competition validation set)[/yellow]")
+            logger.info(
+                "[yellow]This matches local_scoring.py preprocessing exactly[/yellow]")
 
             # Load R5 dataset (identical to local_scoring.py lines 136-144)
             dataset_r5 = EEGChallengeDataset(
@@ -530,8 +565,10 @@ class Challenge1DataModule(L.LightningDataModule):
             preprocess(dataset_r5, preprocessors, n_jobs=-1)
 
             # Keep only recordings with stimulus anchors (line 166)
-            dataset_r5 = keep_only_recordings_with(self.hparams.anchor, dataset_r5)
-            logger.info(f"[bold]R5 recordings with stimulus anchors:[/bold] {len(dataset_r5.datasets)}")
+            dataset_r5 = keep_only_recordings_with(
+                self.hparams.anchor, dataset_r5)
+            logger.info(
+                f"[bold]R5 recordings with stimulus anchors:[/bold] {len(dataset_r5.datasets)}")
 
             # Filter out recordings where stimulus anchors violate window boundaries
             dataset_r5 = filter_recordings_with_valid_windows(
@@ -541,18 +578,22 @@ class Challenge1DataModule(L.LightningDataModule):
                 self.hparams.window_len,
                 self.hparams.sfreq,
             )
-            logger.info(f"[bold]R5 recordings with valid windows:[/bold] {len(dataset_r5.datasets)}")
+            logger.info(
+                f"[bold]R5 recordings with valid windows:[/bold] {len(dataset_r5.datasets)}")
 
             # Create windows (identical to local_scoring.py lines 169-179)
             logger.info("Creating R5 windows...")
             r5_windows = create_windows_from_events(
                 dataset_r5,
                 mapping={self.hparams.anchor: 0},
-                trial_start_offset_samples=int(self.hparams.shift_after_stim * self.hparams.sfreq),
+                trial_start_offset_samples=int(
+                    self.hparams.shift_after_stim * self.hparams.sfreq),
                 trial_stop_offset_samples=int(
-                    (self.hparams.shift_after_stim + self.hparams.window_len) * self.hparams.sfreq
+                    (self.hparams.shift_after_stim +
+                     self.hparams.window_len) * self.hparams.sfreq
                 ),
-                window_size_samples=int(self.hparams.epoch_len_s * self.hparams.sfreq),
+                window_size_samples=int(
+                    self.hparams.epoch_len_s * self.hparams.sfreq),
                 window_stride_samples=self.hparams.sfreq,
                 preload=True,
             )
@@ -576,7 +617,8 @@ class Challenge1DataModule(L.LightningDataModule):
             logger.info(f"[bold]Created {len(r5_windows)} R5 windows[/bold]")
 
             # Cache R5 windows
-            logger.info(f"[yellow]⚠[/yellow] Caching R5 windows to: {r5_cache_key}")
+            logger.info(
+                f"[yellow]⚠[/yellow] Caching R5 windows to: {r5_cache_key}")
             with open(r5_cache_path, "wb") as f:
                 pickle.dump(r5_windows, f)
 
