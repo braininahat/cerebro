@@ -8,7 +8,7 @@ This module contains implementations for:
 """
 
 from .tokenizer import VQNSP
-from .modeling_finetune import NeuralTransformer
+from .finetune import NeuralTransformer
 from .norm_ema_quantizer import NormEMAVectorQuantizer
 from .pretrain import MEMPretrainModule
 

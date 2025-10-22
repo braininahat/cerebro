@@ -20,7 +20,7 @@ from torch.nn.init import trunc_normal_ as __call_trunc_normal_
 
 # Reuse your existing Transformer blocks from LaBraM finetune code
 # (must provide `Block` and `_cfg` in modeling_finetune.py)
-from .modeling_finetune import Block, _cfg
+from .finetune import Block, _cfg
 
 
 def trunc_normal_(tensor, mean=0., std=1.):

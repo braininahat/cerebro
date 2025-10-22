@@ -7,7 +7,7 @@ from einops import rearrange
 from torch.nn.init import trunc_normal_
 import lightning.pytorch as pl
 
-from .modeling_finetune import NeuralTransformer
+from .finetune import NeuralTransformer
 from .norm_ema_quantizer import NormEMAVectorQuantizer
 
 

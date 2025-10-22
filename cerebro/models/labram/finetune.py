@@ -464,8 +464,33 @@ class EEGRegressorPL(pl.LightningModule):
     """
 
     def __init__(self,
-                 backbone,
+                 # NeuralTransformer architecture parameters
+                 EEG_size: int = 200,
                  patch_size: int = 100,
+                 in_chans: int = 1,
+                 out_chans: int = 8,
+                 num_classes: int = 1,
+                 embed_dim: int = 200,
+                 depth: int = 12,
+                 num_heads: int = 10,
+                 mlp_ratio: float = 4.,
+                 qkv_bias: bool = False,
+                 qk_scale: Optional[float] = None,
+                 drop_rate: float = 0.,
+                 attn_drop_rate: float = 0.,
+                 drop_path_rate: float = 0.,
+                 init_values: Optional[float] = None,
+                 use_abs_pos_emb: bool = True,
+                 use_rel_pos_bias: bool = False,
+                 use_shared_rel_pos_bias: bool = False,
+                 use_mean_pooling: bool = True,
+                 init_scale: float = 0.001,
+                 n_chans_hint: int = 129,
+                 max_time_window_hint: int = 2,
+                 # Pretrained weights
+                 pretrained: bool = False,
+                 pretrained_weight: Optional[str] = None,
+                 # Training parameters
                  lr: float = 1e-4,
                  weight_decay: float = 0.05,
                  betas: Tuple[float, float] = (0.9, 0.95),
@@ -473,8 +498,67 @@ class EEGRegressorPL(pl.LightningModule):
                  eta_min: float = 1e-6,
                  scale_input: bool = True):
         super().__init__()
-        self.save_hyperparameters(ignore=['backbone'])
-        self.model = backbone
+        self.save_hyperparameters()
+
+        # Build backbone from arguments (use nn.LayerNorm internally)
+        if pretrained and pretrained_weight:
+            self.model = NeuralTransformer.from_pretrained(
+                init_ckpt=pretrained_weight,
+                EEG_size=EEG_size,
+                patch_size=patch_size,
+                in_chans=in_chans,
+                out_chans=out_chans,
+                num_classes=num_classes,
+                embed_dim=embed_dim,
+                depth=depth,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_norm=None,
+                qk_scale=qk_scale,
+                drop_rate=drop_rate,
+                attn_drop_rate=attn_drop_rate,
+                drop_path_rate=drop_path_rate,
+                norm_layer=nn.LayerNorm,
+                init_values=init_values,
+                use_abs_pos_emb=use_abs_pos_emb,
+                use_rel_pos_bias=use_rel_pos_bias,
+                use_shared_rel_pos_bias=use_shared_rel_pos_bias,
+                use_mean_pooling=use_mean_pooling,
+                init_scale=init_scale,
+                n_chans_hint=n_chans_hint,
+                max_time_window_hint=max_time_window_hint,
+                ignore_mlp_head=True,
+                strict=False,
+            )
+        else:
+            self.model = NeuralTransformer(
+                EEG_size=EEG_size,
+                patch_size=patch_size,
+                in_chans=in_chans,
+                out_chans=out_chans,
+                num_classes=num_classes,
+                embed_dim=embed_dim,
+                depth=depth,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_norm=None,
+                qk_scale=qk_scale,
+                drop_rate=drop_rate,
+                attn_drop_rate=attn_drop_rate,
+                drop_path_rate=drop_path_rate,
+                norm_layer=nn.LayerNorm,
+                init_values=init_values,
+                use_abs_pos_emb=use_abs_pos_emb,
+                use_rel_pos_bias=use_rel_pos_bias,
+                use_shared_rel_pos_bias=use_shared_rel_pos_bias,
+                use_mean_pooling=use_mean_pooling,
+                init_scale=init_scale,
+                n_chans_hint=n_chans_hint,
+                max_time_window_hint=max_time_window_hint,
+            )
+
         self.patch_size = patch_size
         self.lr = lr
         self.weight_decay = weight_decay

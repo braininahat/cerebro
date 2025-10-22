@@ -1,0 +1,183 @@
+# Seed everything for reproducibility
+seed_everything: 42
+
+# Tuning flags (root level, not under trainer)
+run_lr_finder: false
+run_batch_size_finder: false
+
+# LR finder parameters (used if run_lr_finder=true)
+lr_finder_min: 1.0e-07
+lr_finder_max: 0.1
+lr_finder_num_training: 100
+
+# Batch size finder parameters (used if run_batch_size_finder=true)
+bs_finder_mode: power
+bs_finder_init_val: 64
+bs_finder_max_trials: 6
+bs_finder_steps_per_trial: 3
+
+model:
+  class_path: "cerebro.models.labram.finetune.EEGRegressorPL"
+
+  init_args:
+    # NeuralTransformer architecture parameters
+    EEG_size: 200 # INPUT_SIZE (2 seconds @ 100Hz)
+    patch_size: 100 # 1 second patches @ 100Hz
+    in_chans: 1
+    out_chans: 8
+    num_classes: 1 # Single regression output
+    embed_dim: 200 # Model embedding dimension
+    depth: 12 # Transformer depth
+    num_heads: 10 # Attention heads
+    mlp_ratio: 4.0
+    qkv_bias: false
+    qk_scale: null
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.0
+    init_values: null
+    use_abs_pos_emb: true
+    use_rel_pos_bias: false
+    use_shared_rel_pos_bias: false
+    use_mean_pooling: true
+    init_scale: 0.001
+    n_chans_hint: 129 # HBN montage channel count
+    max_time_window_hint: 2 # Maximum time window in seconds
+
+    # Pretrained weights configuration
+    pretrained: true
+    pretrained_weight: outputs/checkpoints/pretrain/pretrain-epoch=186-val_mem_loss=2.2781.ckpt # Set to pretrained checkpoint path
+
+    # Training parameters
+    lr: 0.0001
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    use_cosine_per_step: true
+    eta_min: 0.000001
+    scale_input: false # Whether to scale EEG inputs by /100
+
+# Trainer configuration
+trainer:
+  max_epochs: 1000
+  accelerator: auto # Auto-detect GPU/CPU
+  devices: 1
+  precision: "32-true" # Options: "32" (full), "16-mixed" (fast), "bf16-mixed" (stable+fast, requires Ampere+)
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 10
+
+  # Logger configuration
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg-challenge-2025
+      entity: ubcse-eeg2025 # Change to your wandb team/username
+      name: finetune
+      tags:
+        - finetune
+      notes: "Training finetune"
+      save_dir: outputs/logs/finetune
+      mode: online # "online" or "offline" or "disabled" (for debugging without internet)
+
+  # Callbacks
+  callbacks:
+    # CheckpointCompatibilityCallback: Fix checkpoints for resuming (must be FIRST)
+    - class_path: cerebro.callbacks.CheckpointCompatibilityCallback
+
+    # ModelCheckpoint: Save best models based on validation NRMSE
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/checkpoints/finetune
+        filename: finetune-{epoch:02d}-{val/nrmse_epoch:.4f}
+        monitor: val/nrmse_epoch
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    # EarlyStopping: Stop training if validation NRMSE doesn't improve
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/nrmse_epoch
+        patience: 10
+        mode: min
+        verbose: true
+
+    # TQDMProgressBar: Keep progress bars after epoch completion
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    # RichModelSummary: Display model architecture
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 1
+
+    - class_path: cerebro.callbacks.ModelAutopsyCallback
+      init_args:
+        run_on_training_end: true
+        run_on_early_stop: true
+        diagnostics:
+          - predictions
+          - gradients
+          - activations
+          - integrated_gradients # Captum: IG attribution analysis (memory optimized)
+          - layer_gradcam # Captum: Layer-wise attention (memory optimized)
+          - failure_modes # Phase 4: Top-K worst predictions and error analysis
+        save_plots: true
+        log_to_wandb: true
+        generate_report: true
+        upload_report: true # Upload markdown report to wandb (default: true)
+        upload_summary_table: true # Upload metrics table for cross-run comparison (default: true)
+        upload_raw_artifacts: false # Upload compressed .npz (~50 MB, ~40s upload, opt-in)
+        num_samples: 500 # Analyze 500 samples (not full val set for speed)
+        top_k_failures: 100 # Number of worst predictions to analyze in detail
+        ig_n_steps: 50 # IG integration steps (50 = good tradeoff)
+        ig_baseline: zero # Baseline type: zero, mean, or random
+
+data:
+  data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+  # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training!
+  # Training releases: R1-R4, R6-R11 only (10 releases total)
+  # R5 is held out for competition leaderboard evaluation
+  data_req: challenge1
+  active_task: contrastChangeDetection
+  releases:
+    - R1
+    - R2
+    - R3
+    - R4
+    - R6
+    - R7
+    - R8
+    - R9
+    - R10
+    - R11
+  batch_size: 512
+  num_workers: 64 # Parallel data loading (adjust based on CPU cores)
+  excluded_subjects:
+    - NDARWV769JM7
+    - NDARME789TD2
+    - NDARUA442ZVF
+    - NDARJP304NK1
+    - NDARTY128YLU
+    - NDARDW550GU6
+    - NDARLD243KRE
+    - NDARUJ292JXV
+    - NDARBA381JGH
+  shift_after_stim: 0.5 # Start window 0.5s after stimulus
+  window_len: 2.0 # 2 second windows
+  use_mini: false # Set to true for fast prototyping
+  cache_dir: null # null = auto (data_dir/../cache/challenge1)
+  val_frac: 0.1
+  test_frac: 0.1
+  seed: 2025
+  sfreq: 100
+  epoch_len_s: 2.0
+  window_size_s: 4.0
+  window_stride_s: 2.0
+  n_channels: 129
+  anchor: stimulus_anchor
+  # R5 Test Evaluation (Competition Validation Set)
+  mode: dev # "dev" = split training releases for train/val/test, "submission" = train on all
+  test_on_r5: false # Use R5 as test set (competition validation set for honest evaluation)
+  r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data} # R5 data location
