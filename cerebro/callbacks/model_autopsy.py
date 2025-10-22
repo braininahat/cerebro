@@ -187,6 +187,10 @@ class ModelAutopsyCallback(Callback):
         pl_module = pl_module.to(device)
         pl_module.eval()
 
+        # Get the actual model (handle both wrapped and direct models)
+        # Some LightningModules have pl_module.model, others ARE the model
+        model = getattr(pl_module, "model", pl_module)
+
         # 3. Get validation dataloader
         val_loader = trainer.datamodule.val_dataloader()
         logger.info(f"📊 Analyzing validation set ({len(val_loader.dataset)} samples)")
@@ -214,7 +218,7 @@ class ModelAutopsyCallback(Callback):
             if "predictions" in self.diagnostics:
                 logger.info("  ├─ Analyzing predictions...")
                 results["predictions"] = analyze_predictions(
-                    pl_module.model, val_loader, device, self.num_samples
+                    model, val_loader, device, self.num_samples
                 )
 
                 logger.info("  ├─ Computing baseline comparisons...")
@@ -228,7 +232,7 @@ class ModelAutopsyCallback(Callback):
                 logger.info("  ├─ Analyzing gradient flow...")
                 batch = next(iter(val_loader))
                 results["gradients"] = analyze_gradient_flow(
-                    pl_module.model, batch, device
+                    model, batch, device
                 )
 
             # Activation analysis
@@ -236,7 +240,7 @@ class ModelAutopsyCallback(Callback):
                 logger.info("  ├─ Analyzing activations...")
                 batch = next(iter(val_loader))
                 results["activations"] = analyze_activations(
-                    pl_module.model, batch, device
+                    model, batch, device
                 )
 
             # Integrated Gradients (Captum)
@@ -250,7 +254,7 @@ class ModelAutopsyCallback(Callback):
                     )
 
                     results["integrated_gradients"] = compute_integrated_gradients(
-                        pl_module.model,
+                        model,
                         val_loader,
                         device,
                         num_samples=self.num_samples or 100,
@@ -285,13 +289,13 @@ class ModelAutopsyCallback(Callback):
                     if target_layers == ["auto"]:
                         from cerebro.diagnostics.captum_layers import detect_conv_layers
 
-                        target_layers = detect_conv_layers(pl_module.model)
+                        target_layers = detect_conv_layers(model)
                         logger.info(
                             f"    Auto-detected {len(target_layers)} conv layers"
                         )
 
                     results["layer_gradcam"] = compute_layer_gradcam(
-                        pl_module.model,
+                        model,
                         val_loader,
                         device,
                         target_layers=target_layers,
@@ -319,7 +323,7 @@ class ModelAutopsyCallback(Callback):
                 )
 
                 results["channel_ablation"] = ablate_channels(
-                    pl_module.model,
+                    model,
                     val_loader,
                     device,
                     num_samples=self.num_samples or 100,
@@ -344,7 +348,7 @@ class ModelAutopsyCallback(Callback):
                 )
 
                 results["temporal_ablation"] = ablate_temporal_windows(
-                    pl_module.model,
+                    model,
                     val_loader,
                     device,
                     num_samples=self.num_samples or 100,
@@ -367,7 +371,7 @@ class ModelAutopsyCallback(Callback):
                 from cerebro.diagnostics.failure_modes import analyze_failure_modes
 
                 results["failure_modes"] = analyze_failure_modes(
-                    pl_module.model,
+                    model,
                     val_loader,
                     device,
                     top_k=self.top_k_failures,
