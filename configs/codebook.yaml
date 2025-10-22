@@ -62,11 +62,9 @@ trainer:
       entity: ubcse-eeg2025 # Change to your wandb team/username
       name: tokenizer
       tags:
-        - pretrain
-      notes: "Testing"
-      log_model: all # Upload all checkpoints as wandb artifacts
-      save_dir: outputs/pretrain
-      mode: online # "online" or "offline" or "disabled" (for debugging without internet)
+        - tokenizer
+      notes: "Training Tokenizer"
+      mode: disabled # "online" or "offline" or "disabled" (for debugging without internet)
 
   # Callbacks
   callbacks:
@@ -76,8 +74,8 @@ trainer:
     # ModelCheckpoint: Save best models based on validation NRMSE
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: outputs/challenge1/checkpoints
-        filename: challenge1-{epoch:02d}-{val_tok_loss:.4f}
+        dirpath: checkpoints/tokenizer
+        filename: tokenizer-{epoch:02d}-{val_tok_loss:.4f}
         monitor: val_tok_loss
         mode: min
         save_top_k: 3
@@ -100,29 +98,6 @@ trainer:
     - class_path: lightning.pytorch.callbacks.RichModelSummary
       init_args:
         max_depth: 1
-
-    # ModelAutopsy: Comprehensive diagnostics on early stopping or training end
-    - class_path: cerebro.callbacks.ModelAutopsyCallback
-      init_args:
-        run_on_training_end: true
-        run_on_early_stop: true
-        diagnostics:
-          - predictions
-          - gradients
-          - activations
-          - integrated_gradients # Captum: IG attribution analysis (memory optimized)
-          - layer_gradcam # Captum: Layer-wise attention (memory optimized)
-          - failure_modes # Phase 4: Top-K worst predictions and error analysis
-        save_plots: true
-        log_to_wandb: true
-        generate_report: true
-        upload_report: true # Upload markdown report to wandb (default: true)
-        upload_summary_table: true # Upload metrics table for cross-run comparison (default: true)
-        upload_raw_artifacts: false # Upload compressed .npz (~50 MB, ~40s upload, opt-in)
-        num_samples: 500 # Analyze 500 samples (not full val set for speed)
-        top_k_failures: 100 # Number of worst predictions to analyze in detail
-        ig_n_steps: 50 # IG integration steps (50 = good tradeoff)
-        ig_baseline: zero # Baseline type: zero, mean, or random
 
 data:
   data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
