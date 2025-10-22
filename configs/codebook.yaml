@@ -3,7 +3,7 @@ seed_everything: 42
 
 # Tuning flags (root level, not under trainer)
 run_lr_finder: false
-run_batch_size_finder: true
+run_batch_size_finder: false
 
 # LR finder parameters (used if run_lr_finder=true)
 lr_finder_min: 1.0e-07
@@ -65,7 +65,7 @@ trainer:
         - tokenizer
       notes: "Training Tokenizer"
       save_dir: outputs/logs/tokenizer
-      mode: disabled # "online" or "offline" or "disabled" (for debugging without internet)
+      mode: online # "online" or "offline" or "disabled" (for debugging without internet)
 
   # Callbacks
   callbacks:
