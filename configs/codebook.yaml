@@ -70,6 +70,9 @@ trainer:
 
   # Callbacks
   callbacks:
+    # CheckpointCompatibilityCallback: Fix checkpoints for resuming (must be FIRST)
+    - class_path: cerebro.callbacks.CheckpointCompatibilityCallback
+
     # ModelCheckpoint: Save best models based on validation NRMSE
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:

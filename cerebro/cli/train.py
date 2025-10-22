@@ -55,15 +55,77 @@ class CerebroCLI(LightningCLI):
     - Optional batch size finder (set run_batch_size_finder=true in config)
     - Comprehensive wandb config upload
     - Unique timestamped output directories per run
+    - Fixed checkpoint resuming (removes _class_path validation conflicts)
     """
 
     def __init__(self, *args, **kwargs):
-        """Initialize CLI with unique run timestamp."""
+        """Initialize CLI with unique run timestamp and auto-fix checkpoints."""
         self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Auto-fix checkpoint BEFORE parent __init__ (before parsing/validation)
+        self._auto_fix_checkpoint_in_args()
+
         super().__init__(*args, **kwargs)
 
+    def _auto_fix_checkpoint_in_args(self):
+        """Auto-fix checkpoint files before CLI parsing.
+
+        Removes _class_path from checkpoint hyper_parameters to avoid
+        validation conflicts when resuming training with --ckpt_path.
+
+        Also extracts wandb metadata for automatic run resuming.
+        """
+        import sys
+
+        # Check if --ckpt_path is in command line arguments
+        try:
+            if "--ckpt_path" in sys.argv:
+                idx = sys.argv.index("--ckpt_path")
+                if idx + 1 < len(sys.argv):
+                    ckpt_path = sys.argv[idx + 1]
+
+                    # Load and fix checkpoint
+                    ckpt = torch.load(ckpt_path, map_location="cpu")
+
+                    # Extract wandb metadata if available
+                    if "wandb_metadata" in ckpt:
+                        self.wandb_metadata = ckpt["wandb_metadata"]
+                        print(f"✓ Found wandb run ID in checkpoint: {self.wandb_metadata.get('wandb_run_id', 'N/A')}")
+                    else:
+                        self.wandb_metadata = None
+
+                    # Remove hyper_parameters entirely (config file provides these)
+                    # Keep only essential training state
+                    modified = False
+                    if "hyper_parameters" in ckpt:
+                        del ckpt["hyper_parameters"]
+                        modified = True
+                    if "datamodule_hyper_parameters" in ckpt:
+                        del ckpt["datamodule_hyper_parameters"]
+                        modified = True
+                    if "hparams_name" in ckpt:
+                        del ckpt["hparams_name"]
+                        modified = True
+                    if "datamodule_hparams_name" in ckpt:
+                        del ckpt["datamodule_hparams_name"]
+                        modified = True
+
+                    if modified:
+                        torch.save(ckpt, ckpt_path)
+                        print(f"✓ Auto-fixed checkpoint (removed hyper_parameters): {ckpt_path}")
+            else:
+                self.wandb_metadata = None
+
+        except Exception as e:
+            self.wandb_metadata = None
+            print(f"Warning: Could not auto-fix checkpoint: {e}")
+            print("You may need to manually strip hyper_parameters from checkpoint")
+
     def before_instantiate_classes(self):
-        """Inject unique timestamp into output paths before instantiating trainer/callbacks."""
+        """Inject unique timestamp into output paths before instantiating trainer/callbacks.
+
+        Also injects wandb metadata for automatic run resuming.
+        """
         # Only modify fit subcommand (not validate/test/predict)
         if self.subcommand != "fit":
             return
@@ -74,6 +136,28 @@ class CerebroCLI(LightningCLI):
             return
 
         trainer_cfg = cfg["trainer"]
+
+        # Inject wandb metadata if resuming from checkpoint
+        if self.wandb_metadata and "logger" in trainer_cfg:
+            logger_cfg = trainer_cfg["logger"]
+
+            # Check if it's a WandbLogger
+            class_path = logger_cfg.get("class_path", "")
+            if "WandbLogger" in class_path:
+                if hasattr(logger_cfg, "init_args"):
+                    # Override wandb settings to resume the run
+                    logger_cfg.init_args["id"] = self.wandb_metadata["wandb_run_id"]
+                    logger_cfg.init_args["resume"] = "must"
+
+                    # Optionally override name, project, entity if they're in metadata
+                    if "wandb_run_name" in self.wandb_metadata:
+                        logger_cfg.init_args["name"] = self.wandb_metadata["wandb_run_name"]
+                    if "wandb_project" in self.wandb_metadata:
+                        logger_cfg.init_args["project"] = self.wandb_metadata["wandb_project"]
+                    if "wandb_entity" in self.wandb_metadata:
+                        logger_cfg.init_args["entity"] = self.wandb_metadata["wandb_entity"]
+
+                    print(f"✓ Auto-configured wandb to resume run: {self.wandb_metadata['wandb_run_id']}")
 
         # Update WandbLogger save_dir
         if "logger" in trainer_cfg:
