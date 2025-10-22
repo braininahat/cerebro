@@ -337,7 +337,7 @@ class VQNSP(pl.LightningModule):
             x = batch
         input_chans = None
 
-        x = self._scale_input_like_engine(x)   # /100 as in engine
+        # x = self._scale_input_like_engine(x)   # /100 as in engine
         loss, log = self(x, input_chans)
 
         # log like engine (both detailed and total)
@@ -367,7 +367,7 @@ class VQNSP(pl.LightningModule):
             x = batch
 
         input_chans = None
-        x = self._scale_input_like_engine(x)   # /100 as in engine
+        # x = self._scale_input_like_engine(x)   # /100 as in engine
         loss, log = self(x, input_chans)
 
         # Log a dedicated monitor key like your PL callback expects
