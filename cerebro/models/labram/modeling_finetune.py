@@ -408,25 +408,20 @@ class NeuralTransformer(nn.Module):
 
         cls_tokens = self.cls_token.expand(B, 1, -1)
         x = torch.cat((cls_tokens, x), dim=1)    # [B, 1+N*A, D]
-        need_tokens = 1 + N * A
 
-        # channel positional (size to N, then broadcast across A)
+        pos_embed_used = self.pos_embed[:, input_chans] if (
+            self.pos_embed is not None and input_chans is not None) else self.pos_embed
         if self.pos_embed is not None:
-            pos_used = self._match_pos_embed(self.pos_embed, 1 + N)   # <- 1+N
-            # (B, N, A, D) -> (B, N*A, D)
-            pos_seq = pos_used[:, 1:, :].unsqueeze(
-                2).expand(B, N, A, -1).flatten(1, 2)
-            # prepend CLS token embedding and add to tokens
-            pos_seq = torch.cat(
-                (pos_used[:, :1, :].expand(B, -1, -1), pos_seq), dim=1)
-            x = x + pos_seq
-
-        # temporal positional
-        te = self._match_time_embed(
-            self.time_embed, input_time_window)         # [1, A, D]
-        te = te.unsqueeze(1).expand(B, N, -1, -1).flatten(1,
-                                                          2)                 # [B, N*A, D]
-        x[:, 1:, :] += te
+            pos_embed = pos_embed_used[:, 1:, :].unsqueeze(2).expand(
+                B, -1, input_time_window, -1).flatten(1, 2)
+            pos_embed = torch.cat((pos_embed_used[:, 0:1, :].expand(
+                B, -1, -1), pos_embed), dim=1)
+            x = x + pos_embed
+        if self.time_embed is not None:
+            nc = N if T == self.patch_size else A
+            time_embed = self.time_embed[:, 0:input_time_window, :].unsqueeze(
+                1).expand(B, nc, -1, -1).flatten(1, 2)
+            x[:, 1:, :] += time_embed
 
         x = self.pos_drop(x)
         for blk in self.blocks:
@@ -434,20 +429,20 @@ class NeuralTransformer(nn.Module):
 
         x = self.norm(x)
         if self.fc_norm is not None:
-            tokens = x[:, 1:, :]
-            pooled = self.fc_norm(tokens.mean(1))
-            if return_patch_tokens:
-                return self.fc_norm(tokens)
             if return_all_tokens:
                 return self.fc_norm(x)
-            return pooled
-        else:
-            tokens = x[:, 1:, :]
+            t = x[:, 1:, :]
             if return_patch_tokens:
-                return tokens
+                return self.fc_norm(t)
+            else:
+                return self.fc_norm(t.mean(1))
+        else:
             if return_all_tokens:
                 return x
-            return x[:, 0]
+            elif return_patch_tokens:
+                return x[:, 1:]
+            else:
+                return x[:, 0]
 
     def forward(self, x, input_chans=None, **kwargs):
         feats = self.forward_features(

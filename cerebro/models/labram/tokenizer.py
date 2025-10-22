@@ -333,10 +333,9 @@ class VQNSP(pl.LightningModule):
         # batch may be x or (x, input_chans)
         if isinstance(batch, (tuple, list)):
             x = batch[0]
-            input_chans = batch[1] if len(batch) > 1 else None
         else:
             x = batch
-            input_chans = None
+        input_chans = None
 
         x = self._scale_input_like_engine(x)   # /100 as in engine
         loss, log = self(x, input_chans)
@@ -364,11 +363,10 @@ class VQNSP(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         if isinstance(batch, (tuple, list)):
             x = batch[0]
-            input_chans = batch[1] if len(batch) > 1 else None
         else:
             x = batch
-            input_chans = None
 
+        input_chans = None
         x = self._scale_input_like_engine(x)   # /100 as in engine
         loss, log = self(x, input_chans)
 

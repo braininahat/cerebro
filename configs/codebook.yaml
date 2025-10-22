@@ -59,13 +59,13 @@ trainer:
     init_args:
       project: eeg-challenge-2025
       entity: ubcse-eeg2025 # Change to your wandb team/username
-      name: challenge1_baseline
+      name: pretrain
       tags:
         - pretrain
       notes: "Testing"
       log_model: all # Upload all checkpoints as wandb artifacts
       save_dir: outputs/pretrain
-      mode: online # "online" or "offline" or "disabled" (for debugging without internet)
+      mode: disabled # "online" or "offline" or "disabled" (for debugging without internet)
 
   # Callbacks
   callbacks:
@@ -73,8 +73,8 @@ trainer:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         dirpath: outputs/challenge1/checkpoints
-        filename: challenge1-{epoch:02d}-{val_mem_loss:.4f}
-        monitor: val_mem_loss
+        filename: challenge1-{epoch:02d}-{val_tok_loss:.4f}
+        monitor: val_tok_loss
         mode: min
         save_top_k: 3
         save_last: true
@@ -82,7 +82,7 @@ trainer:
     # EarlyStopping: Stop training if validation NRMSE doesn't improve
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
-        monitor: val_mem_loss
+        monitor: val_tok_loss
         patience: 10
         mode: min
         verbose: true
@@ -125,6 +125,17 @@ data:
   # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training!
   # Training releases: R1-R4, R6-R11 only (10 releases total)
   # R5 is held out for competition leaderboard evaluation
+  data_req: pretrain
+  passive_tasks:
+    [
+      "restingState",
+      "surroundSupp",
+      "despicableMe",
+      "thePresent",
+      "diaryOfAWimpyKid",
+      "funwithFractals",
+    ]
+  active_task: contrastChangeDetection
   releases:
     - R1
     - R2
@@ -157,6 +168,9 @@ data:
   seed: 2025
   sfreq: 100
   epoch_len_s: 2.0
+  window_size_s: 4.0
+  window_stride_s: 2.0
+  n_channels: 129
   anchor: stimulus_anchor
   # R5 Test Evaluation (Competition Validation Set)
   mode: dev # "dev" = split training releases for train/val/test, "submission" = train on all
