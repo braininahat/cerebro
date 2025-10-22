@@ -28,7 +28,7 @@ Usage:
 from cerebro.utils.tuning import run_batch_size_finder, run_lr_finder
 from cerebro.utils.logging import setup_logging
 from cerebro.models.challenge1 import Challenge1Module
-from cerebro.data.challenge1 import Challenge1DataModule
+from cerebro.data.hbn import HBNDataModule
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -90,7 +90,8 @@ class CerebroCLI(LightningCLI):
                     # Extract wandb metadata if available
                     if "wandb_metadata" in ckpt:
                         self.wandb_metadata = ckpt["wandb_metadata"]
-                        print(f"✓ Found wandb run ID in checkpoint: {self.wandb_metadata.get('wandb_run_id', 'N/A')}")
+                        print(
+                            f"✓ Found wandb run ID in checkpoint: {self.wandb_metadata.get('wandb_run_id', 'N/A')}")
                     else:
                         self.wandb_metadata = None
 
@@ -112,7 +113,8 @@ class CerebroCLI(LightningCLI):
 
                     if modified:
                         torch.save(ckpt, ckpt_path)
-                        print(f"✓ Auto-fixed checkpoint (removed hyper_parameters): {ckpt_path}")
+                        print(
+                            f"✓ Auto-fixed checkpoint (removed hyper_parameters): {ckpt_path}")
             else:
                 self.wandb_metadata = None
 
@@ -157,7 +159,8 @@ class CerebroCLI(LightningCLI):
                     if "wandb_entity" in self.wandb_metadata:
                         logger_cfg.init_args["entity"] = self.wandb_metadata["wandb_entity"]
 
-                    print(f"✓ Auto-configured wandb to resume run: {self.wandb_metadata['wandb_run_id']}")
+                    print(
+                        f"✓ Auto-configured wandb to resume run: {self.wandb_metadata['wandb_run_id']}")
 
         # Update WandbLogger save_dir
         if "logger" in trainer_cfg:
@@ -181,36 +184,6 @@ class CerebroCLI(LightningCLI):
                             "outputs/challenge1",
                             f"outputs/challenge1/{self.run_timestamp}",
                         )
-
-    # def instantiate_classes(self):
-    #     """Override to handle both config-driven (class_path) and hardcoded class modes.
-
-    #     If model/data config has 'class_path', use that. Otherwise fallback to default classes.
-    #     """
-    #     # Check if model has class_path (config-driven mode)
-    #     model_cfg = self.config.get(self.subcommand, {}).get("model")
-    #     has_model_class_path = (
-    #         model_cfg is not None
-    #         and isinstance(model_cfg, dict)
-    #         and "class_path" in model_cfg
-    #     )
-
-    #     data_cfg = self.config.get(self.subcommand, {}).get("data")
-    #     has_data_class_path = (
-    #         data_cfg is not None
-    #         and isinstance(data_cfg, dict)
-    #         and "class_path" in data_cfg
-    #     )
-
-    #     # If no class_path found, fallback to default classes (Challenge1Module, Challenge1DataModule)
-    #     if not has_model_class_path and not has_data_class_path:
-    #         if not self.model_class:
-    #             self.model_class = Challenge1Module
-    #         if not self.datamodule_class:
-    #             self.datamodule_class = Challenge1DataModule
-
-    #     # Call parent instantiation
-    #     super().instantiate_classes()
 
     def add_arguments_to_parser(self, parser):
         """Add custom arguments to parser.
@@ -474,7 +447,7 @@ def cli_main():
     """
     CerebroCLI(
         model_class=None,
-        datamodule_class=Challenge1DataModule,
+        datamodule_class=HBNDataModule,
         save_config_callback=None,  # Wandb handles config saving
         # Use OmegaConf for interpolation
         parser_kwargs={"parser_mode": "omegaconf"},

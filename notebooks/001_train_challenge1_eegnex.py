@@ -44,7 +44,7 @@ from eegdash.hbn.windows import (
     annotate_trials_with_target,
     keep_only_recordings_with,
 )
-from cerebro.data.challenge1 import filter_recordings_with_valid_windows
+from cerebro.data.hbn import filter_recordings_with_valid_windows
 from joblib import Parallel, delayed
 from lightning.pytorch.callbacks import (
     EarlyStopping,

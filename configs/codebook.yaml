@@ -3,7 +3,7 @@ seed_everything: 42
 
 # Tuning flags (root level, not under trainer)
 run_lr_finder: false
-run_batch_size_finder: false
+run_batch_size_finder: true
 
 # LR finder parameters (used if run_lr_finder=true)
 lr_finder_min: 1.0e-07
@@ -12,7 +12,7 @@ lr_finder_num_training: 100
 
 # Batch size finder parameters (used if run_batch_size_finder=true)
 bs_finder_mode: power
-bs_finder_init_val: 32
+bs_finder_init_val: 64
 bs_finder_max_trials: 6
 bs_finder_steps_per_trial: 3
 
@@ -64,6 +64,7 @@ trainer:
       tags:
         - tokenizer
       notes: "Training Tokenizer"
+      save_dir: outputs/logs/tokenizer
       mode: disabled # "online" or "offline" or "disabled" (for debugging without internet)
 
   # Callbacks
@@ -74,7 +75,7 @@ trainer:
     # ModelCheckpoint: Save best models based on validation NRMSE
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: checkpoints/tokenizer
+        dirpath: outputs/checkpoints/tokenizer
         filename: tokenizer-{epoch:02d}-{val_tok_loss:.4f}
         monitor: val_tok_loss
         mode: min
@@ -127,7 +128,7 @@ data:
     - R10
     - R11
   batch_size: 512
-  num_workers: 8 # Parallel data loading (adjust based on CPU cores)
+  num_workers: 64 # Parallel data loading (adjust based on CPU cores)
   excluded_subjects:
     - NDARWV769JM7
     - NDARME789TD2
@@ -153,5 +154,5 @@ data:
   anchor: stimulus_anchor
   # R5 Test Evaluation (Competition Validation Set)
   mode: dev # "dev" = split training releases for train/val/test, "submission" = train on all
-  test_on_r5: true # Use R5 as test set (competition validation set for honest evaluation)
+  test_on_r5: false # Use R5 as test set (competition validation set for honest evaluation)
   r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data} # R5 data location

@@ -12,6 +12,8 @@
 # **Output**: Validation plots in outputs/
 
 # %% Setup
+from scipy.stats import probplot
+from cerebro.data.hbn import HBNDataModule
 import sys
 from pathlib import Path
 
@@ -24,7 +26,6 @@ from scipy.stats import ks_2samp
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from cerebro.data.challenge1 import Challenge1DataModule
 
 # Create output directory
 OUTPUT_DIR = REPO_ROOT / "outputs"
@@ -37,7 +38,7 @@ print("=" * 60)
 # %% Load data
 print("\n📊 Loading data...")
 
-datamodule = Challenge1DataModule(
+datamodule = HBNDataModule(
     data_dir=REPO_ROOT / "data",
     releases=["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"],
     batch_size=512,
@@ -96,8 +97,10 @@ if len(train_val_overlap) > 0:
     print(
         f"❌ LEAKAGE DETECTED: {len(train_val_overlap)} subjects in BOTH train AND val!"
     )
-    print(f"   Overlapping subjects: {sorted(list(train_val_overlap))[:10]}...")
-    raise ValueError("Subject leakage detected! Fix data splits before training.")
+    print(
+        f"   Overlapping subjects: {sorted(list(train_val_overlap))[:10]}...")
+    raise ValueError(
+        "Subject leakage detected! Fix data splits before training.")
 else:
     print("✓ No train-val overlap detected")
 
@@ -148,7 +151,8 @@ stat, pval = ks_2samp(train_labels, val_labels)
 print(
     f"\nTrain label stats: mean={train_labels.mean():.3f}s, std={train_labels.std():.3f}s"
 )
-print(f"Val label stats:   mean={val_labels.mean():.3f}s, std={val_labels.std():.3f}s")
+print(
+    f"Val label stats:   mean={val_labels.mean():.3f}s, std={val_labels.std():.3f}s")
 print(f"KS test statistic: {stat:.4f}")
 print(f"KS test p-value: {pval:.4f}")
 
@@ -186,13 +190,13 @@ ax1.axvline(
 )
 ax1.set_xlabel("Response Time (s)", fontsize=11)
 ax1.set_ylabel("Count", fontsize=11)
-ax1.set_title(f"Label Distribution (KS p={pval:.4f})", fontsize=13, fontweight="bold")
+ax1.set_title(
+    f"Label Distribution (KS p={pval:.4f})", fontsize=13, fontweight="bold")
 ax1.legend(fontsize=9)
 ax1.grid(alpha=0.3)
 
 # Q-Q plot (check if val labels are normally distributed)
 ax2 = plt.subplot(1, 2, 2)
-from scipy.stats import probplot
 
 probplot(val_labels, dist="norm", plot=ax2)
 ax2.set_title(
@@ -243,7 +247,8 @@ if len(train_r5_overlap) > 0:
         f"❌ LEAKAGE DETECTED: {len(train_r5_overlap)} subjects in BOTH training releases AND R5!"
     )
     print(f"   Overlapping subjects: {sorted(list(train_r5_overlap))[:10]}...")
-    raise ValueError("R5 contamination detected! R5 should be completely held out.")
+    raise ValueError(
+        "R5 contamination detected! R5 should be completely held out.")
 else:
     print("✓ No overlap between training releases and R5")
 
@@ -252,7 +257,8 @@ print(f"\nComparing label distributions (training releases vs R5)...")
 print(
     f"  Training releases: mean={train_labels.mean():.3f}s, std={train_labels.std():.3f}s"
 )
-print(f"  R5 test set:       mean={r5_test_labels.mean():.3f}s, std={r5_test_labels.std():.3f}s")
+print(
+    f"  R5 test set:       mean={r5_test_labels.mean():.3f}s, std={r5_test_labels.std():.3f}s")
 
 # KS test for distribution shift
 r5_stat, r5_pval = ks_2samp(train_labels, r5_test_labels)
@@ -331,7 +337,8 @@ extreme_outliers_per_ch = (X.abs() > 5).any(dim=(0, 2)).sum().item()
 
 print(f"\nPer-Channel Analysis:")
 print(f"  - Flat channels (std < 0.01): {flat_channels}")
-print(f"  - Channels with extreme outliers (|value| > 5): {extreme_outliers_per_ch}")
+print(
+    f"  - Channels with extreme outliers (|value| > 5): {extreme_outliers_per_ch}")
 
 # Check overall normalization
 overall_mean = X.mean().item()
@@ -360,10 +367,12 @@ channel_means_np = channel_means.numpy()
 bars = ax.bar(
     range(129), channel_means_np, color="#2E86AB", edgecolor="black", linewidth=0.3
 )
-ax.axhline(0, color="red", linestyle="--", linewidth=1, alpha=0.7, label="Expected: 0")
+ax.axhline(0, color="red", linestyle="--",
+           linewidth=1, alpha=0.7, label="Expected: 0")
 ax.set_xlabel("Channel Index", fontsize=11)
 ax.set_ylabel("Mean", fontsize=11)
-ax.set_title("Per-Channel Mean (should be ≈ 0)", fontsize=13, fontweight="bold")
+ax.set_title("Per-Channel Mean (should be ≈ 0)",
+             fontsize=13, fontweight="bold")
 ax.legend(fontsize=9)
 ax.grid(alpha=0.3, axis="y")
 

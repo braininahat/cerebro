@@ -30,7 +30,7 @@ from lightning.pytorch import Trainer
 from omegaconf import OmegaConf
 
 from cerebro.callbacks.model_autopsy import ModelAutopsyCallback
-from cerebro.data.challenge1 import Challenge1DataModule
+from cerebro.data.hbn import HBNDataModule
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ def run_autopsy(
     # Load data
     print("Loading data...")
     data_config = config.get("data", {})
-    datamodule = Challenge1DataModule(**data_config)
+    datamodule = HBNDataModule(**data_config)
     datamodule.setup("fit")
 
     # Create a minimal trainer (just for callback compatibility)
@@ -156,7 +156,8 @@ def run_autopsy(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run model autopsy on a checkpoint")
+    parser = argparse.ArgumentParser(
+        description="Run model autopsy on a checkpoint")
 
     parser.add_argument(
         "--checkpoint",
