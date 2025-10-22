@@ -17,6 +17,7 @@ class VQNSP(pl.LightningModule):
                  pretrained=False,
                  as_tokenizer=False,
                  pretrained_weight=None,
+                 scale_eeg=False,
                  # Codebook parameters
                  # Number of codebook vectors (n_embed)
                  n_code=8192,
@@ -336,8 +337,8 @@ class VQNSP(pl.LightningModule):
         else:
             x = batch
         input_chans = None
-
-        # x = self._scale_input_like_engine(x)   # /100 as in engine
+        if self.hparams.scale_eeg:
+            x = self._scale_input_like_engine(x)   # /100 as in engine
         loss, log = self(x, input_chans)
 
         # log like engine (both detailed and total)
@@ -367,7 +368,9 @@ class VQNSP(pl.LightningModule):
             x = batch
 
         input_chans = None
-        # x = self._scale_input_like_engine(x)   # /100 as in engine
+
+        if self.hparams.scale_eeg:
+            x = self._scale_input_like_engine(x)   # /100 as in engine
         loss, log = self(x, input_chans)
 
         # Log a dedicated monitor key like your PL callback expects
