@@ -84,7 +84,7 @@ trainer:
         - pretrain
       notes: "Training pretrain"
       save_dir: outputs/logs/pretrain
-      mode: disabled # "online" or "offline" or "disabled" (for debugging without internet)
+      mode: online # "online" or "offline" or "disabled" (for debugging without internet)
 
   # Callbacks
   callbacks:
