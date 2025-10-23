@@ -219,7 +219,7 @@ wandb/
 
 *.pt
 weights/
-data/
+/data/
 .vscode/
 .python-version
 response_time_distribution.png
