@@ -13,9 +13,12 @@ Usage:
 """
 
 import argparse
+import atexit
 import glob
 import json
 import os
+import signal
+import sys
 from pathlib import Path
 from typing import Dict, List
 
@@ -25,6 +28,29 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from joblib import Parallel, delayed
+
+# Global variable for cleanup
+_h5_file_handle = None
+
+def _cleanup_handler(signum=None, frame=None):
+    """Ensure HDF5 file is properly closed on exit or interrupt."""
+    global _h5_file_handle
+    if _h5_file_handle is not None:
+        print("\n⚠ Interrupt received. Flushing and closing HDF5 file...")
+        try:
+            _h5_file_handle.flush()
+            _h5_file_handle.close()
+            print("✓ HDF5 file closed safely")
+        except Exception as e:
+            print(f"Error closing HDF5 file: {e}")
+        _h5_file_handle = None
+    if signum is not None:
+        sys.exit(1)
+
+# Register cleanup handlers
+signal.signal(signal.SIGINT, _cleanup_handler)  # Ctrl+C
+signal.signal(signal.SIGTERM, _cleanup_handler)  # kill command
+atexit.register(_cleanup_handler)  # Normal exit
 
 
 def extract_metadata_from_path(file_path: str) -> Dict:
@@ -85,6 +111,11 @@ def process_single_file(file_path: str, idx: int) -> Dict:
         # Get data
         data = raw.get_data()  # (n_channels, n_samples)
 
+        # Clean up to prevent memory leaks
+        del raw
+        import gc
+        gc.collect()
+
         return {
             'data': data,
             'metadata': metadata,
@@ -93,6 +124,8 @@ def process_single_file(file_path: str, idx: int) -> Dict:
         }
 
     except Exception as e:
+        import gc
+        gc.collect()  # Clean up even on error
         return {
             'data': None,
             'metadata': {'path': file_path, 'recording_id': idx},
@@ -133,8 +166,29 @@ def create_hdf5_dataset(
 
     # Find all EDF files
     print("Scanning for EDF files...")
-    edf_files = sorted(glob.glob(os.path.join(
-        tuh_dir, "**/*.edf"), recursive=True))
+
+    # OPTION 1: Use cached file list if available (fastest - instant)
+    cache_file = output_hdf5.replace('.h5', '_filelist.txt')
+    if os.path.exists(cache_file):
+        print(f"Loading cached file list from {cache_file}")
+        with open(cache_file, 'r') as f:
+            edf_files = [line.strip() for line in f]
+    else:
+        # OPTION 2: Use find command (much faster than glob for large directories)
+        print("Using find command for fast filesystem scan...")
+        import subprocess
+        result = subprocess.run(
+            ['find', tuh_dir, '-name', '*.edf', '-type', 'f'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        edf_files = sorted(result.stdout.strip().split('\n'))
+
+        # Cache the file list for next time
+        with open(cache_file, 'w') as f:
+            f.write('\n'.join(edf_files))
+        print(f"Cached file list to {cache_file}")
 
     # Limit to max_files if specified
     if max_files is not None:
@@ -148,13 +202,24 @@ def create_hdf5_dataset(
     start_idx = 0
     if resume and os.path.exists(output_hdf5):
         with h5py.File(output_hdf5, 'r') as f:
-            if 'metadata' in f:
-                start_idx = len(f['metadata'])
-                print(f"Resuming from file {start_idx}/{len(edf_files)}")
+            if 'data' in f:
+                # Find the maximum recording_id to resume from next index
+                existing_keys = list(f['data'].keys())
+                if existing_keys:
+                    # Extract recording IDs and find max
+                    recording_ids = [int(k.split('_')[1]) for k in existing_keys]
+                    max_id = max(recording_ids)
+                    start_idx = max_id + 1
+                    print(f"Found {len(existing_keys)} existing recordings (up to recording_{max_id:06d})")
+                    print(f"Resuming from file index {start_idx}/{len(edf_files)}")
 
     # Open HDF5 file
     mode = 'a' if (resume and os.path.exists(output_hdf5)) else 'w'
     h5f = h5py.File(output_hdf5, mode)
+
+    # Register for cleanup on interrupt
+    global _h5_file_handle
+    _h5_file_handle = h5f
 
     # Create groups if they don't exist
     if 'data' not in h5f:
@@ -163,7 +228,9 @@ def create_hdf5_dataset(
         h5f.create_group('metadata')
 
     # Process files in batches
-    batch_size = 100
+    # Larger batch = less HDF5 write overhead, better throughput
+    # Conservative batch size to prevent OOM killer (previous 10k batch caused OOM)
+    batch_size = 3000  # Each file ~50MB, 3k files = ~150GB peak (safe margin)
     metadata_records = []
     errors = []
 
@@ -176,44 +243,69 @@ def create_hdf5_dataset(
             f"\nProcessing batch {batch_start}-{batch_end} / {len(edf_files)}")
 
         # Process batch in parallel
-        results = Parallel(n_jobs=n_jobs)(
+        # FIXED: tqdm wrapper was blocking parallelization - moved outside
+        # Using 48 cores (not all 72) to prevent OOM with large batches
+        # Bottleneck is disk I/O anyway, so fewer workers won't impact speed much
+        effective_jobs = min(n_jobs, 48) if n_jobs == -1 else n_jobs
+        results = Parallel(
+            n_jobs=effective_jobs,
+            prefer='processes',
+            verbose=5,
+            max_nbytes='100M',  # Limit data passing size
+        )(
             delayed(process_single_file)(file_path, idx)
-            for file_path, idx in tqdm(
-                zip(batch_files, batch_indices),
-                total=len(batch_files),
-                desc="Reading EDFs"
-            )
+            for file_path, idx in zip(batch_files, batch_indices)
         )
 
         # Write to HDF5
         print("Writing to HDF5...")
+        write_count = 0
         for result in tqdm(results, desc="Writing"):
             if result['success']:
                 idx = result['metadata']['recording_id']
+                dataset_name = f'recording_{idx:06d}'
 
-                # Store data with compression
-                h5f['data'].create_dataset(
-                    f'recording_{idx:06d}',
-                    data=result['data'],
-                    compression=compression,
-                    compression_opts=compression_level if compression == 'gzip' else None,
-                    dtype='float32',  # Convert to float32 to save space
-                )
+                # Skip if already exists (for resume functionality)
+                if dataset_name in h5f['data']:
+                    continue
 
-                # Store metadata
-                for key, value in result['metadata'].items():
-                    if key == 'ch_names':
-                        value = json.dumps(value)  # Serialize list
-                    if value is not None:
-                        h5f['metadata'].attrs[f'recording_{idx:06d}_{key}'] = value
+                try:
+                    # Store data with compression
+                    h5f['data'].create_dataset(
+                        dataset_name,
+                        data=result['data'],
+                        compression=compression,
+                        compression_opts=compression_level if compression == 'gzip' else None,
+                        dtype='float32',  # Convert to float32 to save space
+                    )
 
-                metadata_records.append(result['metadata'])
+                    # Store metadata
+                    for key, value in result['metadata'].items():
+                        if key == 'ch_names':
+                            value = json.dumps(value)  # Serialize list
+                        if value is not None:
+                            h5f['metadata'].attrs[f'recording_{idx:06d}_{key}'] = value
+
+                    metadata_records.append(result['metadata'])
+                    write_count += 1
+
+                    # Flush every 100 writes to prevent corruption on crash
+                    if write_count % 100 == 0:
+                        h5f.flush()
+
+                except Exception as e:
+                    print(f"Error writing recording_{idx:06d}: {e}")
+                    errors.append({
+                        'metadata': result['metadata'],
+                        'error': f"Write error: {e}",
+                        'success': False
+                    })
             else:
                 errors.append(result)
                 print(
                     f"Error processing {result['metadata']['path']}: {result['error']}")
 
-        # Flush to disk
+        # Final flush to disk
         h5f.flush()
 
     # Create metadata DataFrame and store as table
@@ -239,6 +331,7 @@ def create_hdf5_dataset(
             f"\n{len(errors)} files failed. See {output_hdf5.replace('.h5', '_errors.csv')}")
 
     h5f.close()
+    _h5_file_handle = None  # Unregister after successful close
 
     print(f"\n✓ Processing complete!")
     print(f"  Output: {output_hdf5}")
