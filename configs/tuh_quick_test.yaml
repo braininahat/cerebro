@@ -1,0 +1,164 @@
+# ============================================================================
+# TUH EEG Quick Test Configuration
+# ============================================================================
+# Quick test config to verify TUH processing pipeline before running full dataset.
+#
+# Features:
+#   - Processes only 100 recordings for fast validation
+#   - Automatic channel standardization to 21 common 10-20 EEG channels
+#   - Zarr caching with Blosc compression (resume-capable)
+#   - Checkpoint manifest tracks progress
+#
+# Usage:
+#   1. Set TUH directory (or edit tuh_dir below):
+#      export TUH_DIR=/projects/academic/wenyaoxu/anarghya/research/eeg-data/tuh/tueg/v2.0.1
+#
+#   2. Run quick test:
+#      uv run cerebro fit --config configs/tuh_quick_test.yaml
+#
+#   3. Check cache created:
+#      ls -lh /projects/academic/wenyaoxu/anarghya/research/eeg-data/tuh/tueg/v2.0.1/cache/
+#
+#   4. If successful, run full dataset:
+#      uv run cerebro fit --config configs/labram/codebook_tuh_edf.yaml
+#
+# Expected output:
+#   - Cache: {TUH_DIR}/cache/windows_montage_01_tcp_ar_*.zarr
+#   - Manifest: {TUH_DIR}/cache/windows_montage_01_tcp_ar_*_manifest.parquet
+#   - Metadata: {TUH_DIR}/cache/windows_montage_01_tcp_ar_*_metadata.parquet
+#   - Shape: (N, 21, 200) where N = total windows extracted
+# ============================================================================
+
+# Seed everything for reproducibility
+seed_everything: 42
+
+# Tuning flags
+run_lr_finder: false
+run_batch_size_finder: false
+
+model:
+  class_path: "cerebro.models.labram.tokenizer.VQNSP"
+  init_args:
+    # Model architecture
+    pretrained: false
+    as_tokenizer: false
+    pretrained_weight: null
+
+    # Codebook parameters
+    n_code: 8192
+    code_dim: 32
+
+    # Input configuration (21 channels, 2 seconds @ 100Hz)
+    EEG_size: 200
+    patch_size: 100
+    encoder_depth: 24
+    decoder_depth: 3
+    n_chans: 21  # Standardized 10-20 EEG channels
+
+    # EMA quantizer parameters
+    decay: 0.99
+    learning_rate: 0.0001
+    weight_decay: 0.05
+    scale_eeg: false
+    max_time_window_hint: 2
+
+# Trainer configuration
+trainer:
+  max_epochs: 2  # Short run for testing
+  accelerator: auto
+  devices: 1
+  precision: "32-true"
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 10
+
+  # Logger configuration
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: tuh-eeg-test
+      entity: ubcse-eeg2025
+      name: tuh-quick-test
+      tags:
+        - test
+        - tuh
+        - edf
+      notes: "Quick test of TUH EEG processing pipeline (100 recordings)"
+      save_dir: outputs/logs/tuh-quick-test
+      mode: online
+
+  # Callbacks
+  callbacks:
+    # CheckpointCompatibilityCallback: Fix checkpoints for resuming (must be FIRST)
+    - class_path: cerebro.callbacks.CheckpointCompatibilityCallback
+
+    # ModelCheckpoint: Save best models based on validation loss
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/checkpoints/tuh-quick-test
+        filename: tuh-test-{epoch:02d}-{val_tok_loss:.4f}
+        monitor: val_tok_loss
+        mode: min
+        save_top_k: 1
+        save_last: true
+
+    # TQDMProgressBar: Keep progress bars after epoch completion
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    # RichModelSummary: Display model architecture
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 1
+
+data:
+  class_path: cerebro.data.tuh_edf.TUHEDFDataModule
+  init_args:
+    # TUH directory (containing edf/ subdirectory)
+    tuh_dir: ${oc.env:TUH_DIR,/projects/academic/wenyaoxu/anarghya/research/eeg-data/tuh/tueg/v2.0.1}
+
+    # Target variable (null for unsupervised tokenizer training)
+    target_name: null
+
+    # Dataset filters
+    montages: ['01_tcp_ar']
+    # Channels are automatically standardized to 21 common 10-20 EEG channels:
+    # FP1, FP2, F7, F3, FZ, F4, F8, A1, T3, C3, CZ, C4, T4, A2,
+    # T5, P3, PZ, P4, T6, O1, O2
+
+    # DataLoader parameters
+    batch_size: 256  # Smaller batch for testing
+    num_workers: 8   # Reduced for testing
+
+    # Train/val/test splits (subject-level)
+    train_ratio: 0.8
+    val_ratio: 0.1
+    test_ratio: 0.1
+    seed: 42
+
+    # CRITICAL: Limit to 100 recordings for quick test
+    max_recordings: 100
+    recording_ids: null
+    subjects: null
+    sessions: null
+
+    # Windowing parameters (matching HBN preprocessing)
+    window_size_s: 4.0    # 4-second windows
+    window_stride_s: 2.0  # 2-second stride (50% overlap)
+    crop_size_s: 2.0      # Final 2-second crops from 4s windows
+
+    # Preprocessing parameters (matching HBN)
+    sfreq: 100.0          # Resample to 100Hz
+    apply_bandpass: true  # Apply bandpass filter
+    l_freq: 0.5           # 0.5 Hz highpass
+    h_freq: 49.0          # 49 Hz lowpass (must be < Nyquist = sfreq/2 = 50 Hz)
+    min_recording_duration_s: 4.0  # Filter out recordings < 4s
+
+    # Caching parameters
+    # Zarr format with Blosc compression (zstd level 5)
+    # - Fast: ~1-2 GB/s compression, often faster than uncompressed I/O
+    # - Resume: Checkpoint manifest allows resuming after interruptions
+    # - Space: ~1.2x compression ratio
+    cache_dir: null      # Auto: {tuh_dir}/cache/
+    use_cache: true      # Use cached windows if available

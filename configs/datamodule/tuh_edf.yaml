@@ -9,6 +9,10 @@ data:
 
     # Dataset filters
     montages: ['01_tcp_ar']  # Filter by montage (null = all montages)
+    # Note: Channels are automatically standardized to 21 common 10-20 EEG channels:
+    #   FP1, FP2, F7, F3, FZ, F4, F8, A1, T3, C3, CZ, C4, T4, A2,
+    #   T5, P3, PZ, P4, T6, O1, O2
+    # This ensures all recordings have consistent shape regardless of original channel count (29-36).
 
     # DataLoader parameters
     batch_size: 512
@@ -24,7 +28,7 @@ data:
     recording_ids: null  # Specific recording paths
     subjects: null       # Filter by subject IDs
     sessions: null       # Filter by session IDs
-    max_recordings: null # Max recordings to load (for testing)
+    max_recordings: null # Max recordings to load (for testing, e.g., 100)
 
     # Windowing parameters (matching HBN preprocessing)
     window_size_s: 4.0    # 4-second windows (matching HBN)
@@ -35,9 +39,13 @@ data:
     sfreq: 100.0          # Resample to 100Hz (matching HBN)
     apply_bandpass: true  # Apply bandpass filter
     l_freq: 0.5           # Low frequency cutoff (matching HBN)
-    h_freq: 50.0          # High frequency cutoff (matching HBN)
+    h_freq: 49.0          # High frequency cutoff (must be < Nyquist = sfreq/2 = 50 Hz)
     min_recording_duration_s: 4.0  # Filter out recordings < 4s
 
     # Caching parameters
+    # Cache format: Zarr array with Blosc compression (zstd, level 5)
+    # - Fast: Compression is often faster than uncompressed I/O
+    # - Space: ~1.2x compression ratio (saves 13-20 GB for full dataset)
+    # - Resume: Checkpoint manifest tracks progress, allows resuming after interruptions
     cache_dir: null      # Cache directory (null = tuh_dir/cache)
     use_cache: true      # Use cached windows if available

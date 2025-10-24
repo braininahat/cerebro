@@ -65,14 +65,14 @@ model:
     pretrained_weight: null
 
     # Codebook parameters
-    n_code: 8192  # CODEBOOK_SIZE
-    code_dim: 32  # CODEBOOK_EMD_DIM
+    n_code: 8192 # CODEBOOK_SIZE
+    code_dim: 32 # CODEBOOK_EMD_DIM
 
     # Input configuration
-    EEG_size: 200     # INPUT_SIZE (2 seconds @ 100Hz)
-    patch_size: 100   # 1 second patches @ 100Hz
+    EEG_size: 200 # INPUT_SIZE (2 seconds @ 100Hz)
+    patch_size: 100 # 1 second patches @ 100Hz
     encoder_depth: 24 # ENCODER_DEPTH
-    decoder_depth: 3  # DECODER_DEPTH
+    decoder_depth: 3 # DECODER_DEPTH
 
     # EMA quantizer parameters
     decay: 0.99 # EMA_DECAY
@@ -81,8 +81,8 @@ model:
     scale_eeg: false
 
     # Channel and temporal hints
-    # TUH 01_tcp_ar montage has 22 channels
-    n_chans: null  # Will be inferred from data
+    # TUH channels are standardized to 21 common 10-20 EEG channels
+    n_chans: 21 # Standardized channel count (automatic channel selection)
     max_time_window_hint: 2
 
 # Trainer configuration
@@ -153,7 +153,9 @@ data:
     target_name: null
 
     # Dataset filters
-    montages: ['01_tcp_ar']  # Use consistent montage (22 channels)
+    montages: ["01_tcp_ar"] # Use consistent montage
+    # Note: Channels are automatically standardized to 21 common 10-20 EEG channels
+    # (FP1, FP2, F7, F3, FZ, F4, F8, A1, T3, C3, CZ, C4, T4, A2, T5, P3, PZ, P4, T6, O1, O2)
 
     # DataLoader parameters
     batch_size: 512
@@ -169,20 +171,20 @@ data:
     recording_ids: null
     subjects: null
     sessions: null
-    max_recordings: null  # Set to small number (e.g., 100) for testing
+    max_recordings: null # Set to small number (e.g., 100) for testing
 
     # Windowing parameters (matching HBN preprocessing)
-    window_size_s: 4.0    # 4-second windows (matching HBN)
-    window_stride_s: 2.0  # 2-second stride = 2s overlap (matching HBN)
-    crop_size_s: 2.0      # Final 2-second crops from 4s windows (matching HBN)
+    window_size_s: 4.0 # 4-second windows (matching HBN)
+    window_stride_s: 2.0 # 2-second stride = 2s overlap (matching HBN)
+    crop_size_s: 2.0 # Final 2-second crops from 4s windows (matching HBN)
 
     # Preprocessing parameters (matching HBN)
-    sfreq: 100.0          # Resample to 100Hz (matching HBN)
-    apply_bandpass: true  # Apply bandpass filter (0.5-50 Hz)
-    l_freq: 0.5           # Low frequency cutoff (matching HBN)
-    h_freq: 50.0          # High frequency cutoff (matching HBN)
-    min_recording_duration_s: 4.0  # Filter out recordings < 4s
+    sfreq: 100.0 # Resample to 100Hz (matching HBN)
+    apply_bandpass: true # Apply bandpass filter (0.5-49 Hz)
+    l_freq: 0.5 # Low frequency cutoff (matching HBN)
+    h_freq: 50.0 # High frequency cutoff (must be < Nyquist = sfreq/2 = 50 Hz)
+    min_recording_duration_s: 4.0 # Filter out recordings < 4s
 
     # Caching parameters
-    cache_dir: null      # Auto: {tuh_dir}/cache/
-    use_cache: true      # Use cached windows if available
+    cache_dir: null # Auto: {tuh_dir}/cache/
+    use_cache: true # Use cached windows if available
