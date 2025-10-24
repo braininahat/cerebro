@@ -1,0 +1,40 @@
+# Test config for TUH EDF DataModule with batch processing
+# Use this to test memory-efficient preprocessing
+
+class_path: cerebro.data.tuh_edf.TUHEDFDataModule
+
+init_args:
+  # Data paths
+  tuh_dir: /projects/academic/wenyaoxu/anarghya/research/eeg-data/tuh/tueg/v2.0.1
+  cache_dir: null  # Auto: {tuh_dir}/cache
+
+  # Filtering
+  montages: ['01_tcp_ar']  # Standard montage only
+  max_recordings: 500  # Test with small subset first (remove for full dataset)
+  min_recording_duration_s: 4.0
+
+  # Preprocessing (matching HBN)
+  window_size_s: 4.0
+  window_stride_s: 2.0
+  crop_size_s: 2.0
+  sfreq: 100.0
+  apply_bandpass: true
+  l_freq: 0.5
+  h_freq: 50.0
+
+  # Memory management (CRITICAL FOR 1.7 TB DATASET)
+  preprocessing_batch_size: 100  # Adjust based on available RAM:
+    # - 50-100: Safe for 128 GB RAM
+    # - 20-50: Safe for 64 GB RAM
+    # - 10-20: Safe for 32 GB RAM
+  use_cache: true
+
+  # DataLoader settings
+  batch_size: 256
+  num_workers: 8
+
+  # Train/val/test splits (subject-level)
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  seed: 42

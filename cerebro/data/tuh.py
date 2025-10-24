@@ -6,14 +6,22 @@ Temple University Hospital EEG Corpus stored in HDF5 format.
 """
 
 import json
+import logging
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import h5py
+import lightning as L
 import mne
 import numpy as np
 import pandas as pd
 import torch
 from braindecode.datasets import BaseDataset, BaseConcatDataset
+from sklearn.model_selection import train_test_split
+from sklearn.utils import check_random_state
+from torch.utils.data import DataLoader, Dataset
+
+logger = logging.getLogger(__name__)
 
 
 class TUHRecording(BaseDataset):
@@ -314,3 +322,236 @@ def load_tuh_dataset(
     >>> train, val, test = dataset.split_by_subjects(0.7, 0.15)
     """
     return TUHDataset(hdf5_path, target_name=target_name, **kwargs)
+
+
+def collate_fn(batch):
+    """Collate function that handles (x, y, i) tuples from braindecode datasets.
+
+    Args:
+        batch: List of (x, y, i) tuples from BaseConcatDataset
+
+    Returns:
+        Tuple of (x_batch, y_batch) tensors
+    """
+    x_batch = torch.stack([torch.from_numpy(item[0]).float() for item in batch], dim=0)
+    y_batch = torch.stack([torch.tensor(item[1]).float() for item in batch], dim=0)
+    return x_batch, y_batch
+
+
+class TUHDataModule(L.LightningDataModule):
+    """Lightning DataModule for TUH EEG dataset.
+
+    Provides train/val/test splits with DataLoaders for TUH EEG data
+    stored in HDF5 format.
+
+    Args:
+        hdf5_path: Path to HDF5 file (or virtual HDF5 file)
+        target_name: Target variable name (e.g., 'age', 'gender')
+        batch_size: Batch size for DataLoaders (default: 512)
+        num_workers: Number of workers for DataLoaders (default: 8)
+        train_ratio: Ratio of subjects for training (default: 0.8)
+        val_ratio: Ratio of subjects for validation (default: 0.1)
+        test_ratio: Ratio of subjects for test (default: 0.1)
+        seed: Random seed for splits (default: 42)
+        recording_ids: Specific recording IDs to load (optional)
+        subjects: Filter by subject IDs (optional)
+        sessions: Filter by session numbers (optional)
+        montages: Filter by montage type (optional)
+
+    Example:
+        >>> datamodule = TUHDataModule(
+        ...     hdf5_path='data/tuh/tuh_eeg.h5',
+        ...     target_name='age',
+        ...     batch_size=256,
+        ...     num_workers=4,
+        ... )
+        >>> datamodule.setup()
+        >>> train_loader = datamodule.train_dataloader()
+    """
+
+    def __init__(
+        self,
+        hdf5_path: str,
+        target_name: Optional[str] = None,
+        batch_size: int = 512,
+        num_workers: int = 8,
+        train_ratio: float = 0.8,
+        val_ratio: float = 0.1,
+        test_ratio: float = 0.1,
+        seed: int = 42,
+        recording_ids: Optional[List[int]] = None,
+        subjects: Optional[List[str]] = None,
+        sessions: Optional[List[int]] = None,
+        montages: Optional[List[str]] = None,
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+
+        # Validate ratios
+        if not np.isclose(train_ratio + val_ratio + test_ratio, 1.0):
+            raise ValueError(
+                f"train_ratio + val_ratio + test_ratio must sum to 1.0, "
+                f"got {train_ratio + val_ratio + test_ratio}"
+            )
+
+        # Convert to Path
+        self.hdf5_path = Path(hdf5_path)
+        if not self.hdf5_path.exists():
+            raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
+
+        # Will be populated in setup()
+        self.train_set = None
+        self.val_set = None
+        self.test_set = None
+        self.full_dataset = None
+
+    @property
+    def batch_size(self) -> int:
+        """Batch size for DataLoaders (for Lightning compatibility)."""
+        return self.hparams.batch_size
+
+    @batch_size.setter
+    def batch_size(self, value: int):
+        """Update batch size (modified by Lightning's batch size scaler)."""
+        self.hparams.batch_size = value
+
+    def setup(self, stage: Optional[str] = None):
+        """Setup datasets with subject-level splits.
+
+        Args:
+            stage: 'fit', 'validate', 'test', or 'predict' (unused, loads all)
+        """
+        logger.info("\n" + "="*60)
+        logger.info("[bold cyan]TUH EEG DATA SETUP[/bold cyan]")
+        logger.info("="*60)
+
+        # Load full dataset
+        logger.info(f"Loading HDF5 file: {self.hdf5_path}")
+        self.full_dataset = TUHDataset(
+            hdf5_path=str(self.hdf5_path),
+            target_name=self.hparams.target_name,
+            recording_ids=self.hparams.recording_ids,
+            subjects=self.hparams.subjects,
+            sessions=self.hparams.sessions,
+            montages=self.hparams.montages,
+        )
+
+        logger.info(f"[bold]Total recordings:[/bold] {len(self.full_dataset)}")
+
+        # Get metadata
+        metadata = self.full_dataset.get_metadata()
+        logger.info(f"[bold]Metadata columns:[/bold] {list(metadata.columns)}")
+
+        # Display sample metadata
+        logger.info(f"\n[bold]Sample metadata:[/bold]")
+        logger.info(metadata.head().to_string())
+
+        # Display target statistics if available
+        if self.hparams.target_name and self.hparams.target_name in metadata.columns:
+            logger.info(f"\n[bold]Target '{self.hparams.target_name}' statistics:[/bold]")
+            logger.info(f"  Mean: {metadata[self.hparams.target_name].mean():.4f}")
+            logger.info(f"  Std: {metadata[self.hparams.target_name].std():.4f}")
+            logger.info(f"  Min: {metadata[self.hparams.target_name].min():.4f}")
+            logger.info(f"  Max: {metadata[self.hparams.target_name].max():.4f}")
+
+        # Create subject-level splits
+        self._create_splits(metadata)
+
+    def _create_splits(self, metadata: pd.DataFrame):
+        """Create subject-level train/val/test splits."""
+        logger.info("\n[bold cyan]SPLITTING DATA[/bold cyan]")
+
+        # Get unique subjects
+        subjects = metadata['subject_id'].unique()
+        logger.info(f"[bold]Total subjects:[/bold] {len(subjects)}")
+
+        # Set random state
+        rng = check_random_state(self.hparams.seed)
+
+        # Split: train / (val + test)
+        train_subj, val_test_subj = train_test_split(
+            subjects,
+            test_size=(self.hparams.val_ratio + self.hparams.test_ratio),
+            random_state=rng,
+            shuffle=True
+        )
+
+        # Split: val / test
+        val_subj, test_subj = train_test_split(
+            val_test_subj,
+            test_size=self.hparams.test_ratio / (self.hparams.val_ratio + self.hparams.test_ratio),
+            random_state=check_random_state(self.hparams.seed + 1),
+            shuffle=True
+        )
+
+        logger.info(f"Train subjects: {len(train_subj)}")
+        logger.info(f"Val subjects: {len(val_subj)}")
+        logger.info(f"Test subjects: {len(test_subj)}")
+
+        # Create datasets for each split
+        self.train_set = TUHDataset(
+            hdf5_path=str(self.hdf5_path),
+            target_name=self.hparams.target_name,
+            subjects=train_subj.tolist(),
+        )
+
+        self.val_set = TUHDataset(
+            hdf5_path=str(self.hdf5_path),
+            target_name=self.hparams.target_name,
+            subjects=val_subj.tolist(),
+        )
+
+        self.test_set = TUHDataset(
+            hdf5_path=str(self.hdf5_path),
+            target_name=self.hparams.target_name,
+            subjects=test_subj.tolist(),
+        )
+
+        logger.info(f"\n[bold]Recording counts:[/bold]")
+        logger.info(f"  Train: {len(self.train_set)}")
+        logger.info(f"  Val: {len(self.val_set)}")
+        logger.info(f"  Test: {len(self.test_set)}")
+
+    def train_dataloader(self):
+        """Create training DataLoader with persistence."""
+        if self.train_set is None:
+            raise RuntimeError("train_set is None. Did you call setup()?")
+
+        return DataLoader(
+            self.train_set,
+            batch_size=self.hparams.batch_size,
+            shuffle=True,
+            num_workers=self.hparams.num_workers,
+            collate_fn=collate_fn,
+            persistent_workers=self.hparams.num_workers > 0,
+            pin_memory=True,
+        )
+
+    def val_dataloader(self):
+        """Create validation DataLoader with persistence."""
+        if self.val_set is None:
+            raise RuntimeError("val_set is None. Did you call setup()?")
+
+        return DataLoader(
+            self.val_set,
+            batch_size=self.hparams.batch_size,
+            shuffle=False,
+            num_workers=self.hparams.num_workers,
+            collate_fn=collate_fn,
+            persistent_workers=self.hparams.num_workers > 0,
+            pin_memory=True,
+        )
+
+    def test_dataloader(self):
+        """Create test DataLoader."""
+        if self.test_set is None:
+            raise RuntimeError("test_set is None. Did you call setup()?")
+
+        return DataLoader(
+            self.test_set,
+            batch_size=self.hparams.batch_size,
+            shuffle=False,
+            num_workers=self.hparams.num_workers,
+            collate_fn=collate_fn,
+            pin_memory=True,
+        )

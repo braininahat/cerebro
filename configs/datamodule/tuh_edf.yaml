@@ -1,0 +1,43 @@
+data:
+  class_path: cerebro.data.tuh_edf.TUHEDFDataModule
+  init_args:
+    # TUH directory (containing edf/ subdirectory)
+    tuh_dir: ${oc.env:TUH_DIR,/projects/academic/wenyaoxu/anarghya/research/eeg-data/tuh/tueg/v2.0.1}
+
+    # Target variable (null for unsupervised)
+    target_name: null
+
+    # Dataset filters
+    montages: ['01_tcp_ar']  # Filter by montage (null = all montages)
+
+    # DataLoader parameters
+    batch_size: 512
+    num_workers: 16
+
+    # Train/val/test splits (subject-level)
+    train_ratio: 0.8
+    val_ratio: 0.1
+    test_ratio: 0.1
+    seed: 42
+
+    # Optional filters
+    recording_ids: null  # Specific recording paths
+    subjects: null       # Filter by subject IDs
+    sessions: null       # Filter by session IDs
+    max_recordings: null # Max recordings to load (for testing)
+
+    # Windowing parameters (matching HBN preprocessing)
+    window_size_s: 4.0    # 4-second windows (matching HBN)
+    window_stride_s: 2.0  # 2-second stride = 2s overlap (matching HBN)
+    crop_size_s: 2.0      # Final 2-second crops from 4s windows (matching HBN)
+
+    # Preprocessing parameters (matching HBN)
+    sfreq: 100.0          # Resample to 100Hz (matching HBN)
+    apply_bandpass: true  # Apply bandpass filter
+    l_freq: 0.5           # Low frequency cutoff (matching HBN)
+    h_freq: 50.0          # High frequency cutoff (matching HBN)
+    min_recording_duration_s: 4.0  # Filter out recordings < 4s
+
+    # Caching parameters
+    cache_dir: null      # Cache directory (null = tuh_dir/cache)
+    use_cache: true      # Use cached windows if available

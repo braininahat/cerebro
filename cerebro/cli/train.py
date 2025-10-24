@@ -27,8 +27,6 @@ Usage:
 
 from cerebro.utils.tuning import run_batch_size_finder, run_lr_finder
 from cerebro.utils.logging import setup_logging
-from cerebro.models.challenge1 import Challenge1Module
-from cerebro.data.hbn import HBNDataModule
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +40,7 @@ torch.set_float32_matmul_precision(
 )  # Trades minimal precision for 30-50% speedup
 
 # Import modules to register with CLI
+# (Importing modules makes them available via class_path in configs)
 
 logger = logging.getLogger(__name__)
 
@@ -447,7 +446,7 @@ def cli_main():
     """
     CerebroCLI(
         model_class=None,
-        datamodule_class=HBNDataModule,
+        datamodule_class=None,
         save_config_callback=None,  # Wandb handles config saving
         # Use OmegaConf for interpolation
         parser_kwargs={"parser_mode": "omegaconf"},
