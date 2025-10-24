@@ -42,7 +42,7 @@ seed_everything: 42
 
 # Tuning flags
 run_lr_finder: false
-run_batch_size_finder: false
+run_batch_size_finder: true
 
 # LR finder parameters
 lr_finder_min: 1.0e-07
@@ -99,7 +99,7 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.WandbLogger
     init_args:
-      project: tuh-eeg-tokenizer
+      project: eeg-challenge-2025
       entity: ubcse-eeg2025
       name: tokenizer-tuh-edf
       tags:
@@ -108,7 +108,7 @@ trainer:
         - edf
       notes: "Training Tokenizer on TUH EEG Dataset (EDF backend with caching)"
       save_dir: outputs/logs/tokenizer-tuh-edf
-      mode: disabled
+      mode: online
 
   # Callbacks
   callbacks:

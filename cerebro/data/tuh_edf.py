@@ -14,6 +14,7 @@ directly from EDF files with preprocessing and window caching support.
 Similar to HBNDataModule but optimized for massive TUH dataset (1.7TB).
 """
 
+import atexit
 import gc
 import json
 import logging
@@ -21,6 +22,8 @@ import multiprocessing as mp
 import os
 import pickle
 import psutil
+import signal
+import sys
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
@@ -117,6 +120,45 @@ class AdaptiveWorkerManager:
                 )
 
         return self.current_workers
+
+
+class GracefulInterruptHandler:
+    """Context manager to handle SIGINT/SIGTERM gracefully and cleanup resources.
+
+    Prevents zombie processes and ensures Zarr arrays are flushed on interrupt.
+
+    Usage:
+        with GracefulInterruptHandler() as handler:
+            # Do work
+            if handler.interrupted:
+                # Cleanup and exit
+    """
+
+    def __init__(self):
+        self.interrupted = False
+        self.original_sigint = None
+        self.original_sigterm = None
+
+    def __enter__(self):
+        """Set up signal handlers."""
+        self.original_sigint = signal.signal(signal.SIGINT, self._signal_handler)
+        self.original_sigterm = signal.signal(signal.SIGTERM, self._signal_handler)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Restore original signal handlers."""
+        if self.original_sigint is not None:
+            signal.signal(signal.SIGINT, self.original_sigint)
+        if self.original_sigterm is not None:
+            signal.signal(signal.SIGTERM, self.original_sigterm)
+        return False  # Don't suppress exceptions
+
+    def _signal_handler(self, signum, frame):
+        """Handle interrupt signals."""
+        sig_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+        logger.warning(f"\n[yellow]⚠️  Received {sig_name} - gracefully shutting down...[/yellow]")
+        self.interrupted = True
+        # Don't raise KeyboardInterrupt - let the loop handle it
 
 
 # ============================================================================
@@ -698,6 +740,24 @@ class TUHEDFDataModule(L.LightningDataModule):
             self.metadata = pd.read_parquet(metadata_path)
             logger.info(f"[green]✓[/green] Loaded {len(self.metadata)} windows from cache")
 
+            # Validate cache integrity: check Zarr array size matches metadata
+            zarr_array_check = zarr.open(str(zarr_path), mode='r')
+            if zarr_array_check.shape[0] != len(self.metadata):
+                logger.error(
+                    f"[red]CACHE CORRUPTION DETECTED![/red]\n"
+                    f"  Zarr array: {zarr_array_check.shape[0]} windows\n"
+                    f"  Metadata: {len(self.metadata)} windows\n"
+                    f"  This usually means the Zarr array wasn't flushed during the previous run.\n"
+                    f"  Solution: Delete corrupted cache files:\n"
+                    f"    rm -r {zarr_path}\n"
+                    f"    rm {metadata_path}\n"
+                    f"  Then re-run to regenerate cache."
+                )
+                raise ValueError(
+                    f"Cache corruption: Zarr has {zarr_array_check.shape[0]} windows "
+                    f"but metadata has {len(self.metadata)}. Delete cache and regenerate."
+                )
+
             # Store paths for lazy loading
             self.zarr_path = zarr_path
         else:
@@ -870,64 +930,102 @@ class TUHEDFDataModule(L.LightningDataModule):
         # Adaptive worker manager for memory monitoring
         worker_mgr = AdaptiveWorkerManager(n_workers, memory_threshold_gb=340)
 
-        # Process recordings in batches
-        with tqdm(total=len(recordings_to_process), desc="Processing", unit="rec") as pbar:
-            for batch_start in range(0, len(recordings_to_process), batch_size):
-                batch_end = min(batch_start + batch_size, len(recordings_to_process))
-                batch = recordings_to_process[batch_start:batch_end]
+        # Register emergency cleanup for Zarr array (atexit fallback)
+        def emergency_cleanup():
+            """Emergency cleanup if process exits unexpectedly."""
+            try:
+                if zarr_array is not None:
+                    zarr_array.flush()
+                    logger.info("[yellow]⚠️  Emergency cleanup: Flushed Zarr array[/yellow]")
+            except Exception as e:
+                logger.error(f"[red]Emergency cleanup failed: {e}[/red]")
 
-                # Adaptive worker count based on memory pressure
-                current_workers = worker_mgr.get_worker_count()
+        atexit.register(emergency_cleanup)
 
-                # Parallel processing of batch
-                batch_results = Parallel(n_jobs=current_workers, backend='loky')(
-                    delayed(self._process_single_recording)(ds, file_path)
-                    for ds, file_path in batch
-                )
+        # Process recordings in batches with graceful interrupt handling
+        with GracefulInterruptHandler() as interrupt_handler:
+            with tqdm(total=len(recordings_to_process), desc="Processing", unit="rec") as pbar:
+                for batch_start in range(0, len(recordings_to_process), batch_size):
+                    # Check for interrupt signal
+                    if interrupt_handler.interrupted:
+                        logger.warning(f"\n[yellow]⚠️  Interrupt detected at batch {batch_start}/{len(recordings_to_process)}[/yellow]")
+                        logger.info(f"[cyan]Saving progress before exit...[/cyan]")
+                        break
+                    batch_end = min(batch_start + batch_size, len(recordings_to_process))
+                    batch = recordings_to_process[batch_start:batch_end]
 
-                # Sequential write to Zarr (cannot parallelize append operations)
-                for (ds, file_path), (windows_data, num_windows, metadata) in zip(batch, batch_results):
+                    # Adaptive worker count based on memory pressure
+                    current_workers = worker_mgr.get_worker_count()
+
+                    # Parallel processing of batch with timeout for interrupts
                     try:
-                        if num_windows > 0:
-                            # Validate shape matches Zarr array
-                            expected_shape = (num_windows, zarr_array.shape[1], zarr_array.shape[2])
-                            if windows_data.shape != expected_shape:
-                                error_msg = f"Shape mismatch: expected {expected_shape}, got {windows_data.shape}"
-                                logger.warning(f"[yellow]Skipping {Path(file_path).name}: {error_msg}[/yellow]")
-                                checkpoint_mgr.mark_failed(file_path, ds.description.to_dict(), error_msg)
+                        batch_results = Parallel(n_jobs=current_workers, backend='loky')(
+                            delayed(self._process_single_recording)(ds, file_path)
+                            for ds, file_path in batch
+                        )
+                    except KeyboardInterrupt:
+                        logger.warning("[yellow]⚠️  KeyboardInterrupt during parallel processing[/yellow]")
+                        interrupt_handler.interrupted = True
+                        break
+
+                    # Sequential write to Zarr (cannot parallelize append operations)
+                    for (ds, file_path), (windows_data, num_windows, metadata) in zip(batch, batch_results):
+                        try:
+                            if num_windows > 0:
+                                # Validate shape matches Zarr array
+                                expected_shape = (num_windows, zarr_array.shape[1], zarr_array.shape[2])
+                                if windows_data.shape != expected_shape:
+                                    error_msg = f"Shape mismatch: expected {expected_shape}, got {windows_data.shape}"
+                                    logger.warning(f"[yellow]Skipping {Path(file_path).name}: {error_msg}[/yellow]")
+                                    checkpoint_mgr.mark_failed(file_path, ds.description.to_dict(), error_msg)
+                                else:
+                                    # Append to Zarr array (thread-safe, sequential)
+                                    zarr_array.append(windows_data, axis=0)
+                                    all_metadata.extend(metadata)
+                                    total_windows_written += num_windows
+
+                                    # Mark as completed
+                                    checkpoint_mgr.mark_completed(file_path, ds.description.to_dict(), num_windows)
                             else:
-                                # Append to Zarr array (thread-safe, sequential)
-                                zarr_array.append(windows_data, axis=0)
-                                all_metadata.extend(metadata)
-                                total_windows_written += num_windows
+                                logger.warning(f"[yellow]No windows generated for {Path(file_path).name}[/yellow]")
+                                checkpoint_mgr.mark_failed(file_path, ds.description.to_dict(), "No windows generated")
 
-                                # Mark as completed
-                                checkpoint_mgr.mark_completed(file_path, ds.description.to_dict(), num_windows)
-                        else:
-                            logger.warning(f"[yellow]No windows generated for {Path(file_path).name}[/yellow]")
-                            checkpoint_mgr.mark_failed(file_path, ds.description.to_dict(), "No windows generated")
+                        except Exception as e:
+                            logger.error(f"[red]Failed to write {Path(file_path).name}: {e}[/red]")
+                            checkpoint_mgr.mark_failed(file_path, {}, str(e))
 
-                    except Exception as e:
-                        logger.error(f"[red]Failed to write {Path(file_path).name}: {e}[/red]")
-                        checkpoint_mgr.mark_failed(file_path, {}, str(e))
+                    # Update progress
+                    pbar.update(len(batch))
+                    pbar.set_postfix_str(f"{total_windows_written} windows")
 
-                # Update progress
-                pbar.update(len(batch))
-                pbar.set_postfix_str(f"{total_windows_written} windows")
+                    # Save checkpoint periodically
+                    if (batch_end % checkpoint_interval) < batch_size:
+                        zarr_array.flush()  # Force write to disk before saving metadata
+                        checkpoint_mgr.save_manifest()
+                        pd.DataFrame(all_metadata).to_parquet(metadata_path, index=False)
+                        logger.info(f"[green]✓[/green] Checkpoint: {batch_end}/{len(recordings_to_process)} ({total_windows_written} windows)")
 
-                # Save checkpoint periodically
-                if (batch_end % checkpoint_interval) < batch_size:
-                    checkpoint_mgr.save_manifest()
-                    pd.DataFrame(all_metadata).to_parquet(metadata_path, index=False)
-                    logger.info(f"[green]✓[/green] Checkpoint: {batch_end}/{len(recordings_to_process)} ({total_windows_written} windows)")
+                    # Explicit garbage collection after each batch
+                    gc.collect()
 
-                # Explicit garbage collection after each batch
-                gc.collect()
+            # Final save: flush Zarr array before saving metadata (always runs, even on interrupt)
+            logger.info(f"\n[bold cyan]FINALIZING ZARR ARRAY[/bold cyan]")
+            zarr_array.flush()  # Critical: ensure all data written to disk
+            logger.info(f"[green]✓[/green] Flushed Zarr array to disk")
 
-        # Final checkpoint save
-        checkpoint_mgr.save_manifest()
-        metadata_df = pd.DataFrame(all_metadata)
-        metadata_df.to_parquet(metadata_path, index=False)
+            checkpoint_mgr.save_manifest()
+            metadata_df = pd.DataFrame(all_metadata)
+            metadata_df.to_parquet(metadata_path, index=False)
+
+            if interrupt_handler.interrupted:
+                logger.warning(f"[yellow]⚠️  Processing interrupted - progress saved![/yellow]")
+                logger.info(f"[cyan]Resume by running again with same config[/cyan]")
+
+        # Unregister emergency cleanup (normal exit)
+        try:
+            atexit.unregister(emergency_cleanup)
+        except Exception:
+            pass  # Python < 3.9 doesn't have unregister
 
         elapsed = time.time() - start_time
 
