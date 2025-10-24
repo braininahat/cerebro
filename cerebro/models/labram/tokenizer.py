@@ -63,11 +63,15 @@ class VQNSP(pl.LightningModule):
         encoder_config['num_classes'] = 0
         encoder_config['patch_size'] = patch_size
         encoder_config['depth'] = encoder_depth
+        encoder_config['n_chans_hint'] = n_chans
+        encoder_config['max_time_window_hint'] = max_time_window_hint
         decoder_config['EEG_size'] = EEG_size // encoder_config['patch_size']
         decoder_config['patch_size'] = 1
         decoder_config['in_chans'] = code_dim
         decoder_config['num_classes'] = 0
         decoder_config['depth'] = decoder_depth
+        decoder_config['n_chans_hint'] = n_chans
+        decoder_config['max_time_window_hint'] = max_time_window_hint
 
         if as_tokenizer:
             assert pretrained and pretrained_weight is not None

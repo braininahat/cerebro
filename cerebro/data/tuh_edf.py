@@ -328,9 +328,18 @@ class LazyZarrWindowDataset(Dataset):
         self.target_col = target_col
 
         assert self.mode in {"train", "val", "test"}, f"Invalid mode: {self.mode}"
-        assert len(self.metadata) == self.zarr_array.shape[0], (
-            f"Metadata length ({len(self.metadata)}) != zarr length ({self.zarr_array.shape[0]})"
-        )
+
+        # Validate zarr_index mapping if present (for split data)
+        if 'zarr_index' in self.metadata.columns:
+            max_idx = self.metadata['zarr_index'].max()
+            assert max_idx < self.zarr_array.shape[0], (
+                f"zarr_index out of bounds: max={max_idx}, zarr_length={self.zarr_array.shape[0]}"
+            )
+        else:
+            # Full dataset case: metadata length should match zarr length
+            assert len(self.metadata) == self.zarr_array.shape[0], (
+                f"Metadata length ({len(self.metadata)}) != zarr length ({self.zarr_array.shape[0]})"
+            )
 
     def __len__(self):
         return len(self.metadata)
@@ -403,11 +412,13 @@ class TUHEDFDataset(BaseConcatDataset):
         sessions: Optional[List[str]] = None,
         montages: Optional[List[str]] = None,
         max_recordings: Optional[int] = None,
+        filelist_cache: Optional[str] = None,
     ):
         self.tuh_dir = Path(tuh_dir)
         self.target_name = target_name
+        self.filelist_cache = Path(filelist_cache) if filelist_cache else None
 
-        # Find all EDF files
+        # Find all EDF files (with optional caching)
         logger.info(f"Scanning TUH directory: {tuh_dir}")
         edf_files = self._find_edf_files(recording_ids, subjects, sessions, montages, max_recordings)
         logger.info(f"Found {len(edf_files)} EDF files")
@@ -433,16 +444,45 @@ class TUHEDFDataset(BaseConcatDataset):
         montages: Optional[List[str]],
         max_recordings: Optional[int],
     ) -> List[Tuple[Path, dict]]:
-        """Find all EDF files matching filters."""
+        """Find all EDF files matching filters, with optional caching."""
         edf_dir = self.tuh_dir / "edf"
 
         if not edf_dir.exists():
             raise FileNotFoundError(f"TUH EDF directory not found: {edf_dir}")
 
-        edf_files = []
+        # Check if filelist cache exists
+        if self.filelist_cache and self.filelist_cache.exists():
+            logger.info(f"[green]✓[/green] Loading file list from cache: {self.filelist_cache}")
+            with open(self.filelist_cache, 'r') as f:
+                cached_paths = [line.strip() for line in f if line.strip()]
+            logger.info(f"[green]✓[/green] Loaded {len(cached_paths)} paths from cache")
 
-        # Find all .edf files recursively under edf/
-        for edf_path in edf_dir.rglob("*.edf"):
+            # Parse paths from cache and extract metadata
+            all_edf_paths = []
+            for path_str in cached_paths:
+                edf_path = Path(path_str)
+                if edf_path.exists():
+                    all_edf_paths.append(edf_path)
+                else:
+                    logger.warning(f"Cached path does not exist: {path_str}")
+        else:
+            # Scan directory for all .edf files
+            logger.info("Scanning directory for EDF files (no cache found)...")
+            all_edf_paths = list(edf_dir.rglob("*.edf"))
+            logger.info(f"Found {len(all_edf_paths)} EDF files")
+
+            # Save to cache if filelist_cache is specified
+            if self.filelist_cache:
+                logger.info(f"[green]✓[/green] Saving file list to cache: {self.filelist_cache}")
+                self.filelist_cache.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.filelist_cache, 'w') as f:
+                    for edf_path in all_edf_paths:
+                        f.write(f"{edf_path}\n")
+                logger.info(f"[green]✓[/green] Saved {len(all_edf_paths)} paths to cache")
+
+        # Extract metadata and apply filters
+        edf_files = []
+        for edf_path in all_edf_paths:
             # Extract metadata from path
             # Path structure: .../edf/{numeric_group}/{subject_id}/{session_id}/{montage}/{recording}.edf
             # Example: edf/000/aaaaaaaa/s001_2015/01_tcp_ar/aaaaaaaa_s001_t000.edf
@@ -549,6 +589,9 @@ class TUHEDFDataModule(L.LightningDataModule):
         min_recording_duration_s: Minimum recording duration (default: 4.0, matching HBN)
         cache_dir: Directory for caching windows (default: tuh_dir/cache)
         use_cache: Use cached windows if available (default: True)
+        filelist_cache: Path to cached file list txt file (optional, e.g., 'data/tuh/filelist.txt')
+            If provided and exists, loads file paths from cache instead of scanning directory.
+            If not exists, scans directory and saves file list to this path for future runs.
         preprocessing_batch_size: Number of recordings to load at once during preprocessing (default: 100)
             Decrease to 50 or 20 if hitting OOM errors, increase to 200+ if memory allows for faster processing
 
@@ -588,6 +631,7 @@ class TUHEDFDataModule(L.LightningDataModule):
         min_recording_duration_s: float = 4.0,  # Filter out recordings < 4s
         cache_dir: Optional[str] = None,
         use_cache: bool = True,
+        filelist_cache: Optional[str] = None,  # Path to cached file list (e.g., data/tuh/filelist.txt)
         preprocessing_batch_size: int = 100,  # Number of recordings to process at once (OOM control)
     ):
         super().__init__()
@@ -710,23 +754,34 @@ class TUHEDFDataModule(L.LightningDataModule):
             sessions=self.hparams.sessions,
             montages=self.hparams.montages,
             max_recordings=self.hparams.max_recordings,
+            filelist_cache=self.hparams.filelist_cache,
         )
 
         logger.info(f"[bold]Total recordings found:[/bold] {len(dataset.datasets)}")
 
-        # Filter by duration (lazy check, no data loading)
-        logger.info("\n[bold cyan]FILTERING BY DURATION[/bold cyan]")
+        # Filter by duration (lazy check, no data loading) - PARALLELIZED
+        logger.info("\n[bold cyan]FILTERING BY DURATION (PARALLEL)[/bold cyan]")
         logger.info(f"Minimum duration: {self.hparams.min_recording_duration_s}s")
 
-        filtered_recordings = []
-        for ds in tqdm(dataset.datasets, desc="Duration check"):
+        def check_duration(ds):
+            """Check single recording duration (parallelizable)."""
             try:
                 duration = ds.raw.times[-1]
                 if duration >= self.hparams.min_recording_duration_s:
                     file_path = ds.raw.filenames[0] if ds.raw.filenames else ""
-                    filtered_recordings.append((ds, file_path))
+                    return (ds, file_path)
+                return None
             except Exception as e:
-                logger.warning(f"Failed to check duration for {ds}: {e}")
+                logger.warning(f"Failed to check duration: {e}")
+                return None
+
+        # Parallel duration checking (no tqdm - conflicts with parallelization)
+        n_jobs = min(8, os.cpu_count() or 1)  # Use up to 8 workers for this quick task
+        logger.info(f"Checking {len(dataset.datasets)} recordings with {n_jobs} workers...")
+        results = Parallel(n_jobs=n_jobs, backend='threading', verbose=5)(
+            delayed(check_duration)(ds) for ds in dataset.datasets
+        )
+        filtered_recordings = [r for r in results if r is not None]
 
         logger.info(f"[green]✓[/green] Kept {len(filtered_recordings)} recordings after duration filter")
 
@@ -773,7 +828,8 @@ class TUHEDFDataModule(L.LightningDataModule):
 
             preprocessors = self._get_preprocessors()
             if preprocessors:
-                preprocess(BaseConcatDataset([sample_ds]), preprocessors, n_jobs=1)
+                # Use 4 cores per recording for preprocessing filters/resampling
+                preprocess(BaseConcatDataset([sample_ds]), preprocessors, n_jobs=4)
             actual_sfreq = sample_ds.raw.info['sfreq']
             n_chans = len(sample_ds.raw.ch_names)
             window_size_samples = int(self.hparams.window_size_s * actual_sfreq)
@@ -799,54 +855,73 @@ class TUHEDFDataModule(L.LightningDataModule):
             logger.info(f"[green]✓[/green] Opened existing Zarr: {zarr_array.shape[0]} windows")
             total_windows_written = zarr_array.shape[0]
 
-        # Process recordings with multiprocessing
-        logger.info(f"\n[bold cyan]PROCESSING {len(recordings_to_process)} RECORDINGS[/bold cyan]")
+        # Process recordings with PARALLEL batch processing
+        logger.info(f"\n[bold cyan]PROCESSING {len(recordings_to_process)} RECORDINGS (PARALLEL)[/bold cyan]")
+
+        # Determine batch size and worker count
+        n_workers = get_optimal_worker_count(per_worker_memory_gb=2.0)
+        batch_size = max(1, n_workers * 2)  # Process 2x workers at once for better throughput
+        logger.info(f"  Parallel workers: {n_workers}")
+        logger.info(f"  Batch size: {batch_size} recordings")
 
         all_metadata = []
         checkpoint_interval = 100  # Save manifest every 100 recordings
 
+        # Adaptive worker manager for memory monitoring
+        worker_mgr = AdaptiveWorkerManager(n_workers, memory_threshold_gb=340)
+
+        # Process recordings in batches
         with tqdm(total=len(recordings_to_process), desc="Processing", unit="rec") as pbar:
-            for i, (ds, file_path) in enumerate(recordings_to_process):
-                try:
-                    # Process single recording
-                    windows_data, num_windows, metadata = self._process_single_recording(
-                        ds, file_path
-                    )
+            for batch_start in range(0, len(recordings_to_process), batch_size):
+                batch_end = min(batch_start + batch_size, len(recordings_to_process))
+                batch = recordings_to_process[batch_start:batch_end]
 
-                    if num_windows > 0:
-                        # Validate shape matches Zarr array
-                        expected_shape = (num_windows, zarr_array.shape[1], zarr_array.shape[2])
-                        if windows_data.shape != expected_shape:
-                            error_msg = f"Shape mismatch: expected {expected_shape}, got {windows_data.shape}"
-                            logger.warning(f"[yellow]Skipping {Path(file_path).name}: {error_msg}[/yellow]")
-                            checkpoint_mgr.mark_failed(file_path, ds.description.to_dict(), error_msg)
+                # Adaptive worker count based on memory pressure
+                current_workers = worker_mgr.get_worker_count()
+
+                # Parallel processing of batch
+                batch_results = Parallel(n_jobs=current_workers, backend='loky')(
+                    delayed(self._process_single_recording)(ds, file_path)
+                    for ds, file_path in batch
+                )
+
+                # Sequential write to Zarr (cannot parallelize append operations)
+                for (ds, file_path), (windows_data, num_windows, metadata) in zip(batch, batch_results):
+                    try:
+                        if num_windows > 0:
+                            # Validate shape matches Zarr array
+                            expected_shape = (num_windows, zarr_array.shape[1], zarr_array.shape[2])
+                            if windows_data.shape != expected_shape:
+                                error_msg = f"Shape mismatch: expected {expected_shape}, got {windows_data.shape}"
+                                logger.warning(f"[yellow]Skipping {Path(file_path).name}: {error_msg}[/yellow]")
+                                checkpoint_mgr.mark_failed(file_path, ds.description.to_dict(), error_msg)
+                            else:
+                                # Append to Zarr array (thread-safe, sequential)
+                                zarr_array.append(windows_data, axis=0)
+                                all_metadata.extend(metadata)
+                                total_windows_written += num_windows
+
+                                # Mark as completed
+                                checkpoint_mgr.mark_completed(file_path, ds.description.to_dict(), num_windows)
                         else:
-                            # Append to Zarr array
-                            zarr_array.append(windows_data, axis=0)
-                            all_metadata.extend(metadata)
-                            total_windows_written += num_windows
+                            logger.warning(f"[yellow]No windows generated for {Path(file_path).name}[/yellow]")
+                            checkpoint_mgr.mark_failed(file_path, ds.description.to_dict(), "No windows generated")
 
-                            # Mark as completed
-                            checkpoint_mgr.mark_completed(file_path, ds.description.to_dict(), num_windows)
-                    else:
-                        logger.warning(f"[yellow]No windows generated for {Path(file_path).name}[/yellow]")
-                        checkpoint_mgr.mark_failed(file_path, ds.description.to_dict(), "No windows generated")
+                    except Exception as e:
+                        logger.error(f"[red]Failed to write {Path(file_path).name}: {e}[/red]")
+                        checkpoint_mgr.mark_failed(file_path, {}, str(e))
 
-                    # Save checkpoint periodically
-                    if (i + 1) % checkpoint_interval == 0:
-                        checkpoint_mgr.save_manifest()
-                        # Save intermediate metadata
-                        pd.DataFrame(all_metadata).to_parquet(metadata_path, index=False)
-                        logger.info(f"[green]✓[/green] Checkpoint saved: {i+1}/{len(recordings_to_process)} ({total_windows_written} windows)")
-
-                except Exception as e:
-                    logger.error(f"[red]Failed to process {Path(file_path).name}: {e}[/red]")
-                    checkpoint_mgr.mark_failed(file_path, {}, str(e))
-
-                pbar.update(1)
+                # Update progress
+                pbar.update(len(batch))
                 pbar.set_postfix_str(f"{total_windows_written} windows")
 
-                # Explicit garbage collection
+                # Save checkpoint periodically
+                if (batch_end % checkpoint_interval) < batch_size:
+                    checkpoint_mgr.save_manifest()
+                    pd.DataFrame(all_metadata).to_parquet(metadata_path, index=False)
+                    logger.info(f"[green]✓[/green] Checkpoint: {batch_end}/{len(recordings_to_process)} ({total_windows_written} windows)")
+
+                # Explicit garbage collection after each batch
                 gc.collect()
 
         # Final checkpoint save
@@ -855,9 +930,16 @@ class TUHEDFDataModule(L.LightningDataModule):
         metadata_df.to_parquet(metadata_path, index=False)
 
         elapsed = time.time() - start_time
+
+        # Calculate Zarr directory size (sum all files recursively)
+        zarr_size_bytes = sum(
+            f.stat().st_size for f in zarr_path.rglob('*') if f.is_file()
+        )
+        zarr_size_gb = zarr_size_bytes / (1024**3)
+
         logger.info(f"\n[bold green]✓ PROCESSING COMPLETE[/bold green]")
         logger.info(f"  Total windows: {total_windows_written}")
-        logger.info(f"  Zarr size: {zarr_path.stat().st_size / (1024**3):.2f} GB")
+        logger.info(f"  Zarr size: {zarr_size_gb:.2f} GB ({zarr_size_bytes:,} bytes)")
         logger.info(f"  Time elapsed: {elapsed/60:.1f} minutes")
         logger.info(f"  Throughput: {len(recordings_to_process)/(elapsed/60):.1f} recordings/min")
 
@@ -936,10 +1018,11 @@ class TUHEDFDataModule(L.LightningDataModule):
         # Standardize channels to 21 common 10-20 EEG channels
         ds.raw = self._standardize_channels(ds.raw)
 
-        # Apply preprocessing
+        # Apply preprocessing (parallelized filtering/resampling)
         preprocessors = self._get_preprocessors()
         if preprocessors:
-            preprocess(BaseConcatDataset([ds]), preprocessors, n_jobs=1)
+            # Use 4 cores per recording for preprocessing filters/resampling
+            preprocess(BaseConcatDataset([ds]), preprocessors, n_jobs=4)
 
         # Create windows
         actual_sfreq = ds.raw.info['sfreq']

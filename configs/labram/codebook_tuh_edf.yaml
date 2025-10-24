@@ -108,7 +108,7 @@ trainer:
         - edf
       notes: "Training Tokenizer on TUH EEG Dataset (EDF backend with caching)"
       save_dir: outputs/logs/tokenizer-tuh-edf
-      mode: online
+      mode: disabled
 
   # Callbacks
   callbacks:
@@ -188,3 +188,4 @@ data:
     # Caching parameters
     cache_dir: null # Auto: {tuh_dir}/cache/
     use_cache: true # Use cached windows if available
+    filelist_cache: data/tuh/filelist.txt # Cache file list for fast directory scanning (~100-300x faster)

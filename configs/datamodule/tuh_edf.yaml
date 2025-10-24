@@ -49,3 +49,7 @@ data:
     # - Resume: Checkpoint manifest tracks progress, allows resuming after interruptions
     cache_dir: null      # Cache directory (null = tuh_dir/cache)
     use_cache: true      # Use cached windows if available
+    filelist_cache: data/tuh/filelist.txt  # Cached file list for fast directory scanning
+                                            # - First run: scans directory and saves to cache (~5-10 min)
+                                            # - Subsequent runs: loads from cache (~2-3 sec, 100-300x faster)
+                                            # - Set to null to disable caching (always scan directory)
