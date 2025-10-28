@@ -1,10 +1,21 @@
-"""Model components: encoders and decoders.
+"""Model components: encoders, decoders, and adapters.
 
 Components are building blocks for complete models:
 - Encoders: Transform raw input to features
 - Decoders: Transform features to task outputs
+- Adapters: Handle input/output transformations (e.g., channel adaptation)
 """
 
+from .auxiliary_heads import (
+    AuxiliaryTaskLoss,
+    DemographicHead,
+    HBN_AUXILIARY_TASKS,
+    MultiAuxiliaryHead,
+)
+from .channel_adapter import (
+    PerceiverChannelAdapter,
+    ZeroPadChannelAdapter,
+)
 from .decoders import (
     ClassificationHead,
     MultiTaskHead,
@@ -46,4 +57,12 @@ __all__ = [
     "StatePredictor",
     "EventPredictor",
     "MambaBlock",
+    # Adapters
+    "PerceiverChannelAdapter",
+    "ZeroPadChannelAdapter",
+    # Auxiliary Tasks
+    "DemographicHead",
+    "MultiAuxiliaryHead",
+    "AuxiliaryTaskLoss",
+    "HBN_AUXILIARY_TASKS",
 ]

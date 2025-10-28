@@ -4,17 +4,30 @@ This module provides loss functions for different training strategies:
 - InfoNCE for contrastive learning (triplet and all-pairs variants)
 - NRMSE for evaluation metrics
 - Custom losses for specific tasks
+- Movie ISC for inter-subject correlation
 """
 
 import torch
 import torch.nn.functional as F
 
+from .contrastive import (
+    ContrastiveProjectionHead,
+    InfoNCE,
+    MovieISCLoss,
+    info_nce_loss as info_nce_functional,
+)
+
 __all__ = [
+    # Functional APIs (original)
     "info_nce_loss",           # Alias for info_nce_triplet (backward compat)
     "info_nce_triplet",        # Triplet-based InfoNCE (1 negative per anchor)
     "info_nce_all_pairs",      # All-pairs InfoNCE (batch_size-1 negatives)
     "info_nce_loss_multi_negative",  # Multiple negatives per anchor
     "normalized_mse_loss",
+    # Module APIs (new)
+    "InfoNCE",
+    "MovieISCLoss",
+    "ContrastiveProjectionHead",
 ]
 
 
