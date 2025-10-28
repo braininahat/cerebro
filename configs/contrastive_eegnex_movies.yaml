@@ -1,0 +1,138 @@
+# Movie Contrastive Pretraining with EEGNeX
+#
+# This config trains an EEGNeX encoder using contrastive learning on movie-watching EEG data.
+# The encoder learns representations by pulling together samples from the same movie+time
+# (but different subjects) while pushing apart samples from different movies.
+#
+# Usage: uv run cerebro fit --config configs/contrastive_eegnex_movies.yaml
+
+# Random seed for reproducibility
+seed_everything: 42
+
+# Trainer configuration
+trainer:
+  max_epochs: 50
+  accelerator: auto  # Auto-detect GPU/CPU
+  devices: 1
+  precision: "bf16-mixed"  # Mixed precision for faster training
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 10
+
+  # Wandb logger
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025  # Change to your wandb entity
+      name: contrastive_eegnex_movies
+      tags:
+        - contrastive
+        - pretraining
+        - movies
+        - eegnex
+      notes: "EEGNeX contrastive pretraining on movie-watching EEG data"
+      log_model: all
+      save_dir: outputs/contrastive
+
+  # Callbacks
+  callbacks:
+    # ModelCheckpoint: Save best models based on training loss
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/contrastive/checkpoints
+        filename: contrastive-{epoch:02d}-{train_loss:.4f}
+        monitor: train_loss
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    # EarlyStopping: Stop if loss doesn't improve
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_loss
+        patience: 10
+        mode: min
+        verbose: true
+
+    # Progress bar
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    # Model summary
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 2
+
+# Model configuration: ContrastiveTrainer with ContrastiveModel
+model:
+  class_path: cerebro.trainers.contrastive.ContrastiveTrainer
+  init_args:
+    # The actual model (encoder + projection head)
+    model:
+      class_path: cerebro.models.architectures.ContrastiveModel
+      init_args:
+        encoder_class: EEGNeX  # Can swap to SignalJEPA
+        projection_dim: 128     # Embedding dimension for contrastive learning
+        hidden_dim: 256         # Hidden layer in projection MLP
+        dropout: 0.1           # Dropout in projection head
+        input_scale: 1000.0    # Millivolt scaling for faster convergence
+        encoder_kwargs:        # Encoder-specific parameters
+          n_chans: 129
+          n_times: 200
+          sfreq: 100
+
+    # Training hyperparameters
+    pairing_strategy: all_pairs  # "all_pairs" (SimCLR style, batch_size-1 negatives) or "triplet" (1 negative)
+    temperature: 0.07          # InfoNCE temperature (lower = harder negatives)
+    temperature_decay: 1.0     # 1.0 = no decay, <1.0 = decay per epoch
+    min_temperature: 0.01      # Minimum temperature value
+    lr: 0.001                  # Learning rate
+    weight_decay: 0.0001       # Higher weight decay for contrastive
+    epochs: 50                 # Must match trainer.max_epochs
+    warmup_epochs: 5           # Linear warmup before cosine annealing
+
+# Data configuration: Movie contrastive pairs
+data:
+  class_path: cerebro.data.movies.MovieDataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    # Training releases (R5 is held out for competition)
+    releases:
+      - R1
+      - R2
+      - R3
+      - R4
+      - R6
+      - R7
+      - R8
+      - R9
+      - R10
+      - R11
+
+    # Movies to use (all 4 HBN movies)
+    movie_names:
+      - DespicableMe
+      - ThePresent
+      - DiaryOfAWimpyKid
+      - FunwithFractals
+
+    # Windowing parameters
+    window_len_s: 2.0          # 2 second windows
+    stride_s: 1.0              # 1 second stride (50% overlap)
+    time_bin_size_s: 1.0       # Time bin for positive pair matching
+
+    # Contrastive pair strategies
+    pos_strategy: same_movie_time     # Same movie+time, different subject
+    neg_strategy: diff_movie_mixed    # Different movie, any subject
+    return_triplets: false             # false for all_pairs (only need anchor+pos), true for triplet
+
+    # Training parameters
+    batch_size: 256            # Larger batch for contrastive learning
+    num_workers: 8             # Parallel data loading
+    val_frac: 0.1             # 10% of subjects for validation
+    test_frac: 0.1            # 10% of subjects for test
+    seed: 2025                # Random seed for splits
+    use_mini: false           # Set to true for fast prototyping
+    cache_dir: null           # null = auto (data_dir/../cache/movies)

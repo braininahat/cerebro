@@ -5,31 +5,37 @@ Extends LightningCLI to support:
 - Optional LR finder with wandb plot upload
 - Optional batch size finder
 - Comprehensive wandb config logging
+- Flexible model/trainer/data composition
+
+The new architecture separates models (pure architectures) from trainers
+(training logic), enabling mix-and-match experimentation.
 
 Usage:
-    # Basic training
-    uv run cerebro fit --config configs/challenge1_base.yaml
+    # Supervised training
+    uv run cerebro fit --config configs/supervised_eegnex_challenge1.yaml
+
+    # Contrastive pretraining
+    uv run cerebro fit --config configs/contrastive_eegnex_movies.yaml
 
     # With LR finder
     uv run cerebro fit \\
-        --config configs/challenge1_base.yaml \\
+        --config configs/supervised_eegnex_challenge1.yaml \\
         --run_lr_finder true
 
     # Override parameters
     uv run cerebro fit \\
-        --config configs/challenge1_base.yaml \\
-        --model.init_args.lr 0.0001 \\
+        --config configs/supervised_eegnex_challenge1.yaml \\
+        --trainer.init_args.lr 0.0001 \\
         --data.init_args.batch_size 256
 
-    # Backward compatible (direct python)
-    uv run python cerebro/cli/train.py fit --config configs/challenge1_base.yaml
+    # Direct python invocation
+    uv run python cerebro/cli/train.py fit --config configs/supervised_eegnex_challenge1.yaml
 """
 
-from cerebro.utils.tuning import run_batch_size_finder, run_lr_finder
-from cerebro.utils.logging import setup_logging
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 import torch
 from lightning.pytorch.cli import LightningCLI
@@ -39,8 +45,9 @@ torch.set_float32_matmul_precision(
     "high"
 )  # Trades minimal precision for 30-50% speedup
 
-# Import modules to register with CLI
-# (Importing modules makes them available via class_path in configs)
+# Import utilities
+from cerebro.utils.logging import setup_logging
+from cerebro.utils.tuning import run_batch_size_finder, run_lr_finder
 
 logger = logging.getLogger(__name__)
 
@@ -54,73 +61,32 @@ class CerebroCLI(LightningCLI):
     - Optional batch size finder (set run_batch_size_finder=true in config)
     - Comprehensive wandb config upload
     - Unique timestamped output directories per run
-    - Fixed checkpoint resuming (removes _class_path validation conflicts)
+    - Flexible model/trainer/data composition via config
+
+    The new architecture separates:
+    - Models: Pure nn.Module architectures (RegressorModel, ContrastiveModel)
+    - Trainers: LightningModule with training logic (SupervisedTrainer, ContrastiveTrainer)
+    - Data: Task-specific DataModules (Challenge1DataModule, MovieDataModule)
+
+    This allows mix-and-match composition through configuration files.
     """
 
     def __init__(self, *args, **kwargs):
-        """Initialize CLI with unique run timestamp and auto-fix checkpoints."""
-        self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        """Initialize CLI with unique run timestamp.
 
-        # Auto-fix checkpoint BEFORE parent __init__ (before parsing/validation)
-        self._auto_fix_checkpoint_in_args()
+        We set model_class and datamodule_class to None to allow
+        configs to specify them via class_path.
+        """
+        self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.wandb_metadata = None  # For checkpoint resuming (populated by CheckpointCompatibilityCallback)
+
+        # Override defaults to allow class_path in configs
+        kwargs.setdefault('model_class', None)
+        kwargs.setdefault('datamodule_class', None)
+        kwargs.setdefault('subclass_mode_model', False)
+        kwargs.setdefault('subclass_mode_data', False)
 
         super().__init__(*args, **kwargs)
-
-    def _auto_fix_checkpoint_in_args(self):
-        """Auto-fix checkpoint files before CLI parsing.
-
-        Removes _class_path from checkpoint hyper_parameters to avoid
-        validation conflicts when resuming training with --ckpt_path.
-
-        Also extracts wandb metadata for automatic run resuming.
-        """
-        import sys
-
-        # Check if --ckpt_path is in command line arguments
-        try:
-            if "--ckpt_path" in sys.argv:
-                idx = sys.argv.index("--ckpt_path")
-                if idx + 1 < len(sys.argv):
-                    ckpt_path = sys.argv[idx + 1]
-
-                    # Load and fix checkpoint
-                    ckpt = torch.load(ckpt_path, map_location="cpu")
-
-                    # Extract wandb metadata if available
-                    if "wandb_metadata" in ckpt:
-                        self.wandb_metadata = ckpt["wandb_metadata"]
-                        print(
-                            f"✓ Found wandb run ID in checkpoint: {self.wandb_metadata.get('wandb_run_id', 'N/A')}")
-                    else:
-                        self.wandb_metadata = None
-
-                    # Remove hyper_parameters entirely (config file provides these)
-                    # Keep only essential training state
-                    modified = False
-                    if "hyper_parameters" in ckpt:
-                        del ckpt["hyper_parameters"]
-                        modified = True
-                    if "datamodule_hyper_parameters" in ckpt:
-                        del ckpt["datamodule_hyper_parameters"]
-                        modified = True
-                    if "hparams_name" in ckpt:
-                        del ckpt["hparams_name"]
-                        modified = True
-                    if "datamodule_hparams_name" in ckpt:
-                        del ckpt["datamodule_hparams_name"]
-                        modified = True
-
-                    if modified:
-                        torch.save(ckpt, ckpt_path)
-                        print(
-                            f"✓ Auto-fixed checkpoint (removed hyper_parameters): {ckpt_path}")
-            else:
-                self.wandb_metadata = None
-
-        except Exception as e:
-            self.wandb_metadata = None
-            print(f"Warning: Could not auto-fix checkpoint: {e}")
-            print("You may need to manually strip hyper_parameters from checkpoint")
 
     def before_instantiate_classes(self):
         """Inject unique timestamp into output paths before instantiating trainer/callbacks.
@@ -288,7 +254,11 @@ class CerebroCLI(LightningCLI):
         logger.info(f"[bold green]Logging to:[/bold green] {log_file}")
 
     def _log_config_to_wandb(self):
-        """Log comprehensive configuration to wandb (mimics notebook 04 lines 599-642)."""
+        """Log comprehensive configuration to wandb.
+
+        Handles both old architecture (Challenge1Module) and new architecture
+        (separate model/trainer) for backward compatibility.
+        """
         # Only log if wandb logger is configured
         wandb_logger = None
         for logger_instance in self.trainer.loggers:
@@ -299,54 +269,50 @@ class CerebroCLI(LightningCLI):
         if wandb_logger is None:
             return
 
-        # Get datamodule and model hyperparameters
-        data_hparams = self.datamodule.hparams
-        model_hparams = self.model.hparams
+        # Get datamodule hyperparameters
+        data_hparams = self.datamodule.hparams if self.datamodule else {}
 
-        # Build comprehensive config dict - start with trainer config
+        # Build config dict - handle different architectures
         config_dict = {
-            # Training parameters
-            "epochs": self.trainer.max_epochs,
-            "precision": str(self.trainer.precision),
-            # Hyperparameter tuning switches
-            "run_lr_finder": self.config["fit"].get("run_lr_finder", False),
-            "run_batch_size_finder": self.config["fit"].get(
-                "run_batch_size_finder", False
-            ),
-            "num_parameters": sum(p.numel() for p in self.model.parameters()),
+            # Data settings (if available)
+            "data_class": self.datamodule.__class__.__name__ if self.datamodule else None,
         }
 
-        # Add all datamodule hyperparameters (converted to dict)
-        if hasattr(data_hparams, "__dict__"):
-            for key, value in data_hparams.__dict__.items():
-                if not key.startswith("_"):  # Skip private attributes
-                    # Convert Path objects to strings for serialization
-                    if hasattr(value, "__fspath__"):
-                        value = str(value)
-                    config_dict[f"data_{key}"] = value
+        # Add data-specific parameters
+        if hasattr(data_hparams, "data_dir"):
+            config_dict["data_dir"] = str(data_hparams.data_dir)
+        if hasattr(data_hparams, "releases"):
+            config_dict["releases"] = data_hparams.releases
+            config_dict["num_releases"] = len(data_hparams.releases)
+        if hasattr(data_hparams, "use_mini"):
+            config_dict["use_mini"] = data_hparams.use_mini
+        if hasattr(data_hparams, "batch_size"):
+            config_dict["batch_size"] = data_hparams.batch_size
 
-        # Add all model hyperparameters (converted to dict)
-        if hasattr(model_hparams, "__dict__"):
-            for key, value in model_hparams.__dict__.items():
-                if not key.startswith("_"):  # Skip private attributes
-                    # Convert Path objects to strings for serialization
-                    if hasattr(value, "__fspath__"):
-                        value = str(value)
-                    config_dict[f"model_{key}"] = value
+        # Model and trainer info
+        config_dict["model_class"] = self.model.__class__.__name__
+        config_dict["epochs"] = self.trainer.max_epochs
+        config_dict["precision"] = str(self.trainer.precision)
 
-        # Add dataset sizes if available
-        if hasattr(self.datamodule, "train_set") and self.datamodule.train_set:
-            config_dict["num_train_windows"] = len(self.datamodule.train_set)
-        if hasattr(self.datamodule, "val_set") and self.datamodule.val_set:
-            config_dict["num_val_windows"] = len(self.datamodule.val_set)
-        if hasattr(self.datamodule, "test_set") and self.datamodule.test_set:
-            config_dict["num_test_windows"] = len(self.datamodule.test_set)
+        # Get trainer hyperparameters (new architecture)
+        if hasattr(self.model, "hparams"):
+            trainer_hparams = self.model.hparams
+            if hasattr(trainer_hparams, "lr"):
+                config_dict["lr"] = trainer_hparams.lr
+            if hasattr(trainer_hparams, "weight_decay"):
+                config_dict["weight_decay"] = trainer_hparams.weight_decay
 
-        # Add model name if available
-        if hasattr(self.model, "model") and hasattr(self.model.model, "__class__"):
-            config_dict["model_name"] = self.model.model.__class__.__name__
-        else:
-            config_dict["model_name"] = self.model.__class__.__name__
+            # For new architecture with separate model
+            if hasattr(trainer_hparams, "model"):
+                actual_model = trainer_hparams.model
+                config_dict["actual_model_class"] = actual_model.__class__.__name__
+                config_dict["num_parameters"] = sum(p.numel() for p in actual_model.parameters())
+            else:
+                config_dict["num_parameters"] = sum(p.numel() for p in self.model.parameters())
+
+        # Hyperparameter tuning switches
+        config_dict["run_lr_finder"] = self.config["fit"].get("run_lr_finder", False)
+        config_dict["run_batch_size_finder"] = self.config["fit"].get("run_batch_size_finder", False)
 
         # Upload to wandb (only if experiment is initialized)
         try:
@@ -393,10 +359,22 @@ class CerebroCLI(LightningCLI):
 
         # Log to wandb
         if wandb_logger is not None:
+            # Try to get original LR from config (handle both flat and nested structures)
+            try:
+                # Try nested init_args first (class_path style)
+                lr_original = self.config["fit"]["model"]["init_args"]["lr"]
+            except (KeyError, TypeError):
+                try:
+                    # Fall back to flat structure
+                    lr_original = self.config["fit"]["model"]["lr"]
+                except (KeyError, TypeError):
+                    # Fall back to model's current hparams
+                    lr_original = self.model.hparams.lr if hasattr(self.model.hparams, "lr") else None
+
             wandb_logger.experiment.config.update(
                 {
                     "lr_finder_enabled": True,
-                    "lr_original": self.config["fit"]["model"]["lr"],
+                    "lr_original": lr_original,
                     "lr_suggested": suggested_lr,
                 }
             )
@@ -437,16 +415,27 @@ class CerebroCLI(LightningCLI):
 def cli_main():
     """CLI entry point.
 
-    Supports two modes:
-    1. Config-driven (recommended): Use class_path in model/data sections of YAML
-       Example: model: {class_path: "cerebro.models.labram.tokenizer.VQNSP", ...}
+    Now uses config files to specify model and data classes via class_path,
+    enabling flexible composition of models, trainers, and data modules.
 
-    2. Hardcoded: If no class_path, uses Challenge1Module and Challenge1DataModule
-       Example: model: {n_chans: 129, lr: 0.001, ...}
+    Example config structure:
+        model:
+            class_path: cerebro.trainers.supervised.SupervisedTrainer
+            init_args:
+                model:
+                    class_path: cerebro.models.architectures.RegressorModel
+                    init_args:
+                        encoder_class: EEGNeX
+                loss_fn: mse
+                lr: 0.001
+
+        data:
+            class_path: cerebro.data.challenge1.Challenge1DataModule
+            init_args:
+                releases: [R1, R2, ...]
+                batch_size: 512
     """
     CerebroCLI(
-        model_class=None,
-        datamodule_class=None,
         save_config_callback=None,  # Wandb handles config saving
         # Use OmegaConf for interpolation
         parser_kwargs={"parser_mode": "omegaconf"},

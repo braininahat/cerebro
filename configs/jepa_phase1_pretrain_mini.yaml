@@ -1,0 +1,104 @@
+# JEPA Phase 1 Self-Supervised Pretraining Configuration (Mini for fast testing)
+# Uses R1 mini dataset for rapid prototyping
+#
+# Usage:
+#   uv run cerebro fit --config configs/jepa_phase1_pretrain_mini.yaml
+
+seed_everything: 42
+
+# Tuning flags (disabled for mini - fast iteration)
+run_lr_finder: false
+run_batch_size_finder: false
+
+trainer:
+  max_epochs: 5  # Reduced for mini
+  accelerator: auto
+  devices: 1
+  precision: "32-true"  # FNO uses complex numbers, not compatible with AMP
+  gradient_clip_val: 1.0
+  fast_dev_run: false  # Set to true for single-batch test
+  limit_train_batches: 100  # Limit for faster iteration
+  limit_val_batches: 20
+
+  # Logging
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: ${oc.env:WANDB_PROJECT,eeg2025}
+      name: jepa_phase1_pretrain_mini
+      save_dir: outputs/wandb
+      log_model: false
+      offline: true  # Offline for fast testing
+
+  # Callbacks
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/jepa_phase1_mini/checkpoints
+        filename: "epoch{epoch:02d}-loss{val_loss:.4f}"
+        monitor: val_loss
+        mode: min
+        save_top_k: 1
+        save_last: true
+
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+# Model: Same architecture as full training
+model:
+  class_path: cerebro.trainers.jepa.JEPAPhase1Trainer
+  init_args:
+    model:
+      class_path: cerebro.models.architectures.JEPAFoundationModel
+      init_args:
+        n_chans: 129  # HBN dataset: 129 channels including Cz reference
+        n_times: 200
+        latent_dim: 96
+        sample_rate: 100
+        fno_modes: 50  # 50 Hz covers all EEG bands
+        mamba_d_state: 16
+        mamba_layers: 4
+
+    lr: 1.0e-4
+    weight_decay: 1.0e-4
+    warmup_epochs: 0  # Scheduler reads trainer.max_epochs directly
+
+    loss_weights:
+      state: 1.0
+      event: 0.5
+      trait: 0.1
+      stability: 0.5
+      mask: 0.5
+
+    mask_prob: 0.25
+    mask_every_n_batches: 5
+
+# Data: R1 mini only for fast testing
+data:
+  class_path: cerebro.data.jepa_pretrain.JEPAPretrainDataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,./data}
+    releases: ["R1"]  # Only R1 for mini
+    batch_size: 32  # Smaller batch for mini
+    num_workers: 4
+    window_length: 4.0
+    stride: 2.0
+    crop_length: 2.0
+    val_split: 0.2  # Larger val split for mini
+    test_split: 0.1
+    n_chans_select: 129  # All 129 channels including Cz reference
+    sfreq: 100
+    mini: true  # Use mini dataset
+    all_tasks:
+      - contrastChangeDetection
+      - restingState
+      - DespicableMe
+      - ThePresent
+      - DiaryOfAWimpyKid
+      - FunwithFractals
+      - surroundSupp

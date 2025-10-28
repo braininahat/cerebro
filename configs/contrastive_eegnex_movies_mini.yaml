@@ -1,0 +1,85 @@
+# Mini Movie Contrastive Pretraining for Testing
+#
+# Fast config for testing the contrastive pipeline with minimal data.
+# Uses R1 mini subset for quick iteration.
+#
+# Usage: uv run cerebro fit --config configs/contrastive_eegnex_movies_mini.yaml
+
+# Random seed
+seed_everything: 42
+
+# Fast trainer settings for testing
+trainer:
+  max_epochs: 3               # Just a few epochs to test
+  accelerator: auto
+  devices: 1
+  precision: 32               # Full precision for debugging
+  fast_dev_run: false         # Set true for single batch test
+  limit_train_batches: 10     # Only 10 batches per epoch
+  limit_val_batches: 5        # Only 5 validation batches
+  log_every_n_steps: 1        # Log every step
+
+  # Simple console logger for testing
+  logger:
+    class_path: lightning.pytorch.loggers.CSVLogger
+    init_args:
+      save_dir: outputs/test
+      name: contrastive_mini
+
+  # Minimal callbacks
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+# Model configuration
+model:
+  class_path: cerebro.trainers.contrastive.ContrastiveTrainer
+  init_args:
+    model:
+      class_path: cerebro.models.architectures.ContrastiveModel
+      init_args:
+        encoder_class: EEGNeX
+        projection_dim: 64     # Smaller for testing
+        hidden_dim: 128        # Smaller for testing
+        input_scale: 1000.0    # Millivolt scaling for faster convergence
+        encoder_kwargs:        # Encoder-specific parameters
+          n_chans: 129
+          n_times: 200
+          sfreq: 100
+
+    pairing_strategy: triplet  # "triplet" for mini (works with small batch), "all_pairs" for production
+    temperature: 0.1
+    lr: 0.001
+    weight_decay: 0.0001
+    epochs: 3
+    warmup_epochs: 0
+
+# Data configuration - MINI dataset
+data:
+  class_path: cerebro.data.movies.MovieDataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    releases:
+      - R1                     # Only R1 for testing
+
+    movie_names:               # Test with 2 movies
+      - DespicableMe
+      - ThePresent
+
+    window_len_s: 2.0
+    stride_s: 2.0              # No overlap for faster loading
+    time_bin_size_s: 1.0
+
+    # Contrastive pair strategies (for clarity - these are defaults)
+    pos_strategy: same_movie_time     # Same movie+time, different subject
+    neg_strategy: diff_movie_mixed    # Different movie, any subject
+    return_triplets: true              # Return (anchor, pos, neg) triplets
+
+    batch_size: 16             # Small batch size
+    num_workers: 0             # No parallel loading for debugging
+    val_frac: 0.0              # No validation for mini (only 1 subject)
+    test_frac: 0.0             # Skip test for speed
+    seed: 2025
+    use_mini: true             # MINI flag for fast loading
+    cache_dir: null

@@ -229,3 +229,4 @@ response_time_distribution.png
 outputs/
 */outputs/
 wandb/
+.worktrees/

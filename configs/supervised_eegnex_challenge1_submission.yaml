@@ -1,0 +1,162 @@
+# Final Submission Training for Challenge 1 with EEGNeX
+#
+# This config is for Day 10 final submission:
+# - Trains on ALL subjects from training releases (R1-R4, R6-R11)
+# - No validation split (maximizes training data)
+# - Tests on R5 (competition evaluation)
+# - Architecture and hyperparameters should be locked before using this
+#
+# Usage: uv run cerebro fit --config configs/supervised_eegnex_challenge1_submission.yaml
+
+# Random seed for reproducibility
+seed_everything: 42
+
+# Tuning flags (disabled for submission - hyperparameters should be locked)
+run_lr_finder: false
+run_batch_size_finder: false
+
+# Trainer configuration
+trainer:
+  max_epochs: 1000
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 10
+
+  # Logger configuration
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: challenge1_submission
+      tags:
+        - challenge1
+        - supervised
+        - eegnex
+        - submission
+        - final
+      notes: "Final submission: Train on ALL subjects from training releases, test on R5"
+      log_model: all
+      save_dir: outputs/challenge1
+
+  # Callbacks
+  callbacks:
+    # ModelCheckpoint: Save models periodically (no validation in submission mode)
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/challenge1/checkpoints
+        filename: challenge1-submission-{epoch:02d}
+        save_top_k: 3
+        save_last: true
+        every_n_epochs: 10  # Save every 10 epochs since no validation
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 1
+
+    - class_path: cerebro.callbacks.ModelAutopsyCallback
+      init_args:
+        run_on_training_end: true
+        run_on_early_stop: false  # No early stopping in submission mode
+        diagnostics:
+          - predictions
+          - gradients
+          - activations
+          - integrated_gradients
+          - layer_gradcam
+          - failure_modes
+        save_plots: true
+        log_to_wandb: true
+        generate_report: true
+        upload_report: true
+        upload_summary_table: true
+        upload_raw_artifacts: true  # ENABLED for submission: archive full data
+        num_samples: 500
+        top_k_failures: 100
+        ig_n_steps: 50
+        ig_baseline: zero
+
+# Model configuration: SupervisedTrainer with EEGNeX RegressorModel
+model:
+  class_path: cerebro.trainers.supervised.SupervisedTrainer
+  init_args:
+    # The actual model (encoder + regression head)
+    model:
+      class_path: cerebro.models.architectures.RegressorModel
+      init_args:
+        encoder_class: EEGNeX  # Can swap to SignalJEPA
+        n_outputs: 1           # Single regression output (RT)
+        dropout: 0.0           # No dropout
+        input_scale: 1000.0    # Millivolt scaling for faster convergence
+        encoder_kwargs:        # Encoder-specific parameters
+          n_chans: 129
+          n_times: 200
+          sfreq: 100
+
+    # Training hyperparameters (should be tuned in dev mode before submission)
+    loss_fn: mse               # Mean squared error
+    lr: 0.001                  # Learning rate
+    weight_decay: 0.00001      # Weight decay
+    epochs: 1000               # Must match trainer.max_epochs
+    warmup_epochs: 0           # No warmup
+
+# Data configuration: Challenge 1 CCD task (submission mode)
+data:
+  class_path: cerebro.data.challenge1.Challenge1DataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in releases!
+    # Training on ALL subjects from R1-R4, R6-R11 (10 releases total)
+    releases:
+      - R1
+      - R2
+      - R3
+      - R4
+      - R6
+      - R7
+      - R8
+      - R9
+      - R10
+      - R11
+
+    # Training parameters
+    batch_size: 512
+    num_workers: 8
+
+    # Excluded subjects (known issues)
+    excluded_subjects:
+      - NDARWV769JM7
+      - NDARME789TD2
+      - NDARUA442ZVF
+      - NDARJP304NK1
+      - NDARTY128YLU
+      - NDARDW550GU6
+      - NDARLD243KRE
+      - NDARUJ292JXV
+      - NDARBA381JGH
+
+    # Windowing parameters
+    shift_after_stim: 0.5      # Start window 0.5s after stimulus
+    window_len: 2.0            # 2 second windows
+    epoch_len_s: 2.0
+    sfreq: 100
+    anchor: stimulus_anchor
+
+    # Submission mode settings
+    mode: submission           # "submission" = train on ALL subjects, no val split
+    test_on_r5: true           # REQUIRED in submission mode
+    r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    val_frac: 0.1              # Ignored in submission mode
+    test_frac: 0.1             # Ignored in submission mode
+    seed: 2025
+
+    # Performance
+    use_mini: false            # Must be false for final submission
+    cache_dir: null            # null = auto (data_dir/../cache/challenge1)
