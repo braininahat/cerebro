@@ -4,7 +4,7 @@
 # This will take significantly longer than mini dataset but should produce better representations.
 
 seed_everything: 42
-run_lr_finder: false
+run_lr_finder: true
 run_batch_size_finder: false
 
 trainer:
@@ -121,7 +121,7 @@ data:
     sfreq: 100
     mini: false  # FULL DATASET
 
-    batch_size: 1024
-    num_workers: 32
-    prefetch_factor: 2  # Each worker prefetches 4 batches (32 workers × 4 = 128 batches in flight)
+    batch_size: 512
+    num_workers: 16
+    prefetch_factor: 1  # Each worker prefetches 4 batches (32 workers × 4 = 128 batches in flight)
     persistent_workers: true  # Keep workers alive between epochs (faster epoch transitions)
