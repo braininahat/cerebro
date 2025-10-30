@@ -11,12 +11,12 @@ Level 1 (Raw Cache):
 Level 2 (Window Cache):
 - Stores windowed data derived from Level 1
 - Multiple window configs coexist (2s, 4s, 8s, etc.)
-- Lazy loading via Zarr for memory efficiency
+- Zero-copy memory-mapped access for maximum I/O performance
 
 Key Features:
 - Subject-level splitting (prevents data leakage)
 - Composable queries (arbitrary release/task/subject combinations)
-- Memory efficient (lazy Zarr loading)
+- Memory efficient (zero-copy memory mapping)
 - Fault tolerant (checkpoint manifests)
 - Pre-buildable (CLI tool for cache generation)
 
@@ -39,6 +39,6 @@ Usage:
 """
 
 from cerebro.data.unified_cache.cache_manager import UniversalCacheManager
-from cerebro.data.unified_cache.lazy_dataset import LazyZarrWindowDataset
+from cerebro.data.unified_cache.lazy_dataset import LazyZarrWindowDataset, MemmapWindowDataset
 
-__all__ = ["UniversalCacheManager", "LazyZarrWindowDataset"]
+__all__ = ["UniversalCacheManager", "LazyZarrWindowDataset", "MemmapWindowDataset"]

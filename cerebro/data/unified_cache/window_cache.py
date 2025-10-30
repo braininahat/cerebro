@@ -17,7 +17,7 @@ from joblib import Parallel, delayed
 from numcodecs import Blosc
 from tqdm import tqdm
 
-from cerebro.data.unified_cache.lazy_dataset import LazyZarrWindowDataset
+from cerebro.data.unified_cache.lazy_dataset import MemmapWindowDataset
 from cerebro.data.unified_cache.raw_cache import GracefulInterruptHandler
 
 logger = logging.getLogger(__name__)
@@ -171,7 +171,7 @@ class WindowCacheBuilder:
         stride_s: float,
         crop_len_s: Optional[float] = None,
         mode: str = 'train'
-    ) -> LazyZarrWindowDataset:
+    ) -> MemmapWindowDataset:
         """Get windowed dataset (builds if missing).
 
         Args:
@@ -181,7 +181,7 @@ class WindowCacheBuilder:
             crop_len_s: Optional crop length for augmentation
 
         Returns:
-            LazyZarrWindowDataset instance
+            MemmapWindowDataset instance
         """
         # Infer mini flag from recordings (all should be same)
         if len(recordings) == 0:
@@ -219,13 +219,13 @@ class WindowCacheBuilder:
 
         # Get window config ID (includes mini to prevent mini/full collision)
         window_config_id = self.cache_mgr._get_window_config_id(window_len_s, stride_s, mini)
-        zarr_path = self.cache_mgr._get_window_zarr_path(window_config_id)
+        memmap_path = self.cache_mgr.window_cache_dir / f"{window_config_id}.npy"
         metadata_path = self.cache_mgr._get_window_metadata_path(window_config_id)
-        complete_marker_path = zarr_path.parent / f"{window_config_id}.complete"
+        complete_marker_path = memmap_path.parent / f"{window_config_id}.complete"
 
         # Check if window cache exists and is complete
-        if zarr_path.exists() and metadata_path.exists() and complete_marker_path.exists():
-            logger.info(f"Loading windowed dataset from cache: {window_config_id}")
+        if memmap_path.exists() and metadata_path.exists() and complete_marker_path.exists():
+            logger.info(f"Loading windowed dataset from cache (memmap): {window_config_id}")
             metadata = pd.read_parquet(metadata_path)
 
             # Filter metadata to match requested recordings
@@ -234,28 +234,28 @@ class WindowCacheBuilder:
             ].reset_index(drop=True)
 
             # Debug: Check for NaN after filtering
-            if metadata_filtered["zarr_index"].isna().any():
-                logger.error(f"NaN zarr_index after filtering!")
+            if metadata_filtered["array_index"].isna().any():
+                logger.error(f"NaN array_index after filtering!")
                 logger.error(f"  Requested recordings: {len(recordings)}")
                 logger.error(f"  Filtered metadata: {len(metadata_filtered)}")
-                logger.error(f"  NaN count: {metadata_filtered['zarr_index'].isna().sum()}")
+                logger.error(f"  NaN count: {metadata_filtered['array_index'].isna().sum()}")
                 # Drop NaN rows as defensive fix
-                logger.warning(f"Dropping {metadata_filtered['zarr_index'].isna().sum()} rows with NaN zarr_index")
-                metadata_filtered = metadata_filtered.dropna(subset=["zarr_index"]).reset_index(drop=True)
+                logger.warning(f"Dropping {metadata_filtered['array_index'].isna().sum()} rows with NaN array_index")
+                metadata_filtered = metadata_filtered.dropna(subset=["array_index"]).reset_index(drop=True)
 
-            return LazyZarrWindowDataset(
-                zarr_path=zarr_path,
+            return MemmapWindowDataset(
+                memmap_path=memmap_path,
                 metadata=metadata_filtered,
                 crop_len_s=crop_len_s,
                 sfreq=self.cache_mgr.preprocessing_params["sfreq"],
                 mode=mode
             )
 
-        # Build window cache (handles both fresh builds and resuming partial builds)
-        logger.info(f"Building windowed dataset: {window_config_id}")
+        # Build window cache (no incremental builds for memmap)
+        logger.info(f"Building windowed dataset (memmap): {window_config_id}")
         return self._build_window_cache(
             recordings, window_len_s, stride_s, crop_len_s,
-            window_config_id, zarr_path, metadata_path, complete_marker_path, mode
+            window_config_id, memmap_path, metadata_path, complete_marker_path, mode
         )
 
     def _build_window_cache(
@@ -265,15 +265,14 @@ class WindowCacheBuilder:
         stride_s: float,
         crop_len_s: Optional[float],
         window_config_id: str,
-        zarr_path: Path,
+        memmap_path: Path,
         metadata_path: Path,
         complete_marker_path: Path,
         mode: str = 'train'
-    ) -> LazyZarrWindowDataset:
+    ) -> MemmapWindowDataset:
         """Build window cache from raw cache using parallel workers.
 
-        Supports resuming partial builds by checking existing metadata.
-        Saves metadata incrementally after each chunk to prevent data loss.
+        Note: Memmap does not support incremental builds. Always rebuilds from scratch.
 
         Args:
             recordings: DataFrame of recordings to window
@@ -281,85 +280,44 @@ class WindowCacheBuilder:
             stride_s: Stride in seconds
             crop_len_s: Optional crop length
             window_config_id: Config ID for this window setup
-            zarr_path: Path to save Zarr array
+            memmap_path: Path to save numpy array (.npy file)
             metadata_path: Path to save metadata
             complete_marker_path: Path to completion marker file
 
         Returns:
-            LazyZarrWindowDataset
+            MemmapWindowDataset
         """
         sfreq = self.cache_mgr.preprocessing_params["sfreq"]
         window_samples = int(window_len_s * sfreq)
 
-        # Check for partial build and resume if possible
-        processed_recording_ids = set()
-        if metadata_path.exists() and zarr_path.exists():
-            logger.info(f"Detected partial build - resuming from existing metadata")
-            existing_metadata = pd.read_parquet(metadata_path)
-            processed_recording_ids = set(existing_metadata["recording_id"].unique())
-            logger.info(f"  Already processed: {len(processed_recording_ids)} recordings")
+        # Ensure output directory exists
+        memmap_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Filter to only unprocessed recordings
-            recordings = recordings[
-                ~recordings["recording_id"].isin(processed_recording_ids)
-            ].reset_index(drop=True)
-            logger.info(f"  Remaining to process: {len(recordings)} recordings")
+        # Estimate total windows needed (for pre-allocation)
+        # Use average of 500 windows per recording as conservative estimate
+        estimated_windows = len(recordings) * 500
 
-            # Open existing Zarr in append mode
-            window_zarr = zarr.open(str(zarr_path), mode='a')
-            total_windows = window_zarr.shape[0]
-        else:
-            # Fresh build - create new Zarr array
-            if len(recordings) == 0:
-                raise ValueError("Cannot create window dataset from empty recordings DataFrame")
-
-            first_raw_path = recordings.iloc[0]["raw_zarr_path"]
-            first_raw = zarr.open(str(first_raw_path), mode='r')
-            n_channels = first_raw.shape[0]
-
-            zarr_path.parent.mkdir(parents=True, exist_ok=True)
-            compressor = Blosc(cname='zstd', clevel=5, shuffle=Blosc.BITSHUFFLE)
-            window_zarr = zarr.open(
-                str(zarr_path),
-                mode='w',
-                shape=(0, n_channels, window_samples),
-                chunks=(100, n_channels, window_samples),
-                dtype=np.float32,
-                compressor=compressor,
-                zarr_format=2
-            )
-            total_windows = 0
-
-        # If all recordings already processed, just load and return
+        # Get channel count from first recording
         if len(recordings) == 0:
-            logger.info("✓ All recordings already processed!")
-            metadata = pd.read_parquet(metadata_path)
+            raise ValueError("Cannot create window dataset from empty recordings DataFrame")
+        first_raw_path = recordings.iloc[0]["raw_zarr_path"]
+        first_raw = zarr.open(str(first_raw_path), mode='r')
+        n_channels = first_raw.shape[0]
 
-            # Create completion marker
-            complete_marker_path.write_text(f"completed at {datetime.now().isoformat()}")
+        # Pre-allocate memmap file with estimated size
+        logger.info(f"Pre-allocating memmap file: estimated {estimated_windows:,} windows...")
+        memmap_array = np.lib.format.open_memmap(
+            str(memmap_path),
+            mode='w+',
+            dtype=np.float32,
+            shape=(estimated_windows, n_channels, window_samples)
+        )
 
-            # Update manifest
-            self.window_manifest.mark_complete({
-                "window_config_id": window_config_id,
-                "raw_config_hash": self.cache_mgr.preprocessing_hash,
-                "window_len_s": window_len_s,
-                "stride_s": stride_s,
-                "n_windows": total_windows,
-                "window_zarr_path": str(zarr_path),
-                "metadata_path": str(metadata_path),
-                "error_msg": ""
-            })
-            self.window_manifest.save()
+        # Track progress
+        all_metadata = []
+        total_windows = 0
 
-            return LazyZarrWindowDataset(
-                zarr_path=zarr_path,
-                metadata=metadata,
-                crop_len_s=crop_len_s,
-                sfreq=sfreq,
-                mode=mode
-            )
-
-        # Process remaining recordings in chunks
+        # Process all recordings in chunks
         max_workers = 32
         chunk_size = 10
 
@@ -392,43 +350,93 @@ class WindowCacheBuilder:
                 for rec in tqdm(chunk, desc=f"Chunk {chunk_idx + 1}/{n_chunks}", unit="rec")
             )
 
-            # Accumulate chunk metadata
-            chunk_metadata_rows = []
+            # Write windows directly to memmap file (incremental, no RAM accumulation)
             for windows, rec_metadata in chunk_results:
                 if windows.shape[0] > 0:
-                    # Write windows to zarr
-                    zarr_start = window_zarr.shape[0]
-                    window_zarr.append(windows, axis=0)
+                    n_windows = windows.shape[0]
 
-                    # Update metadata with correct zarr indices
+                    # Check if we need to expand the array (shouldn't happen with good estimate)
+                    if total_windows + n_windows > memmap_array.shape[0]:
+                        logger.warning(f"Expanding memmap array (estimate was too small)")
+                        # Flush current memmap
+                        del memmap_array
+                        # Resize file
+                        new_size = (total_windows + n_windows) * 2  # Double to avoid frequent resizes
+                        logger.info(f"  Resizing from {estimated_windows:,} to {new_size:,} windows...")
+                        # Reload with new size (numpy doesn't support in-place resize, so we copy)
+                        temp_path = memmap_path.parent / f"{memmap_path.stem}_temp.npy"
+                        old_data = np.load(memmap_path, mmap_mode='r')[:total_windows]
+                        new_array = np.lib.format.open_memmap(
+                            str(temp_path),
+                            mode='w+',
+                            dtype=np.float32,
+                            shape=(new_size, n_channels, window_samples)
+                        )
+                        new_array[:total_windows] = old_data
+                        del old_data
+                        temp_path.rename(memmap_path)
+                        memmap_array = new_array
+                        estimated_windows = new_size
+
+                    # Write windows directly to memmap (writes to disk immediately)
+                    memmap_array[total_windows:total_windows + n_windows] = windows
+
+                    # Update metadata with array indices
                     for i, meta in enumerate(rec_metadata):
                         meta["window_idx"] = total_windows + i
-                        meta["zarr_index"] = zarr_start + i
-                        chunk_metadata_rows.append(meta)
+                        meta["array_index"] = total_windows + i
+                        all_metadata.append(meta)
 
-                    total_windows += windows.shape[0]
+                    total_windows += n_windows
                     del windows
                     del rec_metadata
-
-            # Save metadata incrementally after each chunk
-            if chunk_metadata_rows:
-                chunk_metadata_df = pd.DataFrame(chunk_metadata_rows)
-
-                # Append to existing metadata or create new file
-                if metadata_path.exists():
-                    existing_metadata = pd.read_parquet(metadata_path)
-                    combined_metadata = pd.concat([existing_metadata, chunk_metadata_df], ignore_index=True)
-                    combined_metadata.to_parquet(metadata_path, index=False)
-                else:
-                    chunk_metadata_df.to_parquet(metadata_path, index=False)
-
-                del chunk_metadata_rows, chunk_metadata_df
 
             # Clear memory after each chunk
             del chunk_results
             gc.collect()
 
-            logger.info(f"  ✓ Chunk {chunk_idx + 1}/{n_chunks} complete: {total_windows:,} total windows (metadata saved)")
+            # Flush memmap to disk periodically
+            if chunk_idx % 10 == 0:  # Flush every 10 chunks
+                memmap_array.flush()
+
+            logger.info(f"  ✓ Chunk {chunk_idx + 1}/{n_chunks} complete: {total_windows:,} total windows written to disk")
+
+        # Trim memmap file to actual size (if estimated size was larger than actual)
+        if total_windows < estimated_windows:
+            logger.info(f"Trimming memmap file from {estimated_windows:,} to {total_windows:,} windows...")
+            # Flush current data
+            memmap_array.flush()
+            del memmap_array
+
+            # Load actual data
+            actual_data = np.load(memmap_path, mmap_mode='r')[:total_windows]
+
+            # Overwrite file with trimmed data
+            trimmed_array = np.lib.format.open_memmap(
+                str(memmap_path),
+                mode='w+',
+                dtype=np.float32,
+                shape=(total_windows, n_channels, window_samples)
+            )
+            trimmed_array[:] = actual_data
+            trimmed_array.flush()
+            del actual_data, trimmed_array
+            gc.collect()
+        else:
+            # Just flush if size was perfect
+            memmap_array.flush()
+            del memmap_array
+            gc.collect()
+
+        logger.info(f"✓ Saved {total_windows:,} windows to {memmap_path.name} ({total_windows * n_channels * window_samples * 4 / 1e9:.2f} GB)")
+
+        # Save metadata
+        logger.info(f"Saving metadata ({len(all_metadata)} rows)...")
+        metadata_df = pd.DataFrame(all_metadata)
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
+        metadata_df.to_parquet(metadata_path, index=False)
+        del all_metadata
+        gc.collect()
 
         # Create completion marker
         logger.info("Creating completion marker...")
@@ -441,7 +449,7 @@ class WindowCacheBuilder:
             "window_len_s": window_len_s,
             "stride_s": stride_s,
             "n_windows": total_windows,
-            "window_zarr_path": str(zarr_path),
+            "window_zarr_path": str(memmap_path),  # Keep same field name for compatibility
             "metadata_path": str(metadata_path),
             "error_msg": ""
         })
@@ -449,12 +457,10 @@ class WindowCacheBuilder:
 
         logger.info(f"✓ Created {total_windows:,} windows using {max_workers} workers")
 
-        # Load final metadata for return
-        metadata = pd.read_parquet(metadata_path)
-
-        return LazyZarrWindowDataset(
-            zarr_path=zarr_path,
-            metadata=metadata,
+        # Return dataset
+        return MemmapWindowDataset(
+            memmap_path=memmap_path,
+            metadata=metadata_df,
             crop_len_s=crop_len_s,
             sfreq=sfreq,
             mode=mode

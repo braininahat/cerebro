@@ -241,7 +241,7 @@ class UniversalCacheManager:
             mode: 'train' or 'val' (affects cropping strategy)
 
         Returns:
-            LazyZarrWindowDataset instance
+            MemmapWindowDataset instance
         """
         from cerebro.data.unified_cache.window_cache import WindowCacheBuilder
 
