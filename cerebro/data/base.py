@@ -145,6 +145,76 @@ class BaseTaskDataModule(L.LightningDataModule):
         """Update batch size (modified by Lightning's batch size scaler)."""
         self.hparams.batch_size = value
 
+    def _get_split_file_path(self, subjects: list[str]) -> Any:
+        """Generate path for split file based on subjects, seed, and split fractions.
+
+        Args:
+            subjects: List of subject IDs (after exclusion)
+
+        Returns:
+            Path to split JSON file
+        """
+        import hashlib
+        from pathlib import Path
+
+        # Hash based on subjects list (deterministic)
+        subjects_str = "_".join(sorted(subjects))
+        subjects_hash = hashlib.md5(subjects_str.encode()).hexdigest()[:8]
+
+        # Include split parameters in filename
+        val_str = f"{int(self.hparams.val_frac*100)}"
+        test_str = f"{int(self.hparams.test_frac*100)}"
+
+        # Try to get data_dir from dataset if available
+        data_dir = getattr(self.dataset, "data_dir", Path("./data"))
+        return Path(data_dir) / "splits" / f"splits_{subjects_hash}_seed{self.hparams.seed}_val{val_str}_test{test_str}.json"
+
+    def _save_splits(self, train_subj: list[str], val_subj: list[str], test_subj: list[str], all_subjects: list[str]):
+        """Save subject splits to disk for reproducibility.
+
+        Args:
+            train_subj: Training subject IDs
+            val_subj: Validation subject IDs
+            test_subj: Test subject IDs
+            all_subjects: All subject IDs (for hash computation)
+        """
+        import json
+
+        split_path = self._get_split_file_path(all_subjects)
+        split_path.parent.mkdir(parents=True, exist_ok=True)
+
+        splits = {
+            "train": train_subj,
+            "val": val_subj,
+            "test": test_subj
+        }
+
+        with open(split_path, 'w') as f:
+            json.dump(splits, f, indent=2)
+
+        logger.info(f"Saved splits to: {split_path}")
+
+    def _load_splits(self, all_subjects: list[str]) -> tuple[Optional[list[str]], Optional[list[str]], Optional[list[str]]]:
+        """Load subject splits from disk if they exist.
+
+        Args:
+            all_subjects: All subject IDs (for hash computation)
+
+        Returns:
+            Tuple of (train_subj, val_subj, test_subj) or (None, None, None)
+        """
+        import json
+
+        split_path = self._get_split_file_path(all_subjects)
+
+        if split_path.exists():
+            with open(split_path, 'r') as f:
+                splits = json.load(f)
+            logger.info(f"Loaded existing splits from: {split_path}")
+            return splits["train"], splits["val"], splits["test"]
+
+        return None, None, None
+
     def setup(self, stage: Optional[str] = None):
         """Setup datasets: load → window → split.
 
@@ -186,24 +256,38 @@ class BaseTaskDataModule(L.LightningDataModule):
         subjects = [s for s in subjects if s not in self.excluded_subjects]
         logger.info(f"[bold]Total subjects (after exclusion):[/bold] {len(subjects)}")
 
-        # Split: train / (val + test)
-        train_subj, valid_test_subj = train_test_split(
-            subjects,
-            test_size=(self.hparams.val_frac + self.hparams.test_frac),
-            random_state=check_random_state(self.hparams.seed),
-            shuffle=True
-        )
+        # Try to load existing splits for reproducibility
+        train_subj_saved, valid_subj_saved, test_subj_saved = self._load_splits(subjects)
 
-        # Split: val / test
-        valid_subj, test_subj = train_test_split(
-            valid_test_subj,
-            test_size=self.hparams.test_frac / (self.hparams.val_frac + self.hparams.test_frac),
-            random_state=check_random_state(self.hparams.seed + 1),
-            shuffle=True
-        )
+        if train_subj_saved is not None:
+            # Use saved splits
+            train_subj = train_subj_saved
+            valid_subj = valid_subj_saved
+            test_subj = test_subj_saved
+            logger.info("Using previously saved splits for reproducibility")
+        else:
+            # Create new splits
+            # Split: train / (val + test)
+            train_subj, valid_test_subj = train_test_split(
+                subjects,
+                test_size=(self.hparams.val_frac + self.hparams.test_frac),
+                random_state=check_random_state(self.hparams.seed),
+                shuffle=True
+            )
 
-        # Sanity check
-        assert (set(valid_subj) | set(test_subj) | set(train_subj)) == set(subjects)
+            # Split: val / test
+            valid_subj, test_subj = train_test_split(
+                valid_test_subj,
+                test_size=self.hparams.test_frac / (self.hparams.val_frac + self.hparams.test_frac),
+                random_state=check_random_state(self.hparams.seed + 1),
+                shuffle=True
+            )
+
+            # Sanity check
+            assert (set(valid_subj) | set(test_subj) | set(train_subj)) == set(subjects)
+
+            # Save splits for future runs
+            self._save_splits(train_subj, valid_subj, test_subj, subjects)
 
         logger.info(f"Train subjects: {len(train_subj)}")
         logger.info(f"Val subjects: {len(valid_subj)}")

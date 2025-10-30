@@ -86,12 +86,13 @@ data:
   init_args:
     data_dir: ${oc.env:EEG2025_DATA_ROOT,./data}
 
-    # All releases except R5 (competition validation)
+    # Training releases (R5 excluded - competition validation set)
     releases:
       - R1
       - R2
       - R3
       - R4
+      # R5 excluded (competition validation set)
       - R6
       - R7
       - R8
@@ -113,12 +114,14 @@ data:
     stride: 1.0
     crop_length: null
 
-    val_split: 0.2
-    test_release: null
+    val_split: 0.2  # 80/20 train/val split at subject level
+    test_release: null  # No test from pretrain data (R5 handled separately)
 
     n_chans_select: 129
     sfreq: 100
     mini: false  # FULL DATASET
 
-    batch_size: 256
-    num_workers: 8
+    batch_size: 1024
+    num_workers: 32
+    prefetch_factor: 2  # Each worker prefetches 4 batches (32 workers × 4 = 128 batches in flight)
+    persistent_workers: true  # Keep workers alive between epochs (faster epoch transitions)

@@ -43,6 +43,10 @@ class JEPAPretrainDataModule(L.LightningDataModule):
         releases: List of release IDs (default: all except R5)
         batch_size: Batch size for training
         num_workers: Number of dataloader workers
+        prefetch_factor: Number of batches each worker prefetches ahead (default: 2)
+            Higher values = more memory but smoother GPU feeding. Try 4-8 for large num_workers.
+        persistent_workers: Keep workers alive between epochs (default: False)
+            Reduces epoch transition time but uses more memory.
         window_length: Window length in seconds (default: 2.0 for S-JEPA)
         stride: Stride between windows (default: 1.0)
         crop_length: Random crop length in seconds (default: None, set to enable temporal augmentation)
@@ -75,6 +79,8 @@ class JEPAPretrainDataModule(L.LightningDataModule):
         releases: Optional[list[str]] = None,
         batch_size: int = 256,
         num_workers: int = 8,
+        prefetch_factor: int = 2,  # Number of batches each worker prefetches
+        persistent_workers: bool = False,  # Keep workers alive between epochs
         window_length: float = 2.0,  # 2s windows for S-JEPA
         stride: float = 1.0,
         crop_length: Optional[float] = None,  # Optional temporal augmentation
@@ -93,6 +99,8 @@ class JEPAPretrainDataModule(L.LightningDataModule):
 
         self.data_dir = Path(data_dir).resolve()  # Absolute path for EEGChallengeDataset
         self.num_workers = num_workers
+        self.prefetch_factor = prefetch_factor
+        self.persistent_workers = persistent_workers
 
         # Default: all releases except R5 (competition validation)
         if releases is None:
@@ -149,6 +157,62 @@ class JEPAPretrainDataModule(L.LightningDataModule):
     def batch_size(self, value: int):
         """Update batch size (modified by Lightning's batch size scaler)."""
         self.hparams.batch_size = value
+
+    def _get_split_file_path(self) -> Path:
+        """Generate path for split file based on releases, seed, val_split.
+
+        Returns:
+            Path to split JSON file
+        """
+        import hashlib
+        releases_str = "_".join(sorted(self.releases))
+        releases_hash = hashlib.md5(releases_str.encode()).hexdigest()[:8]
+        val_str = f"{int(self.val_split*100)}"
+        return self.data_dir / "splits" / f"splits_{releases_hash}_seed{self.seed}_val{val_str}.json"
+
+    def _save_splits(self, train_subjects: np.ndarray, val_subjects: np.ndarray, test_subjects: Optional[np.ndarray] = None):
+        """Save subject splits to disk for reproducibility.
+
+        Args:
+            train_subjects: Training subject IDs
+            val_subjects: Validation subject IDs
+            test_subjects: Test subject IDs (optional)
+        """
+        import json
+        split_path = self._get_split_file_path()
+        split_path.parent.mkdir(parents=True, exist_ok=True)
+
+        splits = {
+            "train": train_subjects.tolist(),
+            "val": val_subjects.tolist(),
+            "test": test_subjects.tolist() if test_subjects is not None else []
+        }
+
+        with open(split_path, 'w') as f:
+            json.dump(splits, f, indent=2)
+
+        logger.info(f"Saved splits to: {split_path}")
+
+    def _load_splits(self) -> tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+        """Load subject splits from disk if they exist.
+
+        Returns:
+            Tuple of (train_subjects, val_subjects, test_subjects) or (None, None, None)
+        """
+        import json
+        split_path = self._get_split_file_path()
+
+        if split_path.exists():
+            with open(split_path, 'r') as f:
+                splits = json.load(f)
+            logger.info(f"Loaded existing splits from: {split_path}")
+            return (
+                np.array(splits["train"]),
+                np.array(splits["val"]),
+                np.array(splits.get("test", []))
+            )
+
+        return None, None, None
 
     def prepare_data(self):
         """Download data if needed."""
@@ -212,7 +276,23 @@ class JEPAPretrainDataModule(L.LightningDataModule):
         train_val_subjects = train_val_recordings["subject"].unique()
         logger.info(f"Train/val unique subjects: {len(train_val_subjects)}")
 
-        if self.val_split > 0 and len(train_val_subjects) > 1:
+        # Try to load existing splits for reproducibility
+        train_subjects_saved, val_subjects_saved, _ = self._load_splits()
+
+        if train_subjects_saved is not None:
+            # Use saved splits
+            train_subjects = train_subjects_saved
+            val_subjects = val_subjects_saved
+            logger.info("Using previously saved splits for reproducibility")
+
+            train_recordings = train_val_recordings[
+                train_val_recordings["subject"].isin(train_subjects)
+            ]
+            val_recordings = train_val_recordings[
+                train_val_recordings["subject"].isin(val_subjects)
+            ]
+        elif self.val_split > 0 and len(train_val_subjects) > 1:
+            # Create new splits
             train_subjects, val_subjects = train_test_split(
                 train_val_subjects,
                 test_size=self.val_split,
@@ -225,6 +305,9 @@ class JEPAPretrainDataModule(L.LightningDataModule):
             val_recordings = train_val_recordings[
                 train_val_recordings["subject"].isin(val_subjects)
             ]
+
+            # Save splits for future runs
+            self._save_splits(train_subjects, val_subjects)
         else:
             # No val split - use all for training, create dummy val for Lightning
             train_subjects = train_val_subjects
@@ -288,31 +371,37 @@ class JEPAPretrainDataModule(L.LightningDataModule):
         )
 
     def train_dataloader(self) -> DataLoader:
-        """Training dataloader."""
+        """Training dataloader with prefetching support."""
         return DataLoader(
             self.train_dataset,
             batch_size=self.hparams.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
             pin_memory=True,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            persistent_workers=self.persistent_workers if self.num_workers > 0 else False,
         )
 
     def val_dataloader(self) -> DataLoader:
-        """Validation dataloader."""
+        """Validation dataloader with prefetching support."""
         return DataLoader(
             self.val_dataset,
             batch_size=self.hparams.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=True,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            persistent_workers=self.persistent_workers if self.num_workers > 0 else False,
         )
 
     def test_dataloader(self) -> DataLoader:
-        """Test dataloader."""
+        """Test dataloader with prefetching support."""
         return DataLoader(
             self.test_dataset,
             batch_size=self.hparams.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=True,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            persistent_workers=self.persistent_workers if self.num_workers > 0 else False,
         )

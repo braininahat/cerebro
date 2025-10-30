@@ -116,11 +116,20 @@ class ManifestManager:
     def mark_complete(self, entry: Dict[str, Any]):
         """Mark entry as complete in manifest.
 
+        Deduplicates by removing any existing entries for this recording_id
+        before appending. This prevents duplicate rows when retrying failed recordings.
+
         Args:
             entry: Dict with manifest columns + values
         """
         entry["status"] = "complete"
         entry["timestamp"] = datetime.now().isoformat()
+
+        # Remove any existing entries for this recording_id to prevent duplicates
+        if "recording_id" in entry and "recording_id" in self.manifest.columns:
+            self.manifest = self.manifest[
+                self.manifest["recording_id"] != entry["recording_id"]
+            ]
 
         # Append to manifest
         new_row = pd.DataFrame([entry])
@@ -129,6 +138,9 @@ class ManifestManager:
     def mark_failed(self, entry: Dict[str, Any], error: str):
         """Mark entry as failed in manifest.
 
+        Deduplicates by removing any existing entries for this recording_id
+        before appending. This prevents duplicate rows when retrying failed recordings.
+
         Args:
             entry: Dict with manifest columns + values
             error: Error message
@@ -136,6 +148,12 @@ class ManifestManager:
         entry["status"] = "failed"
         entry["error_msg"] = str(error)[:500]  # Truncate long errors
         entry["timestamp"] = datetime.now().isoformat()
+
+        # Remove any existing entries for this recording_id to prevent duplicates
+        if "recording_id" in entry and "recording_id" in self.manifest.columns:
+            self.manifest = self.manifest[
+                self.manifest["recording_id"] != entry["recording_id"]
+            ]
 
         # Append to manifest
         new_row = pd.DataFrame([entry])
@@ -160,6 +178,29 @@ class ManifestManager:
             self.manifest[self.manifest["status"] == "complete"]["recording_id"].values
         )
         return [rid for rid in all_recording_ids if rid not in completed]
+
+    def clear_failed_recordings(self):
+        """Remove all failed entries from manifest to enable retry.
+
+        This cleans up the manifest by removing failed recordings, allowing
+        them to be retried on the next run. Successful recordings are preserved.
+        """
+        if "status" not in self.manifest.columns:
+            return
+
+        n_failed_before = (self.manifest["status"] == "failed").sum()
+        if n_failed_before == 0:
+            logger.info("No failed recordings to clear")
+            return
+
+        # Keep only complete recordings
+        self.manifest = self.manifest[self.manifest["status"] == "complete"].copy()
+
+        logger.info(f"Cleared {n_failed_before} failed recordings from manifest")
+        logger.info(f"They will be retried on next run")
+
+        # Save cleaned manifest
+        self.save()
 
     def get_stats(self) -> Dict[str, Any]:
         """Get manifest statistics.

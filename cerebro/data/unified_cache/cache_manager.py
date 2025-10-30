@@ -127,13 +127,15 @@ class UniversalCacheManager:
     def _get_window_config_id(
         self,
         window_len_s: float,
-        stride_s: float
+        stride_s: float,
+        mini: bool
     ) -> str:
         """Generate window configuration ID.
 
         Args:
             window_len_s: Window length in seconds
             stride_s: Stride in seconds
+            mini: Mini dataset flag (included to prevent mini/full collision)
 
         Returns:
             Config ID string
@@ -141,7 +143,8 @@ class UniversalCacheManager:
         # Format to avoid float precision issues
         win_str = f"{int(window_len_s*10)}".replace(".", "p")
         stride_str = f"{int(stride_s*10)}".replace(".", "p")
-        return f"windows_{self.preprocessing_hash}_win{win_str}_stride{stride_str}"
+        mini_str = "mini" if mini else "full"
+        return f"windows_{self.preprocessing_hash}_win{win_str}_stride{stride_str}_{mini_str}"
 
     def _get_window_zarr_path(self, window_config_id: str) -> Path:
         """Get Zarr path for windowed data.

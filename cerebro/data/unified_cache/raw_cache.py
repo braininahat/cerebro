@@ -46,6 +46,27 @@ def _process_recording_worker(
         Metadata dict for manifest, or None if failed
     """
     try:
+        # Check if already processed (defensive programming against race conditions)
+        # Multiple workers might receive the same task from ProcessPoolExecutor
+        if zarr_path.exists():
+            # Already processed by another worker - skip
+            return {
+                "dataset": dataset,
+                "release": "unknown",
+                "subject": "unknown",
+                "task": "unknown",
+                "mini": mini,
+                "recording_id": recording_id,
+                "sfreq": 0,
+                "n_channels": 0,
+                "n_samples": 0,
+                "duration_s": 0.0,
+                "preprocessing_hash": preprocessing_hash,
+                "raw_zarr_path": str(zarr_path),
+                "error_msg": "Already processed by another worker",
+                "success": True,
+            }
+
         # Extract raw
         raw = ds.raw
 
@@ -63,21 +84,41 @@ def _process_recording_worker(
             data = (data - data.mean(axis=1, keepdims=True)) / (data.std(axis=1, keepdims=True) + 1e-8)
             raw._data = data
 
-        # Save to Zarr
+        # Save to Zarr (use 'w-' mode to fail if exists - atomic check)
         zarr_path.parent.mkdir(parents=True, exist_ok=True)
         data = raw.get_data()
 
         compressor = Blosc(cname='zstd', clevel=5, shuffle=Blosc.BITSHUFFLE)
-        z = zarr.open(
-            str(zarr_path),
-            mode='w',
-            shape=data.shape,
-            chunks=(data.shape[0], min(10000, data.shape[1])),
-            dtype=np.float32,
-            compressor=compressor,
-            zarr_format=2,
-        )
-        z[:] = data.astype(np.float32)
+        try:
+            # Use 'w-' mode (exclusive create) to atomically fail if exists
+            z = zarr.open(
+                str(zarr_path),
+                mode='w-',  # Create only, fail if exists (prevents race conditions)
+                shape=data.shape,
+                chunks=(data.shape[0], min(10000, data.shape[1])),
+                dtype=np.float32,
+                compressor=compressor,
+                zarr_format=2,
+            )
+            z[:] = data.astype(np.float32)
+        except (FileExistsError, ValueError) as e:
+            # Another worker created this zarr - that's ok, skip
+            return {
+                "dataset": dataset,
+                "release": ds.description.get("release_number", "unknown"),
+                "subject": ds.description.get("subject", "unknown"),
+                "task": ds.description.get("task", "unknown"),
+                "mini": mini,
+                "recording_id": recording_id,
+                "sfreq": 0,
+                "n_channels": 0,
+                "n_samples": 0,
+                "duration_s": 0.0,
+                "preprocessing_hash": preprocessing_hash,
+                "raw_zarr_path": str(zarr_path),
+                "error_msg": "Already created by another worker (race condition detected)",
+                "success": True,
+            }
 
         # Return metadata
         return {
@@ -103,6 +144,100 @@ def _process_recording_worker(
             "error_msg": str(e),
             "success": False,
         }
+
+
+def _process_recording_chunk(
+    chunk: List[tuple],
+    dataset: str,
+    mini: bool,
+    recordings_dir: Path,
+    preprocessing_params: Dict[str, Any],
+    preprocessing_hash: str,
+    worker_id: int
+) -> List[Dict[str, Any]]:
+    """Process a chunk of recordings in a single worker process.
+
+    With pre-partitioning, each worker gets an exclusive chunk of recordings,
+    eliminating any possibility of race conditions.
+
+    Args:
+        chunk: List of (recording_id, ds) tuples to process
+        dataset: Dataset name (e.g., "hbn")
+        mini: Mini flag
+        recordings_dir: Base directory for zarr files
+        preprocessing_params: Preprocessing parameters dict
+        preprocessing_hash: Hash of preprocessing params
+        worker_id: Worker identifier for logging
+
+    Returns:
+        List of metadata dicts for each recording in chunk
+    """
+    results = []
+
+    for recording_id, ds in chunk:
+        try:
+            # Build zarr path
+            zarr_path = recordings_dir / f"{recording_id}_{preprocessing_hash}.zarr"
+
+            # Extract raw
+            raw = ds.raw
+
+            # Apply preprocessing
+            target_sfreq = preprocessing_params["sfreq"]
+            if raw.info["sfreq"] != target_sfreq:
+                raw = raw.resample(target_sfreq)
+
+            bandpass = preprocessing_params.get("bandpass")
+            if bandpass:
+                raw = raw.filter(l_freq=bandpass[0], h_freq=bandpass[1])
+
+            if preprocessing_params.get("standardize", False):
+                data = raw.get_data()
+                data = (data - data.mean(axis=1, keepdims=True)) / (data.std(axis=1, keepdims=True) + 1e-8)
+                raw._data = data
+
+            # Save to Zarr
+            zarr_path.parent.mkdir(parents=True, exist_ok=True)
+            data = raw.get_data()
+
+            compressor = Blosc(cname='zstd', clevel=5, shuffle=Blosc.BITSHUFFLE)
+            z = zarr.open(
+                str(zarr_path),
+                mode='w',  # Safe to use 'w' - no collisions with pre-partitioning
+                shape=data.shape,
+                chunks=(data.shape[0], min(10000, data.shape[1])),
+                dtype=np.float32,
+                compressor=compressor,
+                zarr_format=2,
+            )
+            z[:] = data.astype(np.float32)
+
+            # Return metadata
+            results.append({
+                "dataset": dataset,
+                "release": ds.description.get("release_number", "unknown"),
+                "subject": ds.description.get("subject", "unknown"),
+                "task": ds.description.get("task", "unknown"),
+                "mini": mini,
+                "recording_id": recording_id,
+                "sfreq": int(raw.info["sfreq"]),
+                "n_channels": len(raw.ch_names),
+                "n_samples": raw.n_times,
+                "duration_s": raw.times[-1],
+                "preprocessing_hash": preprocessing_hash,
+                "raw_zarr_path": str(zarr_path),
+                "error_msg": "",
+                "success": True,
+            })
+        except Exception as e:
+            logger.error(f"Worker {worker_id} failed on {recording_id}: {e}")
+            results.append({
+                "recording_id": recording_id,
+                "error_msg": str(e),
+                "success": False,
+            })
+
+    return results
 
 
 class GracefulInterruptHandler:
@@ -207,56 +342,103 @@ class RawCacheBuilder:
             logger.info("✓ All recordings already cached!")
             return
 
-        # Process missing recordings in parallel
+        # Process missing recordings in parallel with pre-partitioning
+        # Pre-partition recordings into chunks to guarantee no worker collisions
         import os
-        max_workers = min(32, os.cpu_count() or 1)  # Use up to 32 cores
+        max_workers = min(32, os.cpu_count())
+
+        # Partition recordings into chunks - each worker gets exclusive chunk
+        def partition_list(items, n_partitions):
+            """Divide list into n roughly equal chunks."""
+            chunk_size = len(items) // n_partitions
+            remainder = len(items) % n_partitions
+            chunks = []
+            start = 0
+            for i in range(n_partitions):
+                # Distribute remainder across first chunks
+                end = start + chunk_size + (1 if i < remainder else 0)
+                chunks.append(items[start:end])
+                start = end
+            return chunks
+
+        # Create more chunks for better load balancing (target ~50 recordings per chunk)
+        target_chunk_size = 50
+        n_chunks = max(max_workers, len(missing_recordings) // target_chunk_size)
+        recording_chunks = partition_list(missing_recordings, n_chunks)
+
         logger.info(f"Processing with {max_workers} parallel workers")
+        logger.info(f"Partitioned {len(missing_recordings)} recordings into {len(recording_chunks)} chunks (~{target_chunk_size} recordings each)")
+        logger.info(f"  Chunk size range: {min(len(c) for c in recording_chunks if c)}-{max(len(c) for c in recording_chunks if c)} recordings")
 
         futures = []
+        future_to_metadata = {}  # Map futures to their worker metadata
+
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            for recording_id, ds in missing_recordings:
-                zarr_path = self.cache_mgr._get_raw_zarr_path(recording_id)
+            # Submit all chunks to executor
+            for worker_id, chunk in enumerate(recording_chunks):
+                if not chunk:  # Skip empty chunks
+                    continue
                 future = executor.submit(
-                    _process_recording_worker,
-                    recording_id,
-                    ds,
+                    _process_recording_chunk,
+                    chunk,
                     dataset,
                     mini,
-                    zarr_path,
+                    self.cache_mgr.raw_cache_dir / "recordings",
                     self.cache_mgr.preprocessing_params,
-                    self.cache_mgr.preprocessing_hash
+                    self.cache_mgr.preprocessing_hash,
+                    worker_id
                 )
-                futures.append((recording_id, future))
+                future_to_metadata[future] = (worker_id, chunk)
+                futures.append(future)
 
-            # Collect results with progress bar
+            # Collect results using as_completed() for real-time progress
+            from concurrent.futures import as_completed
             completed = 0
             failed = 0
-            with tqdm(total=len(futures), desc="Processing", unit="rec") as pbar:
-                for recording_id, future in futures:
-                    try:
-                        result = future.result()
-                        if result["success"]:
-                            self.raw_manifest.mark_complete(result)
-                            completed += 1
-                        else:
-                            self.raw_manifest.mark_failed(
-                                {"recording_id": recording_id},
-                                error=result["error_msg"]
-                            )
-                            failed += 1
-                    except Exception as e:
-                        logger.error(f"Failed to process {recording_id}: {e}")
-                        self.raw_manifest.mark_failed(
-                            {"recording_id": recording_id},
-                            error=str(e)
-                        )
-                        failed += 1
-                    finally:
-                        pbar.update(1)
 
-            # Save manifest
+            with GracefulInterruptHandler() as handler:
+                with tqdm(total=len(missing_recordings), desc="Processing", unit="rec") as pbar:
+                    for future in as_completed(futures):
+                        if handler.interrupted:
+                            logger.warning("⚠ Interrupt received - saving progress and stopping...")
+                            break
+
+                        worker_id, chunk = future_to_metadata[future]
+
+                        try:
+                            results = future.result()
+                            for result in results:
+                                if result["success"]:
+                                    self.raw_manifest.mark_complete(result)
+                                    completed += 1
+                                else:
+                                    self.raw_manifest.mark_failed(
+                                        {"recording_id": result["recording_id"]},
+                                        error=result["error_msg"]
+                                    )
+                                    failed += 1
+                                pbar.update(1)
+
+                            # Save after each chunk completes (incremental save)
+                            self.raw_manifest.save()
+
+                        except Exception as e:
+                            logger.error(f"Worker {worker_id} failed: {e}")
+                            # Mark all recordings in chunk as failed
+                            for recording_id, _ in chunk:
+                                self.raw_manifest.mark_failed(
+                                    {"recording_id": recording_id},
+                                    error=f"Worker crashed: {str(e)}"
+                                )
+                                failed += 1
+                                pbar.update(1)
+
+                            # Save even after failures
+                            self.raw_manifest.save()
+
+            # Final save to ensure everything is persisted
             self.raw_manifest.save()
+
             logger.info(f"\n✓ Raw cache build complete!")
             logger.info(f"  Completed: {completed}, Failed: {failed}")
             self.raw_manifest.print_status("Raw Cache Status")
