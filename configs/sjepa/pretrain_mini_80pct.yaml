@@ -1,0 +1,122 @@
+# S-JEPA pretraining config with 80% spatial block masking (mini dataset)
+#
+# Same as pretrain_mini_40pct.yaml but with 80% mask diameter.
+# Largest mask size tested in the paper.
+
+seed_everything: 42
+run_lr_finder: false
+run_batch_size_finder: false
+
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  max_epochs: 100
+  log_every_n_steps: 5
+
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: sjepa_pretrain_mini_80pct
+      tags:
+        - sjepa
+        - pretrain
+        - mini
+        - spatial_mask_80pct
+        - vanilla_signaljepa
+      save_dir: outputs/sjepa/pretrain_mini_80pct/${now:%Y%m%d_%H%M%S}
+      mode: offline
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/sjepa/pretrain_mini_80pct/${now:%Y%m%d_%H%M%S}/checkpoints
+        filename: sjepa-{epoch:02d}-{val/loss:.4f}
+        monitor: val/loss
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    - class_path: cerebro.callbacks.LatestCheckpointSymlinkCallback
+
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 10
+        mode: min
+        verbose: true
+
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+model:
+  class_path: cerebro.trainers.sjepa_pretrain.SJEPATrainer
+  init_args:
+    encoder:
+      class_path: cerebro.models.components.encoders.VanillaSignalJEPAEncoder
+      init_args:
+        n_chans: 129
+        n_times: 200
+        sfreq: 100
+        drop_prob: 0.0
+        transformer__d_model: 64
+        transformer__num_encoder_layers: 8
+        transformer__nhead: 8
+
+    mask_diameter_pct: 80  # 80% of head size (CHANGED FROM 40%)
+    ema_momentum: 0.996
+    predictor_depth: 4
+    predictor_heads: 8
+
+    lr: 0.0001
+    weight_decay: 0.05
+    warmup_epochs: 10
+    max_epochs: 100
+
+data:
+  class_path: cerebro.data.jepa_pretrain.JEPAPretrainDataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,./data}
+
+    releases:
+      - R1
+      - R2
+      - R3
+      - R4
+      - R6
+      - R7
+      - R8
+      - R9
+      - R10
+      - R11
+
+    all_tasks:
+      - contrastChangeDetection
+      - restingState
+      - despicableMe
+      - thePresent
+      - diaryOfAWimpyKid
+      - funwithFractals
+      - surroundSupp
+
+    window_length: 2.0
+    stride: 1.0
+    crop_length: null
+
+    val_split: 0.2
+    test_release: null
+
+    n_chans_select: 129
+    sfreq: 100
+    mini: true
+
+    batch_size: 256
+    num_workers: 8

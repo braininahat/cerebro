@@ -34,6 +34,8 @@ dependencies = [
 
 [project.scripts]
 cerebro = "cerebro.cli.train:cli_main"
+cerebro-build-submission = "cerebro.cli.build_submission:build_submission_cli"
+cerebro-score = "cerebro.cli.score:score_cli"
 
 [build-system]
 requires = ["hatchling"]

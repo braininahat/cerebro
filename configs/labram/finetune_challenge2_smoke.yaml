@@ -1,0 +1,92 @@
+seed_everything: 42
+run_lr_finder: false
+run_batch_size_finder: false
+model:
+  class_path: cerebro.models.labram.finetune.EEGRegressorPL
+  init_args:
+    EEG_size: 200
+    patch_size: 100
+    in_chans: 1
+    out_chans: 8
+    num_classes: 1
+    embed_dim: 200
+    depth: 12
+    num_heads: 10
+    mlp_ratio: 4.0
+    qkv_bias: false
+    qk_scale: null
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.0
+    init_values: null
+    use_abs_pos_emb: true
+    use_rel_pos_bias: false
+    use_shared_rel_pos_bias: false
+    use_mean_pooling: true
+    init_scale: 0.001
+    n_chans_hint: 129
+    max_time_window_hint: 2
+    pretrained: true
+    pretrained_weight: outputs/labram/pretrain_smoke/checkpoints/last.ckpt
+    lr: 0.0001
+    weight_decay: 0.05
+    betas:
+    - 0.9
+    - 0.95
+    use_cosine_per_step: true
+    eta_min: 1.0e-06
+    scale_input: false
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 5
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: labram_c2_smoke
+      tags:
+      - labram
+      - finetune
+      - challenge2
+      - mini
+      - test
+      - smoke
+      save_dir: outputs/labram/finetune_c2_smoke
+      mode: offline
+  callbacks:
+  - class_path: cerebro.callbacks.CheckpointCompatibilityCallback
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: outputs/labram/finetune_c2_smoke/checkpoints
+      filename: challenge2-{epoch:02d}-{val_nrmse_epoch:.4f}
+      monitor: val/nrmse_epoch
+      mode: min
+      save_top_k: 1
+      save_last: true
+  - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+    init_args:
+      leave: true
+  max_steps: 20
+  val_check_interval: 10
+data:
+  class_path: cerebro.data.challenge2.Challenge2DataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    releases:
+    - R1
+    tasks:
+    - contrastChangeDetection
+    batch_size: 256
+    num_workers: 4
+    window_size_s: 2.0
+    window_stride_s: 2.0
+    sfreq: 100
+    val_frac: 0.1
+    test_frac: 0.1
+    seed: 2025
+    excluded_subjects: []

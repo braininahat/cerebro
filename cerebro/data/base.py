@@ -1,9 +1,10 @@
 """Base DataModule for composable Dataset + Task architecture."""
 
 import logging
-from typing import Optional
+from typing import Any, Optional, Protocol, runtime_checkable
 
 import lightning as L
+import numpy as np
 import torch
 from braindecode.datasets import BaseConcatDataset
 from sklearn.model_selection import train_test_split
@@ -13,10 +14,72 @@ from torch.utils.data import DataLoader
 logger = logging.getLogger(__name__)
 
 
+@runtime_checkable
+class DatasetProtocol(Protocol):
+    """Protocol for Dataset implementations.
+
+    Any class implementing load() will satisfy this protocol.
+    This enables structural subtyping (duck typing) for datasets.
+
+    Example implementations:
+        - HBNDataset: Loads HBN-EEG recordings
+        - Future: MOABBDataset, CustomDataset, etc.
+    """
+
+    def load(self) -> BaseConcatDataset:
+        """Load and filter recordings without windowing.
+
+        Returns:
+            BaseConcatDataset of filtered recordings ready for windowing
+        """
+        ...
+
+
+@runtime_checkable
+class TaskProtocol(Protocol):
+    """Protocol for Task implementations.
+
+    Any class implementing create_windows() will satisfy this protocol.
+    This enables structural subtyping (duck typing) for tasks.
+
+    Example implementations:
+        - Challenge1Task: Windows for response time prediction
+        - Challenge2Task: Windows for p_factor prediction
+        - Future: CustomTask, PretrainingTask, etc.
+    """
+
+    def create_windows(self, recordings: BaseConcatDataset) -> BaseConcatDataset:
+        """Create windows from filtered recordings.
+
+        Args:
+            recordings: BaseConcatDataset from Dataset.load()
+
+        Returns:
+            BaseConcatDataset of windowed data ready for training
+        """
+        ...
+
+
 def collate_fn(batch):
-    """Collate function that handles (x, y) tuples."""
-    x_batch = torch.stack([item[0] for item in batch], dim=0)
-    y_batch = torch.stack([item[1] for item in batch], dim=0)
+    """Collate function that handles (x, y) tuples.
+
+    Converts numpy arrays to tensors if needed (braindecode returns numpy).
+    """
+    # Extract x and y, converting to tensors if they're numpy arrays
+    x_list = []
+    y_list = []
+    for item in batch:
+        x, y = item[0], item[1]
+        # Convert to tensor if numpy array
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x).float()
+        if isinstance(y, np.ndarray):
+            y = torch.from_numpy(y).float()
+        x_list.append(x)
+        y_list.append(y)
+
+    x_batch = torch.stack(x_list, dim=0)
+    y_batch = torch.stack(y_list, dim=0)
     return x_batch, y_batch
 
 
@@ -29,8 +92,8 @@ class BaseTaskDataModule(L.LightningDataModule):
     - Provides Lightning dataloaders
 
     Args:
-        dataset: Dataset instance (e.g., HBNDataset)
-        task: Task instance (e.g., Challenge1Task)
+        dataset: Dataset instance satisfying DatasetProtocol (e.g., HBNDataset)
+        task: Task instance satisfying TaskProtocol (e.g., Challenge1Task)
         batch_size: Batch size for dataloaders
         num_workers: Number of workers for parallel data loading
         val_frac: Fraction of subjects for validation
@@ -50,8 +113,8 @@ class BaseTaskDataModule(L.LightningDataModule):
 
     def __init__(
         self,
-        dataset,
-        task,
+        dataset: DatasetProtocol,
+        task: TaskProtocol,
         batch_size: int = 512,
         num_workers: int = 8,
         val_frac: float = 0.1,

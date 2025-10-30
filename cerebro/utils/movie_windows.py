@@ -18,8 +18,8 @@ def extract_subject_id(description) -> Optional[str]:
 
     Parameters
     ----------
-    description : dict or str
-        Dataset description, either as dict with 'subject' key or string
+    description : dict, pd.Series, or str
+        Dataset description, either as dict/Series with 'subject' key or string
         containing 'sub-XXXXXXX' pattern.
 
     Returns
@@ -27,9 +27,12 @@ def extract_subject_id(description) -> Optional[str]:
     str or None
         Subject ID (e.g., 'NDARXXXXXX') or None if not found.
     """
-    if isinstance(description, dict) and "subject" in description:
-        return description["subject"]
+    # Handle dict-like objects (dict, pandas Series, etc.)
+    if hasattr(description, '__getitem__') and hasattr(description, '__contains__'):
+        if "subject" in description:
+            return description["subject"]
 
+    # Handle string descriptions
     if isinstance(description, str) and "sub-" in description:
         match = re.search(r"sub-([A-Z0-9]+)", description)
         if match:
@@ -154,7 +157,7 @@ def load_and_window_movies(
     movie_names: list[str],
     dataset_class,
     cache_dir,
-    release: str = "R5",
+    releases: list[str] | str = "R5",
     mini: bool = True,
     window_len_s: float = 2.0,
     stride_s: float = 1.0,
@@ -164,8 +167,8 @@ def load_and_window_movies(
 ) -> BaseConcatDataset:
     """Load multiple movies and create windowed dataset with metadata.
 
-    Convenience function that loads multiple movies, creates windows,
-    and adds metadata in one call.
+    Convenience function that loads multiple movies from multiple releases,
+    creates windows, and adds metadata in one call.
 
     Parameters
     ----------
@@ -175,8 +178,8 @@ def load_and_window_movies(
         Dataset class to use (e.g., EEGChallengeDataset).
     cache_dir : Path or str
         Directory for caching downloaded data.
-    release : str, default='R5'
-        Dataset release version.
+    releases : list of str or str, default='R5'
+        Dataset release version(s). If list, loads from all releases.
     mini : bool, default=True
         Whether to use mini dataset.
     window_len_s : float, default=2.0
@@ -195,38 +198,44 @@ def load_and_window_movies(
     BaseConcatDataset
         Combined windowed dataset from all movies with metadata.
     """
+    # Convert single release to list
+    if isinstance(releases, str):
+        releases = [releases]
+
     all_windows = []
 
-    for movie_name in movie_names:
-        # Load dataset
-        ds = dataset_class(
-            task=movie_name,
-            release=release,
-            cache_dir=cache_dir,
-            mini=mini,
-        )
+    # Loop over releases and movies
+    for release in releases:
+        for movie_name in movie_names:
+            # Load dataset
+            ds = dataset_class(
+                task=movie_name,
+                release=release,
+                cache_dir=cache_dir,
+                mini=mini,
+            )
 
-        # Create windows
-        wins = create_movie_windows(
-            ds,
-            window_len_s=window_len_s,
-            stride_s=stride_s,
-            sfreq=sfreq,
-            preload=preload,
-        )
+            # Create windows
+            wins = create_movie_windows(
+                ds,
+                window_len_s=window_len_s,
+                stride_s=stride_s,
+                sfreq=sfreq,
+                preload=preload,
+            )
 
-        # Add metadata
-        wins = add_movie_metadata(
-            wins,
-            ds,
-            movie_name=movie_name,
-            sfreq=sfreq,
-            time_bin_size_s=time_bin_size_s,
-        )
+            # Add metadata
+            wins = add_movie_metadata(
+                wins,
+                ds,
+                movie_name=movie_name,
+                sfreq=sfreq,
+                time_bin_size_s=time_bin_size_s,
+            )
 
-        all_windows.append(wins)
+            all_windows.append(wins)
 
-    # Combine all movies
+    # Combine all movies and releases
     combined = BaseConcatDataset(
         [ds for movie_wins in all_windows for ds in movie_wins.datasets]
     )

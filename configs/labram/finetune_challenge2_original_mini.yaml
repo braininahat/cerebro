@@ -1,0 +1,101 @@
+# LaBraM Challenge 2 Finetuning - Original-Matched Mini
+# Phase 3b: P_factor prediction (matches original LaBraM finetuning)
+# Dataset: R1-R4, R6-R11 mini (20 subjects per release, ~120 total)
+# Hardware: Single GPU with gradient accumulation (effective batch 512)
+seed_everything: 42
+run_lr_finder: false
+run_batch_size_finder: false
+
+model:
+  class_path: "cerebro.models.labram.finetune.EEGRegressorPL"
+  init_args:
+    # Input parameters
+    EEG_size: 200
+    patch_size: 100
+    in_chans: 1
+    out_chans: 8
+    num_classes: 1  # Regression output
+    # Architecture (from pretrained)
+    embed_dim: 200
+    depth: 12
+    num_heads: 10
+    mlp_ratio: 4.0
+    qkv_bias: false  # Match Phase 2
+    qk_scale: null
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.1  # CHANGED from 0.0 to match original
+    init_values: null  # Note: original uses 0.1, but config doesn't expose this
+    use_abs_pos_emb: true
+    use_rel_pos_bias: false
+    use_shared_rel_pos_bias: false
+    use_mean_pooling: true
+    init_scale: 0.001
+    n_chans_hint: 129
+    max_time_window_hint: 2
+    # Load pretrained weights
+    pretrained: true
+    pretrained_weight: outputs/labram/pretrain_original_mini/checkpoints/last.ckpt
+    # Training hyperparameters (original)
+    lr: 0.002  # Base 5e-4 scaled for batch 512
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    warmup_epochs: 5  # ADDED: original warmup
+    eta_min: 0.00001
+    # Note: layer_decay not exposed in config, would need model code change
+    # Original uses layer_decay=0.9 for layer-wise LR decay
+    # Normalization (CRITICAL!)
+    scale_input: true  # CHANGED: divide by 100 like original
+    use_cosine_per_step: true
+
+trainer:
+  max_epochs: 30  # CHANGED from 2 to match original
+  accelerator: auto
+  devices: 1
+  precision: "bf16-mixed"
+  gradient_clip_val: null  # REMOVED: original has no clipping
+  accumulate_grad_batches: 8  # ADDED: effective batch 512
+  deterministic: true
+  log_every_n_steps: 10
+
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: labram_c2_original_mini
+      tags: [labram, finetune, challenge2, original, mini, phase3]
+      save_dir: outputs/labram/finetune_c2_original_mini
+      mode: offline
+
+  callbacks:
+    - class_path: cerebro.callbacks.CheckpointCompatibilityCallback
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/labram/finetune_c2_original_mini/checkpoints
+        filename: challenge2-{epoch:02d}-{val_nrmse_epoch:.4f}
+        monitor: val/nrmse_epoch
+        mode: min
+        save_top_k: 3
+        save_last: true
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+data:
+  class_path: cerebro.data.challenge2.Challenge2DataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    releases: [R1, R2, R3, R4, R6, R7, R8, R9, R10, R11]  # CHANGED: all mini releases except R5
+    use_mini: true
+    tasks: [contrastChangeDetection]  # Task-specific windows
+    batch_size: 64  # CHANGED from 256 to match original
+    num_workers: 4
+    window_size_s: 2.0
+    window_stride_s: 2.0
+    sfreq: 100
+    val_frac: 0.2  # CHANGED from 0.1 for better validation
+    test_frac: 0.0
+    seed: 2025
+    excluded_subjects: []
+    mode: dev  # Development mode with local validation

@@ -1,0 +1,135 @@
+# Supervised Training for Challenge 2 with EEGNeX (Mini Dataset)
+#
+# Fast prototyping config using R1 mini dataset with reduced epochs.
+# Challenge 2: P-factor prediction from multi-task EEG
+#
+# Usage: uv run cerebro fit --config configs/supervised_eegnex_challenge2_mini.yaml
+
+# Random seed for reproducibility
+seed_everything: 42
+
+# Tuning flags (disabled for mini)
+run_lr_finder: false
+run_batch_size_finder: false
+
+# Trainer configuration
+trainer:
+  max_epochs: 2  # Fast iteration
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 10
+
+  # Logger configuration
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: challenge2_eegnex_mini
+      tags:
+        - challenge2
+        - eegnex
+        - mini
+        - debug
+      notes: "Fast prototyping with EEGNeX on mini dataset - Challenge 2"
+      log_model: false  # Don't upload artifacts for mini
+      save_dir: outputs/challenge2
+
+  # Callbacks
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/challenge2/checkpoints
+        filename: challenge2-eegnex-mini-{epoch:02d}-{val_nrmse:.4f}
+        monitor: val_nrmse
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_nrmse
+        patience: 10
+        mode: min
+        verbose: true
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 1
+
+# Model configuration: SupervisedTrainer with RegressorModel
+model:
+  class_path: cerebro.trainers.supervised.SupervisedTrainer
+  init_args:
+    # The actual model (encoder + regression head)
+    model:
+      class_path: cerebro.models.architectures.RegressorModel
+      init_args:
+        encoder_class: EEGNeX  # Can swap to SignalJEPA
+        n_outputs: 1           # Single regression output (externalizing score)
+        dropout: 0.0           # No dropout
+        input_scale: 1000.0    # Millivolt scaling for faster convergence
+        encoder_kwargs:        # Encoder-specific parameters
+          n_chans: 129
+          n_times: 400         # 4s windows at 100 Hz
+          sfreq: 100
+
+    # Training hyperparameters
+    loss_fn: mse               # Mean squared error
+    lr: 0.001                  # Learning rate
+    weight_decay: 0.00001      # Weight decay
+    epochs: 2                  # Must match trainer.max_epochs
+    warmup_epochs: 0           # No warmup for mini
+
+# Data configuration: Challenge 2 Multi-task (mini)
+data:
+  class_path: cerebro.data.challenge2.Challenge2DataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    # Using R1 for mini prototyping (NOT R5!)
+    releases:
+      - R1
+
+    # Multi-task data loading
+    tasks:
+      - contrastChangeDetection
+      # Can add more tasks for full training:
+      # - surroundSupp
+      # - seqLearning8target
+      # - symbolSearch
+
+    # Training parameters
+    batch_size: 64             # Smaller batch for mini
+    num_workers: 4             # Fewer workers for mini
+
+    # Excluded subjects (known issues)
+    excluded_subjects:
+      - NDARWV769JM7
+      - NDARME789TD2
+      - NDARUA442ZVF
+      - NDARJP304NK1
+      - NDARTY128YLU
+      - NDARDW550GU6
+      - NDARLD243KRE
+      - NDARUJ292JXV
+      - NDARBA381JGH
+
+    # Windowing parameters
+    window_size_s: 4.0         # 4 second windows
+    window_stride_s: 2.0       # 2 second stride
+    sfreq: 100
+
+    # Data splits
+    val_frac: 0.1
+    test_frac: 0.1
+    seed: 2025
+
+    # Performance
+    use_mini: true             # Mini flag for fast loading

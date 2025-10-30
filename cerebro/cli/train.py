@@ -39,6 +39,7 @@ from typing import Any, Dict, Optional
 
 import torch
 from lightning.pytorch.cli import LightningCLI
+from omegaconf import OmegaConf
 
 # Enable Tensor Cores on RTX 4090 for faster matmul operations
 torch.set_float32_matmul_precision(
@@ -435,6 +436,22 @@ def cli_main():
                 releases: [R1, R2, ...]
                 batch_size: 512
     """
+    # Load environment variables from .env file
+    from pathlib import Path
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent.parent / ".env")
+
+    # Register OmegaConf resolver for ${now:format} in configs
+    # Caches first call to ensure single timestamp per run
+    _timestamp_cache = {}
+
+    def cached_now_resolver(format_str):
+        if 'timestamp' not in _timestamp_cache:
+            _timestamp_cache['timestamp'] = datetime.now().strftime(format_str)
+        return _timestamp_cache['timestamp']
+
+    OmegaConf.register_new_resolver("now", cached_now_resolver, replace=True)
+
     CerebroCLI(
         save_config_callback=None,  # Wandb handles config saving
         # Use OmegaConf for interpolation

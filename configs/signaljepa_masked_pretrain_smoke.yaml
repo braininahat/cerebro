@@ -1,0 +1,93 @@
+# SignalJEPA Masked Autoencoder Pretraining - Smoke Test (5 epochs)
+seed_everything: 42
+run_lr_finder: false
+run_batch_size_finder: false
+
+trainer:
+  max_epochs: 5  # Train for 5 epochs to test convergence
+  val_check_interval: 1.0  # Validate every epoch
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 5
+
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: signaljepa_masked_pretrain_smoke
+      tags: [signaljepa, masked_ae, pretrain, unsupervised, smoke]
+      save_dir: outputs/signaljepa_masked_pretrain_smoke
+      mode: offline
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/signaljepa_masked_pretrain_smoke/checkpoints
+        filename: pretrain-{epoch:02d}-{val_loss:.4f}
+        monitor: val_loss
+        mode: min
+        save_top_k: 1
+        save_last: true
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+# Model: MaskedAutoencoderTrainer with SignalJEPA_LearnedChannels
+model:
+  class_path: cerebro.trainers.masked_pretraining.MaskedAutoencoderTrainer
+  init_args:
+    # Encoder: SignalJEPA with learned channel positions
+    encoder:
+      class_path: cerebro.models.components.encoders.SignalJEPAWithLearnedChannels
+      init_args:
+        n_chans: 129
+        n_times: 200
+        sfreq: 100
+        n_electrodes: 128
+        # SignalJEPA hyperparameters
+        transformer__d_model: 64
+        transformer__num_encoder_layers: 8
+        transformer__nhead: 8
+        pos_encoder__spat_dim: 30
+        pos_encoder__time_dim: 34
+
+    # Decoder: Simple MLP decoder
+    decoder:
+      class_path: cerebro.trainers.masked_pretraining.SimpleDecoder
+      init_args:
+        input_dim: 64  # Matches encoder transformer__d_model
+        n_chans: 129
+        n_times: 200
+        hidden_dim: 256
+
+    # Masking strategy
+    time_mask_ratio: 0.5  # Mask 50% of timesteps
+    channel_mask_ratio: 0.3  # Mask 30% of channels
+
+    # Optimizer config
+    lr: 0.0001
+    weight_decay: 0.0001
+    warmup_epochs: 5
+
+# Data: Unsupervised pretraining with passive tasks
+data:
+  class_path: cerebro.data.labram_pretrain.LaBraMPretrainDataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    releases: [R1]
+    passive_tasks: [RestingState]  # Simple resting state for smoke test
+    batch_size: 32
+    num_workers: 4
+    window_len: 2.0
+    patch_size: 100
+    sfreq: 100
+    val_frac: 0.1
+    test_frac: 0.1  # Small test set for validation
+    seed: 2025
+    use_mini: true
+    excluded_subjects: []
+    n_channels: 129

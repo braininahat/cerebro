@@ -43,6 +43,8 @@ class VQNSP(pl.LightningModule):
                  learning_rate=1e-4,
                  weight_decay=0.05,
                  betas=(0.9, 0.95),
+                 warmup_epochs=5,          # Linear warmup epochs (matches original)
+                 min_lr=1e-5,              # Minimum LR for cosine decay (matches original)
                  log_lr=True,              # log lr/min_lr per step like engine
                  **kwargs):
         super().__init__()
@@ -50,6 +52,8 @@ class VQNSP(pl.LightningModule):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.opt_betas = betas
+        self.warmup_epochs = warmup_epochs
+        self.min_lr = min_lr
         self.log_lr = log_lr
         print(kwargs)
 
@@ -407,21 +411,39 @@ class VQNSP(pl.LightningModule):
             weight_decay=self.weight_decay,
         )
 
-        # self.total_steps can be set in setup("fit") or computed dynamically
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        # Calculate total steps and warmup steps
+        total_steps = self.total_steps
+        steps_per_epoch = total_steps // self.trainer.max_epochs
+        warmup_steps = self.warmup_epochs * steps_per_epoch
+
+        # Warmup: Linear from ~0 to base_lr (matches original LaBraM)
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer,
-            T_max=self.total_steps,  # total number of training steps
-            eta_min=1e-6             # final learning rate
+            start_factor=1e-10,      # Nearly 0 (avoid division by zero)
+            end_factor=1.0,          # Reach base_lr
+            total_iters=warmup_steps
         )
 
-        # 3️⃣ Return both to Lightning
+        # Main: Cosine from base_lr to min_lr
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=total_steps - warmup_steps,
+            eta_min=self.min_lr
+        )
+
+        # Chain warmup → cosine (matches original LaBraM utils.cosine_scheduler)
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps]
+        )
+
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "step",   # <— update every iteration, not per epoch
+                "interval": "step",   # Step-level updates like original
                 "frequency": 1,
-                "name": "cosine_step"
             }
         }
 

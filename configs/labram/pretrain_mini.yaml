@@ -1,0 +1,87 @@
+# LaBraM MEM Pretraining - Mini (R1, 2 epochs)
+# Quick validation of Phase 2: Masked EEG Modeling
+seed_everything: 42
+run_lr_finder: false
+run_batch_size_finder: false
+
+model:
+  class_path: "cerebro.models.labram.pretrain.MEMPretrainModule"
+  init_args:
+    pretrained: true
+    pretrained_weight: outputs/labram/codebook_mini/checkpoints/last.ckpt
+    EEG_size: 200
+    patch_size: 100
+    in_chans: 1
+    out_chans: 8
+    vocab_size: 8192
+    embed_dim: 200
+    depth: 12
+    num_heads: 10
+    mlp_ratio: 4.0
+    qkv_bias: true
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.0
+    init_std: 0.02
+    n_code: 8192
+    code_dim: 32
+    encoder_depth: 24
+    decoder_depth: 3
+    decay: 0.99
+    learning_rate: 0.0001
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    mask_ratio: 0.5
+    scale_eeg: false
+    chunk_pad: true
+    use_cosine_per_step: true
+    eta_min: 0.000001
+    n_chans: 129
+    max_time_window_hint: 2
+
+trainer:
+  max_epochs: 2
+  accelerator: auto
+  devices: 1
+  precision: "bf16-mixed"
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 10
+
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: labram_pretrain_mini
+      tags: [labram, pretrain, mem, mini, test]
+      save_dir: outputs/labram/pretrain_mini
+      mode: offline
+
+  callbacks:
+    - class_path: cerebro.callbacks.CheckpointCompatibilityCallback
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/labram/pretrain_mini/checkpoints
+        filename: pretrain-{epoch:02d}-{val_mem_loss:.4f}
+        monitor: val_mem_loss
+        mode: min
+        save_top_k: 1
+        save_last: true
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+data:
+  class_path: cerebro.data.labram_pretrain.LaBraMPretrainDataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    releases: [R1]
+    passive_tasks: [RestingState, DespicableMe]  # Capitalize task names
+    batch_size: 64
+    num_workers: 4
+    window_len: 2.0
+    patch_size: 100
+    sfreq: 100
+    val_frac: 0.1
+    seed: 2025

@@ -19,10 +19,13 @@ from typing import List, Optional
 
 import lightning as L
 import numpy as np
+import pandas as pd
 import torch
 from eegdash import EEGChallengeDataset
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset
+
+from cerebro.data.unified_cache import UniversalCacheManager
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +66,11 @@ class LaBraMWindowDataset(Dataset):
         return len(self.windows)
 
     def __getitem__(self, idx):
-        """Return EEG window in shape [N, A, T] where N=channels, A=patches, T=samples_per_patch."""
+        """Return EEG window in shape [N, T_total] where N=channels, T_total=total_samples.
+
+        Note: The tokenizer model handles patching internally via _chunk_to_patches().
+        We return raw temporal data here.
+        """
         raw_idx, start_sample = self.windows[idx]
         raw = self.raw_list[raw_idx]
 
@@ -74,17 +81,8 @@ class LaBraMWindowDataset(Dataset):
         # Force copy to avoid memory sharing issues with pickled Raw objects
         data = data.copy()
 
-        N, total_T = data.shape
-        A = total_T // self.patch_size  # Number of patches
-
-        # Reshape to [N, A, T] where T = patch_size
-        if total_T % self.patch_size != 0:
-            # Trim to fit exact number of patches
-            data = data[:, : A * self.patch_size]
-
-        # Reshape and convert to tensor
-        data = data.reshape(N, A, self.patch_size)  # [N, A, T]
-        x = torch.from_numpy(np.array(data, dtype=np.float32))
+        # Convert to tensor - let tokenizer handle patching
+        x = torch.from_numpy(np.array(data, dtype=np.float32))  # [N, T_total]
 
         return x
 
@@ -122,8 +120,8 @@ class LaBraMPretrainDataModule(L.LightningDataModule):
         sfreq: int = 100,
         use_mini: bool = False,
         cache_dir: Optional[str] = None,
+        test_release: Optional[str] = None,  # Specific release for test (e.g., "R5")
         val_frac: float = 0.1,
-        test_frac: float = 0.1,
         seed: int = 2025,
         excluded_subjects: Optional[List[str]] = None,
         n_channels: int = 129,
@@ -140,18 +138,28 @@ class LaBraMPretrainDataModule(L.LightningDataModule):
         self.patch_size = patch_size
         self.sfreq = sfreq
         self.use_mini = use_mini
+        self.test_release = test_release
         self.val_frac = val_frac
-        self.test_frac = test_frac
         self.seed = seed
         self.excluded_subjects = excluded_subjects or []
         self.n_channels = n_channels
 
         # Cache directory
         if cache_dir:
-            self.cache_dir = Path(cache_dir)
+            cache_root = Path(cache_dir)
         else:
-            self.cache_dir = self.data_dir / "cache" / "labram_pretrain"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_root = self.data_dir / "cache"
+
+        # Initialize universal cache manager (two-level caching)
+        self.cache_mgr = UniversalCacheManager(
+            cache_root=str(cache_root),
+            preprocessing_params={
+                "sfreq": self.sfreq,
+                "bandpass": None,  # No bandpass filtering for LaBraM
+                "n_channels": self.n_channels,
+                "standardize": False,
+            }
+        )
 
         # Window parameters
         self.window_len_samples = int(window_len * sfreq)
@@ -171,124 +179,138 @@ class LaBraMPretrainDataModule(L.LightningDataModule):
         """Update batch size (modified by Lightning's batch size scaler)."""
         self.hparams.batch_size = value
 
-    def _create_cache_key(self) -> str:
-        """Create cache key from data configuration."""
-        releases_str = "_".join(self.releases)
-        tasks_str = "_".join(sorted(self.passive_tasks))
-        tasks_hash = hashlib.md5(tasks_str.encode()).hexdigest()[:8]
-
-        cache_key = (
-            f"labram_raw_{releases_str}_"
-            f"sfreq{self.sfreq}_"
-            f"tasks{tasks_hash}_"
-            f"mini{self.use_mini}.pkl"
-        )
-        return cache_key
-
-    def _get_cache_path(self) -> Path:
-        """Get path to cache file."""
-        return self.cache_dir / self._create_cache_key()
-
     def setup(self, stage: Optional[str] = None):
-        """Load and prepare data."""
+        """Load and prepare data using universal two-level cache with subject-level splitting."""
         logger.info(f"Loading data from releases: {self.releases}")
         logger.info(f"Tasks: {self.passive_tasks}")
         logger.info(f"Mini mode: {self.use_mini}")
+        logger.info(f"Test release: {self.test_release}")
 
-        cache_path = self._get_cache_path()
+        # Build/load Level 1 raw cache for ALL releases
+        self.cache_mgr.build_raw(
+            dataset="hbn",
+            releases=self.releases,
+            tasks=self.passive_tasks,
+            mini=self.use_mini
+        )
 
-        # Try loading from cache FIRST
-        if cache_path.exists():
-            logger.info(f"Loading from cache: {cache_path.name}")
-            with open(cache_path, "rb") as f:
-                all_raws = pickle.load(f)
-            logger.info(f"✓ Loaded {len(all_raws)} recordings from cache")
+        # Step 1: Pop test release from releases list
+        if self.test_release:
+            if self.test_release not in self.releases:
+                raise ValueError(f"test_release '{self.test_release}' not in releases {self.releases}")
+            test_releases = [self.test_release]
+            train_val_releases = [r for r in self.releases if r != self.test_release]
+            logger.info(f"Using {self.test_release} as test set")
+            logger.info(f"Train/val releases: {train_val_releases}")
         else:
-            # Load datasets from scratch - ONE call per release using query
-            all_datasets_list = []
+            test_releases = []
+            train_val_releases = self.releases
+            logger.info("No test release specified - no test split")
 
-            for release in self.releases:
-                logger.info(f"  Loading {release}...")
-                try:
-                    dataset = EEGChallengeDataset(
-                        release=release,
-                        cache_dir=str(self.data_dir),
-                        mini=self.use_mini,
-                        query={"task": self.passive_tasks},  # Load all tasks at once!
-                    )
-                    all_datasets_list.append(dataset)
-                    logger.info(f"  ✓ {release}: {len(dataset.datasets)} recordings")
-                except Exception as e:
-                    logger.warning(f"  ✗ {release}: {type(e).__name__}: {str(e)[:60]}")
-                    continue
-
-            if not all_datasets_list:
-                raise ValueError("No datasets loaded successfully!")
-
-            # Flatten all datasets
-            all_datasets = []
-            for dataset_list in all_datasets_list:
-                all_datasets.extend(dataset_list.datasets)
-
-            logger.info(f"Total recordings: {len(all_datasets)}")
-
-            # Filter excluded subjects and quality checks
-            filtered_raws = []
-            for ds in all_datasets:
-                subj = ds.description.get("subject", "")
-                if subj in self.excluded_subjects:
-                    continue
-
-                try:
-                    raw = ds.raw
-                    if len(raw.ch_names) != self.n_channels:
-                        continue
-                    filtered_raws.append(raw)
-                except Exception:
-                    continue
-
-            logger.info(f"After filtering: {len(filtered_raws)} recordings")
-
-            # Cache raw objects
-            with open(cache_path, "wb") as f:
-                pickle.dump(filtered_raws, f)
-            logger.info(f"Cached raw objects to {cache_path}")
-
-            all_raws = filtered_raws
-
-        # Split at recording level (subject-level would be better but requires metadata)
-        indices = list(range(len(all_raws)))
-
-        # Train/val/test split
-        test_size = self.test_frac
-        val_size = self.val_frac / (1 - test_size)
-
-        train_val_idx, test_idx = train_test_split(
-            indices, test_size=test_size, random_state=self.seed
-        )
-        train_idx, val_idx = train_test_split(
-            train_val_idx, test_size=val_size, random_state=self.seed
+        # Step 2: Query recordings separately for train/val and test
+        train_val_recordings = self.cache_mgr.query_raw(
+            dataset="hbn",
+            releases=train_val_releases,
+            tasks=self.passive_tasks,
+            mini=self.use_mini
         )
 
-        # Create datasets
-        train_raws = [all_raws[i] for i in train_idx]
-        val_raws = [all_raws[i] for i in val_idx]
-        test_raws = [all_raws[i] for i in test_idx]
+        if test_releases:
+            test_recordings = self.cache_mgr.query_raw(
+                dataset="hbn",
+                releases=test_releases,
+                tasks=self.passive_tasks,
+                mini=self.use_mini
+            )
+        else:
+            test_recordings = pd.DataFrame()
 
-        self.train_dataset = LaBraMWindowDataset(
-            train_raws, self.window_len_samples, self.patch_size, self.stride_samples
+        logger.info(f"Train/val recordings: {len(train_val_recordings)}")
+        logger.info(f"Test recordings: {len(test_recordings)}")
+
+        # Filter excluded subjects
+        if self.excluded_subjects:
+            train_val_recordings = train_val_recordings[
+                ~train_val_recordings["subject"].isin(self.excluded_subjects)
+            ]
+            if len(test_recordings) > 0:
+                test_recordings = test_recordings[
+                    ~test_recordings["subject"].isin(self.excluded_subjects)
+                ]
+            logger.info(f"After excluding subjects: {len(train_val_recordings)} train/val, {len(test_recordings)} test")
+
+        if len(train_val_recordings) == 0:
+            raise ValueError("No train/val recordings found after filtering!")
+
+        # Step 3: Subject-level split for train/val
+        train_val_subjects = train_val_recordings["subject"].unique()
+        logger.info(f"Train/val unique subjects: {len(train_val_subjects)}")
+
+        if self.val_frac > 0 and len(train_val_subjects) > 1:
+            train_subjects, val_subjects = train_test_split(
+                train_val_subjects,
+                test_size=self.val_frac,
+                random_state=self.seed
+            )
+
+            train_recordings = train_val_recordings[
+                train_val_recordings["subject"].isin(train_subjects)
+            ]
+            val_recordings = train_val_recordings[
+                train_val_recordings["subject"].isin(val_subjects)
+            ]
+        else:
+            # No val split - use all for training, create dummy val for Lightning
+            train_subjects = train_val_subjects
+            val_subjects = np.array([])
+            train_recordings = train_val_recordings
+            val_recordings = train_val_recordings.head(min(10, len(train_val_recordings)))
+            logger.info("No validation split - using all train/val subjects for training")
+
+        if len(test_recordings) == 0:
+            # No test data - create dummy test for Lightning
+            test_recordings = train_recordings.head(min(10, len(train_recordings)))
+            logger.info("No test split - using dummy test set")
+
+        logger.info(
+            f"\nSubject split:\n"
+            f"  Train: {len(train_subjects)} subjects, {len(train_recordings)} recordings\n"
+            f"  Val:   {len(val_subjects)} subjects, {len(val_recordings)} recordings\n"
+            f"  Test:  {test_recordings['subject'].nunique()} subjects, {len(test_recordings)} recordings"
         )
-        self.val_dataset = LaBraMWindowDataset(
-            val_raws, self.window_len_samples, self.patch_size, self.stride_samples
+
+        # Get windowed datasets from Level 2 cache (builds if missing)
+        window_len_s = self.window_len_samples / self.sfreq
+        stride_s = self.stride_samples / self.sfreq
+
+        logger.info(f"\nCreating windowed datasets ({window_len_s}s windows, {stride_s}s stride)...")
+
+        self.train_dataset = self.cache_mgr.get_windowed_dataset(
+            recordings=train_recordings,
+            window_len_s=window_len_s,
+            stride_s=stride_s,
+            mode='train'
         )
-        self.test_dataset = LaBraMWindowDataset(
-            test_raws, self.window_len_samples, self.patch_size, self.stride_samples
+
+        self.val_dataset = self.cache_mgr.get_windowed_dataset(
+            recordings=val_recordings,
+            window_len_s=window_len_s,
+            stride_s=stride_s,
+            mode='val'
+        )
+
+        self.test_dataset = self.cache_mgr.get_windowed_dataset(
+            recordings=test_recordings,
+            window_len_s=window_len_s,
+            stride_s=stride_s,
+            mode='val'
         )
 
         logger.info(
-            f"Split: train={len(self.train_dataset)}, "
-            f"val={len(self.val_dataset)}, "
-            f"test={len(self.test_dataset)}"
+            f"\nFinal window counts:\n"
+            f"  Train: {len(self.train_dataset)} windows\n"
+            f"  Val:   {len(self.val_dataset)} windows\n"
+            f"  Test:  {len(self.test_dataset)} windows"
         )
 
     def train_dataloader(self):

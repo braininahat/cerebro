@@ -1,0 +1,139 @@
+# S-JEPA fine-tuning config for Challenge 1 (mini dataset)
+#
+# Loads pretrained encoder from S-JEPA pretraining, freezes it permanently,
+# and trains only a classification head for response time prediction.
+#
+# Usage:
+#   # 1. First run pretraining to get checkpoint
+#   uv run cerebro fit --config configs/sjepa/pretrain_mini_60pct.yaml
+#
+#   # 2. Then run fine-tuning with pretrained encoder weights
+#   uv run cerebro fit --config configs/sjepa/finetune_challenge1_mini.yaml \
+#     --model.encoder_weights_path="outputs/sjepa/pretrain_mini_60pct/latest/checkpoints/last.ckpt"
+#   # Or specify exact timestamp:
+#   # --model.encoder_weights_path="outputs/sjepa/pretrain_mini_60pct/20251029_194244/checkpoints/sjepa-epoch=52-val_loss=0.0129.ckpt"
+
+seed_everything: 42
+run_lr_finder: false
+run_batch_size_finder: false
+
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  max_epochs: 50
+  log_every_n_steps: 5
+
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: sjepa_finetune_challenge1_mini
+      tags:
+        - sjepa
+        - finetune
+        - challenge1
+        - mini
+        - frozen_encoder
+      save_dir: outputs/sjepa/finetune_challenge1_mini/${now:%Y%m%d_%H%M%S}
+      mode: offline
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/sjepa/finetune_challenge1_mini/${now:%Y%m%d_%H%M%S}/checkpoints
+        filename: finetune-{epoch:02d}-{val/loss:.4f}
+        monitor: val/loss
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    - class_path: cerebro.callbacks.LatestCheckpointSymlinkCallback
+
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 15
+        mode: min
+        verbose: true
+
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+model:
+  class_path: cerebro.trainers.sjepa_finetune.SJEPAFinetuneTrainer
+  init_args:
+    encoder:
+      class_path: cerebro.models.components.encoders.VanillaSignalJEPAEncoder
+      init_args:
+        n_chans: 129
+        n_times: 200  # 2s @ 100Hz
+        sfreq: 100
+        drop_prob: 0.0
+        transformer__d_model: 64
+        transformer__num_encoder_layers: 8
+        transformer__nhead: 8
+
+    # CRITICAL: Must specify encoder weights path via CLI override:
+    # --model.encoder_weights_path="path/to/pretrained/checkpoint.ckpt"
+    encoder_weights_path: null  # MUST override via CLI
+
+    # Fine-tuning hyperparameters
+    n_virtual_channels: 16  # Number of learned spatial filters
+    dropout: 0.5
+
+    lr: 0.001  # Higher LR for head-only training
+    weight_decay: 0.0001
+    scheduler_patience: 10
+    scheduler_factor: 0.5
+
+    loss_fn: mse  # MSE for response time prediction
+
+data:
+  class_path: cerebro.data.base.BaseTaskDataModule
+  init_args:
+    dataset:
+      class_path: cerebro.data.datasets.hbn.HBNDataset
+      init_args:
+        data_dir: ${oc.env:EEG2025_DATA_ROOT,./data}
+        # All releases except R5 (competition validation set)
+        releases:
+          - R1  # Mini: just R1 for fast prototyping
+        tasks:
+          - contrastChangeDetection  # Challenge 1 task
+        use_mini: true  # Use mini dataset
+
+    task:
+      class_path: cerebro.data.tasks.challenge1.Challenge1Task
+      init_args:
+        window_len: 2.0
+        shift_after_stim: 0.5
+        sfreq: 100
+        epoch_len_s: 2.0
+        anchor: stimulus_anchor
+
+    # Data splits and loading
+    batch_size: 64
+    num_workers: 4
+    val_frac: 0.1  # 80:10:10 train:val:test split
+    test_frac: 0.1
+    seed: 42
+
+    # Excluded subjects (known bad data)
+    excluded_subjects:
+      - NDARWV769JM7
+      - NDARME789TD2
+      - NDARUA442ZVF
+      - NDARJP304NK1
+      - NDARTY128YLU
+      - NDARDW550GU6
+      - NDARLD243KRE
+      - NDARUJ292JXV
+      - NDARBA381JGH

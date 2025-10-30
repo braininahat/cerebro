@@ -27,6 +27,8 @@ from .encoders import (
     EEGNeXEncoder,
     IdentityEncoder,
     SignalJEPAEncoder,
+    SignalJEPAWithLearnedChannels,
+    VanillaSignalJEPAEncoder,
 )
 from .jepa_components import (
     JEPAEncoder,
@@ -44,6 +46,8 @@ __all__ = [
     "BaseEncoder",
     "EEGNeXEncoder",
     "SignalJEPAEncoder",
+    "SignalJEPAWithLearnedChannels",
+    "VanillaSignalJEPAEncoder",
     "IdentityEncoder",
     "JEPAEncoder",
     "MambaEncoder",

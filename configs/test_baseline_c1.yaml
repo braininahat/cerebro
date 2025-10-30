@@ -1,0 +1,119 @@
+# Test Config: Supervised Training for Challenge 1 with EEGNeX (Mini Dataset)
+#
+# Minimal config for testing the critical path: train → checkpoint → submission.zip → score
+#
+# Usage: uv run cerebro fit --config configs/test_baseline_c1.yaml
+
+# Random seed for reproducibility
+seed_everything: 42
+
+# Tuning flags (disabled for testing)
+run_lr_finder: false
+run_batch_size_finder: false
+
+# Trainer configuration
+trainer:
+  max_epochs: 2  # Quick test
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 5
+
+  # Logger configuration
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: test_baseline_c1
+      tags:
+        - challenge1
+        - test
+        - critical-path
+      notes: "Testing critical path: train → checkpoint → submission.zip → score"
+      log_model: false
+      save_dir: outputs/test_baseline_c1
+
+  # Callbacks
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/test_baseline_c1/checkpoints
+        filename: best-{epoch:02d}-{val_nrmse:.4f}
+        monitor: val_nrmse
+        mode: min
+        save_top_k: 1
+        save_last: true
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 1
+
+# Model configuration: SupervisedTrainer with RegressorModel
+model:
+  class_path: cerebro.trainers.supervised.SupervisedTrainer
+  init_args:
+    # The actual model (encoder + regression head)
+    model:
+      class_path: cerebro.models.architectures.RegressorModel
+      init_args:
+        encoder_class: EEGNeX
+        n_outputs: 1           # Single regression output (RT)
+        dropout: 0.0
+        input_scale: 1000.0    # Millivolt scaling
+        encoder_kwargs:
+          n_chans: 129
+          n_times: 200  # 2.0s * 100 Hz (matches startkit)
+          sfreq: 100
+
+    # Training hyperparameters
+    loss_fn: mse
+    lr: 0.001
+    weight_decay: 0.00001
+    epochs: 2
+    warmup_epochs: 0
+
+# Data configuration: Challenge 1 CCD task (mini)
+data:
+  class_path: cerebro.data.challenge1.Challenge1DataModule
+  init_args:
+    data_dir: data
+    releases:
+      - R1
+
+    # Training parameters
+    batch_size: 64
+    num_workers: 4
+
+    # Excluded subjects
+    excluded_subjects:
+      - NDARWV769JM7
+      - NDARME789TD2
+      - NDARUA442ZVF
+      - NDARJP304NK1
+      - NDARTY128YLU
+      - NDARDW550GU6
+      - NDARLD243KRE
+      - NDARUJ292JXV
+      - NDARBA381JGH
+
+    # Windowing parameters
+    shift_after_stim: 0.5
+    window_len: 2.0  # Match startkit/local_scoring.py
+    epoch_len_s: 2.0
+    sfreq: 100
+    anchor: stimulus_anchor
+
+    # Data splits
+    val_frac: 0.1
+    test_frac: 0.1
+    seed: 2025
+
+    # Performance
+    use_mini: true

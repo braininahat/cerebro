@@ -1,0 +1,167 @@
+# SignalJEPA Challenge 2 Finetuning - Full HBN Dataset
+#
+# Finetune pretrained JEPA encoder on Challenge 2 (externalizing prediction)
+# Uses composable architecture: SupervisedTrainer + RegressorModel + SignalJEPA encoder
+#
+# Usage: uv run cerebro fit --config configs/jepa_finetune_challenge2_full.yaml
+#
+# Training time: ~12-24 hours on single GPU
+# Output: Challenge 2 submission model
+
+seed_everything: 42
+
+# Tuning flags
+run_lr_finder: false
+run_batch_size_finder: false
+
+# Trainer configuration
+trainer:
+  max_epochs: 150  # Challenge 2 may need more epochs
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 50
+
+  # Logger
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: jepa_finetune_challenge2_full
+      tags:
+        - signaljepa
+        - finetune
+        - challenge2
+        - externalizing
+        - full
+      notes: "SignalJEPA finetuning on Challenge 2 (externalizing prediction)"
+      save_dir: outputs/jepa/finetune_c2_full
+      mode: offline
+
+  # Callbacks
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/jepa/finetune_c2_full/checkpoints
+        filename: challenge2-{epoch:02d}-{val_nrmse:.4f}
+        monitor: val_nrmse
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_nrmse
+        patience: 20
+        mode: min
+        verbose: true
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 2
+
+# Model: SupervisedTrainer with SignalJEPA encoder
+model:
+  class_path: cerebro.trainers.supervised.SupervisedTrainer
+  init_args:
+    # The actual model (encoder + regression head)
+    model:
+      class_path: cerebro.models.architectures.RegressorModel
+      init_args:
+        encoder_class: SignalJEPA  # Use pretrained SignalJEPA
+        n_outputs: 1  # Single regression output (externalizing score)
+        dropout: 0.1
+        input_scale: 1000.0  # Millivolt scaling
+        encoder_kwargs:
+          n_chans: 129
+          n_times: 400  # 4s windows at 100 Hz
+          sfreq: 100
+          # SignalJEPA architecture parameters
+          n_spat_filters: 4
+          feature_encoder__conv_layers_spec:
+            - [8, 32, 8]
+            - [16, 2, 2]
+            - [32, 2, 2]
+            - [64, 2, 2]
+            - [64, 2, 2]
+          feature_encoder__mode: default
+          feature_encoder__conv_bias: false
+          drop_prob: 0.0
+          pos_encoder__spat_dim: 30
+          pos_encoder__time_dim: 66  # 400 samples / 6 pooling = 66
+          pos_encoder__sfreq_features: 1.0
+          pos_encoder__spat_kwargs: null
+          transformer__d_model: 64
+          transformer__num_encoder_layers: 8
+          transformer__num_decoder_layers: 4
+          transformer__nhead: 8
+
+    # Load pretrained weights (UPDATE THIS PATH!)
+    pretrained_checkpoint: outputs/jepa/pretrain_full/checkpoints/last.ckpt
+
+    # Training hyperparameters
+    loss_fn: mse
+    lr: 0.0005
+    weight_decay: 0.00001
+    epochs: 150
+    warmup_epochs: 5
+
+# Data: Challenge 2 with full HBN dataset
+data:
+  class_path: cerebro.data.challenge2.Challenge2DataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+
+    # Full HBN dataset
+    releases:
+      - R1
+      - R2
+      - R3
+      - R4
+      - R6
+      - R7
+      - R8
+      - R9
+      - R10
+      - R11
+
+    # Multi-task data loading
+    tasks:
+      - contrastChangeDetection
+      # Can add more tasks for better trait prediction:
+      # - surroundSupp
+      # - seqLearning8target
+      # - symbolSearch
+
+    # DataLoader parameters
+    batch_size: 512
+    num_workers: 16
+
+    # Excluded subjects
+    excluded_subjects:
+      - NDARWV769JM7
+      - NDARME789TD2
+      - NDARUA442ZVF
+      - NDARJP304NK1
+      - NDARTY128YLU
+      - NDARDW550GU6
+      - NDARLD243KRE
+      - NDARUJ292JXV
+      - NDARBA381JGH
+
+    # Windowing parameters (Challenge 2: fixed-length)
+    window_size_s: 4.0  # 4s windows (longer for trait prediction)
+    window_stride_s: 2.0  # 2s stride
+    sfreq: 100
+
+    # Splits
+    val_frac: 0.1
+    test_frac: 0.1
+    seed: 2025

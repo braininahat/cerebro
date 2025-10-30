@@ -108,7 +108,7 @@ data:
     stride: 4.0  # 4s stride (double from 2s for consistency)
     crop_length: 4.0  # Random crop to 4s (400 samples), splits to 2s×2s for temporal prediction
     val_split: 0.1
-    test_split: 0.1
+    test_release: null  # Specify release for test (e.g., "R5") or null for no test split
     n_chans_select: 129  # All 129 channels including Cz reference
     sfreq: 100
     mini: false

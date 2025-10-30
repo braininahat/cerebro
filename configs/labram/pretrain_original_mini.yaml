@@ -1,0 +1,103 @@
+# LaBraM MEM Pretraining - Original-Matched Mini
+# Phase 2: Masked EEG Modeling (matches original LaBraM base architecture)
+# Dataset: R1-R4, R6-R11 mini (20 subjects per release, ~120 total)
+# Hardware: Single GPU with gradient accumulation (effective batch 512)
+seed_everything: 42
+run_lr_finder: false
+run_batch_size_finder: false
+
+model:
+  class_path: "cerebro.models.labram.pretrain.MEMPretrainModule"
+  init_args:
+    # Load frozen tokenizer from Phase 1
+    pretrained: true
+    pretrained_weight: outputs/labram/codebook_original_mini/checkpoints/last.ckpt
+    # Input parameters
+    EEG_size: 200
+    patch_size: 100
+    in_chans: 1
+    out_chans: 8
+    # Student architecture (original base model)
+    vocab_size: 8192
+    embed_dim: 200
+    depth: 12
+    num_heads: 10
+    mlp_ratio: 4.0
+    qkv_bias: false  # CHANGED from true to match original Phase 2
+    qk_norm: true  # ADDED: original uses QK normalization
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.1  # CHANGED from 0.0 to match original
+    init_std: 0.02
+    init_values: 0.1  # ADDED: layer scale for base model
+    # Tokenizer parameters (frozen, for reference)
+    n_code: 8192
+    code_dim: 32
+    encoder_depth: 12  # CHANGED from 24 to match Phase 1
+    decoder_depth: 3
+    decay: 0.99
+    # Training hyperparameters (original)
+    learning_rate: 0.002  # Base 5e-4 scaled for batch 512 (64×8)
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    warmup_epochs: 5  # ADDED: original warmup
+    eta_min: 0.00001  # min_lr for cosine schedule
+    # MEM specific
+    mask_ratio: 0.5  # Symmetric masking
+    # Normalization (CRITICAL!)
+    scale_eeg: true  # CHANGED: divide by 100 like original
+    # Other settings
+    chunk_pad: true
+    use_cosine_per_step: true
+    n_chans: 129
+    max_time_window_hint: 2
+
+trainer:
+  max_epochs: 300  # CHANGED from 2 to match original
+  accelerator: auto
+  devices: 1
+  precision: "bf16-mixed"
+  gradient_clip_val: null  # REMOVED: original has no clipping
+  accumulate_grad_batches: 8  # ADDED: effective batch 512
+  deterministic: true
+  log_every_n_steps: 10
+
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: labram_pretrain_original_mini
+      tags: [labram, pretrain, mem, original, mini, phase2]
+      save_dir: outputs/labram/pretrain_original_mini
+      mode: offline
+
+  callbacks:
+    - class_path: cerebro.callbacks.CheckpointCompatibilityCallback
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/labram/pretrain_original_mini/checkpoints
+        filename: pretrain-{epoch:02d}-{val_mem_loss:.4f}
+        monitor: val_mem_loss
+        mode: min
+        save_top_k: 3
+        save_last: true
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+data:
+  class_path: cerebro.data.labram_pretrain.LaBraMPretrainDataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    releases: [R1, R2, R3, R4, R6, R7, R8, R9, R10, R11]  # CHANGED: all mini releases except R5
+    use_mini: true
+    passive_tasks: [RestingState, DespicableMe]
+    batch_size: 64
+    num_workers: 4
+    window_len: 2.0
+    patch_size: 100
+    sfreq: 100
+    val_frac: 0.0  # CHANGED: use ALL data for pretraining
+    test_frac: 0.0
+    seed: 2025

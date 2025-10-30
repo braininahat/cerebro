@@ -132,7 +132,7 @@ data:
     batch_size: 256            # Larger batch for contrastive learning
     num_workers: 8             # Parallel data loading
     val_frac: 0.1             # 10% of subjects for validation
-    test_frac: 0.1            # 10% of subjects for test
+    test_release: null        # Specify release for test (e.g., "R5") or null for no test split
     seed: 2025                # Random seed for splits
     use_mini: false           # Set to true for fast prototyping
     cache_dir: null           # null = auto (data_dir/../cache/movies)

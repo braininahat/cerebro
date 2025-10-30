@@ -15,6 +15,8 @@ from .components import (
     IdentityEncoder,
     JEPAEncoder,
     SignalJEPAEncoder,
+    SignalJEPAWithLearnedChannels,
+    VanillaSignalJEPAEncoder,
 )
 
 
@@ -22,6 +24,8 @@ from .components import (
 ENCODER_REGISTRY = {
     "EEGNeX": EEGNeXEncoder,
     "SignalJEPA": SignalJEPAEncoder,
+    "SignalJEPA_LearnedChannels": SignalJEPAWithLearnedChannels,  # SignalJEPA with Perceiver-style learned channels
+    "VanillaSignalJEPA": VanillaSignalJEPAEncoder,  # Vanilla braindecode SignalJEPA with real electrode locations
     "Identity": IdentityEncoder,
     "JEPA": JEPAEncoder,  # JEPA foundation model encoder
     # Future additions:

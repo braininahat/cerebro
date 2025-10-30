@@ -90,7 +90,7 @@ data:
     stride: 2.0
     crop_length: 2.0
     val_split: 0.2  # Larger val split for mini
-    test_split: 0.1
+    test_release: null  # Specify release for test (e.g., "R5") or null for no test split
     n_chans_select: 129  # All 129 channels including Cz reference
     sfreq: 100
     mini: true  # Use mini dataset

@@ -64,6 +64,7 @@ class ContrastiveTrainer(L.LightningModule):
         weight_decay: float = 1e-4,
         epochs: int = 50,
         warmup_epochs: int = 5,
+        pretrained_checkpoint: Optional[str] = None,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -71,11 +72,73 @@ class ContrastiveTrainer(L.LightningModule):
         # Store model (contains no training logic)
         self.model = model
 
+        # Load pretrained encoder weights if checkpoint provided (Phase 2 loads Phase 1)
+        if pretrained_checkpoint is not None:
+            self._load_pretrained_encoder(pretrained_checkpoint)
+
         # Temperature for InfoNCE (can be scheduled)
         self.temperature = temperature
 
         # Pairing strategy
         self.pairing_strategy = pairing_strategy
+
+    def _load_pretrained_encoder(self, checkpoint_path: str) -> None:
+        """Load pretrained encoder weights from checkpoint (Phase 1 → Phase 2).
+
+        Args:
+            checkpoint_path: Path to Phase 1 checkpoint (.ckpt file)
+        """
+        import pathlib
+
+        print(f"[ContrastiveTrainer] Loading pretrained encoder from: {checkpoint_path}")
+
+        # Load checkpoint
+        ckpt_path = pathlib.Path(checkpoint_path)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+        # Extract state dict (handle Lightning checkpoint format)
+        if "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+
+        # Filter and fix keys for encoder
+        encoder_state = {}
+        for key, value in state_dict.items():
+            # Strip common prefixes
+            clean_key = key
+            for prefix in ["model.", "module.", "_orig_mod."]:
+                if clean_key.startswith(prefix):
+                    clean_key = clean_key[len(prefix) :]
+
+            # Only keep encoder weights
+            if clean_key.startswith("encoder."):
+                # Strip 'encoder.' prefix to match model.encoder state dict
+                encoder_key = clean_key[len("encoder.") :]
+                encoder_state[encoder_key] = value
+
+        if not encoder_state:
+            print(
+                "[ContrastiveTrainer] WARNING: No encoder weights found in checkpoint!"
+            )
+            print(f"  Available keys: {list(state_dict.keys())[:5]}...")
+            return
+
+        # Load into encoder (strict=False to allow head mismatch)
+        missing, unexpected = self.model.encoder.load_state_dict(
+            encoder_state, strict=False
+        )
+
+        print(f"[ContrastiveTrainer] Loaded {len(encoder_state)} encoder parameters")
+        if missing:
+            print(f"  Missing keys: {len(missing)} (e.g., {missing[:3]})")
+        if unexpected:
+            print(f"  Unexpected keys: {len(unexpected)} (e.g., {unexpected[:3]})")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model.

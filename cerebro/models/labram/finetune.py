@@ -494,6 +494,7 @@ class EEGRegressorPL(pl.LightningModule):
                  lr: float = 1e-4,
                  weight_decay: float = 0.05,
                  betas: Tuple[float, float] = (0.9, 0.95),
+                 warmup_epochs: int = 5,          # Linear warmup epochs (matches original)
                  use_cosine_per_step: bool = True,
                  eta_min: float = 1e-6,
                  scale_input: bool = True):
@@ -563,6 +564,7 @@ class EEGRegressorPL(pl.LightningModule):
         self.lr = lr
         self.weight_decay = weight_decay
         self.betas = betas
+        self.warmup_epochs = warmup_epochs
         self.use_cosine_per_step = use_cosine_per_step
         self.eta_min = eta_min
         self.scale_input = scale_input
@@ -717,7 +719,31 @@ class EEGRegressorPL(pl.LightningModule):
             self.parameters(), lr=self.lr, betas=self.betas, weight_decay=self.weight_decay)
         total_steps = getattr(self.trainer, "estimated_stepping_batches", None)
         if self.use_cosine_per_step and total_steps:
-            sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-                opt, T_max=total_steps, eta_min=self.eta_min)
-            return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "step", "name": "cosine_step"}}
+            # Calculate warmup steps
+            steps_per_epoch = total_steps // self.trainer.max_epochs
+            warmup_steps = self.warmup_epochs * steps_per_epoch
+
+            # Warmup: Linear from ~0 to base_lr (matches original)
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                opt,
+                start_factor=1e-10,      # Nearly 0 (avoid division by zero)
+                end_factor=1.0,          # Reach base_lr
+                total_iters=warmup_steps
+            )
+
+            # Main: Cosine from base_lr to eta_min
+            cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                opt,
+                T_max=total_steps - warmup_steps,
+                eta_min=self.eta_min
+            )
+
+            # Chain warmup → cosine (matches original LaBraM)
+            sched = torch.optim.lr_scheduler.SequentialLR(
+                opt,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_steps]
+            )
+
+            return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "step"}}
         return opt

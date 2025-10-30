@@ -53,12 +53,17 @@ class SupervisedTrainer(L.LightningModule):
         weight_decay: float = 1e-5,
         epochs: int = 100,
         warmup_epochs: int = 0,
+        pretrained_checkpoint: Optional[str] = None,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
 
         # Store model (contains no training logic)
         self.model = model
+
+        # Load pretrained encoder weights if checkpoint provided
+        if pretrained_checkpoint is not None:
+            self._load_pretrained_encoder(pretrained_checkpoint)
 
         # Initialize loss function
         self.loss_fn = self._build_loss_fn(loss_fn)
@@ -96,6 +101,70 @@ class SupervisedTrainer(L.LightningModule):
             )
 
         return loss_functions[loss_name]
+
+    def _load_pretrained_encoder(self, checkpoint_path: str) -> None:
+        """Load pretrained encoder weights from checkpoint.
+
+        This method extracts encoder weights from a Lightning checkpoint
+        and loads them into the model's encoder. It handles key mismatches
+        by stripping common prefixes like 'model.', 'encoder.', etc.
+
+        Args:
+            checkpoint_path: Path to pretrained checkpoint (.ckpt file)
+
+        Notes:
+            - Only encoder weights are loaded; head is initialized randomly
+            - Handles Lightning checkpoints (extracts from state_dict)
+            - Strips 'model.', 'module.', 'encoder.' prefixes automatically
+            - Logs missing/unexpected keys for debugging
+        """
+        import pathlib
+
+        print(f"[SupervisedTrainer] Loading pretrained encoder from: {checkpoint_path}")
+
+        # Load checkpoint
+        ckpt_path = pathlib.Path(checkpoint_path)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+        # Extract state dict (handle Lightning checkpoint format)
+        if "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+
+        # Filter and fix keys for encoder
+        encoder_state = {}
+        for key, value in state_dict.items():
+            # Strip common prefixes
+            clean_key = key
+            for prefix in ["model.", "module.", "_orig_mod."]:
+                if clean_key.startswith(prefix):
+                    clean_key = clean_key[len(prefix):]
+
+            # Only keep encoder weights
+            if clean_key.startswith("encoder."):
+                # Strip 'encoder.' prefix to match model.encoder state dict
+                encoder_key = clean_key[len("encoder."):]
+                encoder_state[encoder_key] = value
+
+        if not encoder_state:
+            print("[SupervisedTrainer] WARNING: No encoder weights found in checkpoint!")
+            print(f"  Available keys: {list(state_dict.keys())[:5]}...")
+            return
+
+        # Load into encoder (strict=False to allow head mismatch)
+        missing, unexpected = self.model.encoder.load_state_dict(encoder_state, strict=False)
+
+        print(f"[SupervisedTrainer] Loaded {len(encoder_state)} encoder parameters")
+        if missing:
+            print(f"  Missing keys: {len(missing)} (e.g., {missing[:3]})")
+        if unexpected:
+            print(f"  Unexpected keys: {len(unexpected)} (e.g., {unexpected[:3]})")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model.

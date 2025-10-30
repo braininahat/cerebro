@@ -1,0 +1,149 @@
+# SignalJEPA Phase 1 Self-Supervised Pretraining - Full HBN Dataset
+#
+# JEPA (Joint Embedding Predictive Architecture) pretraining on all HBN data
+# Learns EEG representations via multi-scale temporal prediction (trait/state/event)
+#
+# Usage: uv run cerebro fit --config configs/jepa_phase1_pretrain_full.yaml
+#
+# Training time: ~36-48 hours on single GPU
+# Output: Pretrained JEPA encoder checkpoint
+
+seed_everything: 42
+
+# Tuning flags
+run_lr_finder: false
+run_batch_size_finder: false
+
+trainer:
+  max_epochs: 200  # Full pretraining
+  accelerator: auto
+  devices: 1
+  precision: "32-true"  # FNO uses complex numbers, not compatible with AMP
+  gradient_clip_val: 1.0
+  fast_dev_run: false
+  log_every_n_steps: 50
+
+  # Logging
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: jepa_pretrain_full
+      tags:
+        - signaljepa
+        - pretrain
+        - full
+        - self_supervised
+      notes: "SignalJEPA self-supervised pretraining on full HBN dataset"
+      save_dir: outputs/jepa/pretrain_full
+      mode: offline
+
+  # Callbacks
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/jepa/pretrain_full/checkpoints
+        filename: "pretrain-{epoch:02d}-{val_loss:.4f}"
+        monitor: val_loss
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_loss
+        patience: 25
+        mode: min
+        verbose: true
+
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 2
+
+# Model: JEPA Foundation Model
+model:
+  class_path: cerebro.trainers.jepa.JEPAPhase1Trainer
+  init_args:
+    model:
+      class_path: cerebro.models.architectures.JEPAFoundationModel
+      init_args:
+        n_chans: 129  # HBN dataset: 129 channels including Cz reference
+        n_times: 200  # 2s windows @ 100Hz
+        latent_dim: 96  # Total latent: trait(24) + state(36) + event(36)
+        sample_rate: 100
+        fno_modes: 50  # 50 Hz covers all EEG bands
+        mamba_d_state: 16
+        mamba_layers: 4
+
+    # Optimizer
+    lr: 1.0e-4
+    weight_decay: 1.0e-4
+    warmup_epochs: 10  # Warm up learning rate
+
+    # Loss weights for multi-scale dynamics
+    loss_weights:
+      state: 1.0    # Medium-term state prediction
+      event: 0.5    # Fast event prediction
+      trait: 0.1    # Slow trait prediction
+      stability: 0.5  # Stability regularization
+      mask: 0.5     # Masked prediction
+
+    # Masking strategy
+    mask_prob: 0.25  # Mask 25% of patches
+    mask_every_n_batches: 5  # Apply masking every 5 batches
+
+# Data: Full HBN dataset
+data:
+  class_path: cerebro.data.jepa_pretrain.JEPAPretrainDataModule
+  init_args:
+    data_dir: ${oc.env:EEG2025_DATA_ROOT,./data}
+
+    # Full HBN dataset (R5 excluded!)
+    releases:
+      - R1
+      - R2
+      - R3
+      - R4
+      - R6
+      - R7
+      - R8
+      - R9
+      - R10
+      - R11
+
+    # DataLoader parameters
+    batch_size: 64  # Adjust based on GPU memory
+    num_workers: 16
+
+    # Windowing for JEPA
+    window_length: 4.0  # 4s windows for context
+    stride: 2.0  # 2s stride
+    crop_length: 2.0  # Crop to 2s for training
+
+    # Splits
+    val_split: 0.1
+    test_release: null  # Specify release for test (e.g., "R5") or null for no test split
+
+    # Channel and frequency
+    n_chans_select: 129
+    sfreq: 100
+    mini: false  # Full dataset
+
+    # All tasks for diverse pretraining
+    all_tasks:
+      - contrastChangeDetection
+      - restingState
+      - despicableMe
+      - thePresent
+      - diaryOfAWimpyKid
+      - funwithFractals
+      - surroundSupp
