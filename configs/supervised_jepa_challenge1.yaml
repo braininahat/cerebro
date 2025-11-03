@@ -1,0 +1,196 @@
+# Supervised Training for Challenge 1 with SignalJEPA
+#
+# This config uses SignalJEPA_PreLocal transformer architecture for supervised
+# regression training on the Contrast Change Detection task.
+#
+# Usage: uv run cerebro fit --config configs/supervised_jepa_challenge1.yaml
+
+# Random seed for reproducibility
+seed_everything: 42
+
+# Tuning flags
+run_lr_finder: true
+run_batch_size_finder: true
+
+# LR finder parameters
+lr_finder_min: 1.0e-07
+lr_finder_max: 0.1
+lr_finder_num_training: 40
+
+# Batch size finder parameters
+bs_finder_mode: power
+bs_finder_init_val: 32
+bs_finder_max_trials: 6
+bs_finder_steps_per_trial: 3
+
+# Trainer configuration
+trainer:
+  max_epochs: 50
+  accelerator: auto
+  devices: 1
+  precision: "32"  # SignalJEPA may be sensitive to precision
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 10
+
+  # Logger configuration
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: challenge1_signaljepa_baseline
+      tags:
+        - challenge1
+        - supervised
+        - signaljepa
+        - baseline
+      notes: "SignalJEPA_PreLocal baseline for Challenge 1 (RT prediction from CCD task)"
+      log_model: all
+      save_dir: outputs/challenge1
+
+  # Callbacks
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/challenge1/checkpoints
+        filename: challenge1-jepa-{epoch:02d}-{val_nrmse:.4f}
+        monitor: val_nrmse
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_nrmse
+        patience: 10
+        mode: min
+        verbose: true
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 1
+
+    - class_path: cerebro.callbacks.ModelAutopsyCallback
+      init_args:
+        run_on_training_end: true
+        run_on_early_stop: true
+        diagnostics:
+          - predictions
+          - gradients
+          - activations
+          - integrated_gradients
+          - layer_gradcam
+          - failure_modes
+        save_plots: true
+        log_to_wandb: true
+        generate_report: true
+        upload_report: true
+        upload_summary_table: true
+        upload_raw_artifacts: false
+        num_samples: 500
+        top_k_failures: 100
+        ig_n_steps: 50
+        ig_baseline: zero
+
+# Model configuration: SupervisedTrainer with SignalJEPA RegressorModel
+model:
+  class_path: cerebro.trainers.supervised.SupervisedTrainer
+  init_args:
+    # The actual model (encoder + regression head)
+    model:
+      class_path: cerebro.models.architectures.RegressorModel
+      init_args:
+        encoder_class: SignalJEPA  # SignalJEPA transformer architecture
+        n_outputs: 1               # Single regression output (RT)
+        dropout: 0.0               # No dropout
+        input_scale: 1000.0        # Millivolt scaling for faster convergence
+        encoder_kwargs:            # Encoder-specific parameters
+          n_chans: 129
+          n_times: 200
+          sfreq: 100
+          # SignalJEPA-specific architecture parameters
+          n_spat_filters: 4
+          # Feature encoder: convolutional layers for temporal feature extraction
+          feature_encoder__conv_layers_spec:
+            - [8, 32, 8]
+            - [16, 2, 2]
+            - [32, 2, 2]
+            - [64, 2, 2]
+            - [64, 2, 2]
+          feature_encoder__mode: default
+          feature_encoder__conv_bias: false
+          drop_prob: 0.0
+          # Positional encoding: spatial and temporal dimensions
+          pos_encoder__spat_dim: 30
+          pos_encoder__time_dim: 34
+          pos_encoder__sfreq_features: 1.0
+          pos_encoder__spat_kwargs: null
+          # Transformer architecture
+          transformer__d_model: 64
+          transformer__num_encoder_layers: 8
+          transformer__num_decoder_layers: 4
+          transformer__nhead: 8
+
+    # Training hyperparameters
+    loss_fn: mse               # Mean squared error
+    lr: 0.001                  # Learning rate
+    weight_decay: 0.00001      # Weight decay
+    epochs: 50                 # Must match trainer.max_epochs
+    warmup_epochs: 0           # No warmup
+
+# Data configuration: Challenge 1 CCD task
+data:
+  class_path: cerebro.data.challenge1.Challenge1DataModule
+  init_args:
+    data_dir: ${oc.env:HBN_ROOT,data}
+    releases:
+      - R1
+      - R2
+      - R3
+      - R4
+      - R6
+      - R7
+      - R8
+      - R9
+      - R10
+      - R11
+
+    # Training parameters
+    batch_size: 512
+    num_workers: 8
+
+    # Excluded subjects (known issues)
+    excluded_subjects:
+      - NDARWV769JM7
+      - NDARME789TD2
+      - NDARUA442ZVF
+      - NDARJP304NK1
+      - NDARTY128YLU
+      - NDARDW550GU6
+      - NDARLD243KRE
+      - NDARUJ292JXV
+      - NDARBA381JGH
+
+    # Windowing parameters
+    shift_after_stim: 0.5      # Start window 0.5s after stimulus
+    window_len: 2.0            # 2 second windows
+    epoch_len_s: 2.0
+    sfreq: 100
+    anchor: stimulus_anchor
+
+    # Data splits
+    mode: dev                  # "dev" = train/val/test split
+    test_on_r5: true           # Use R5 as test set (matches competition)
+    r5_data_dir: ${oc.env:HBN_ROOT,data}
+    val_frac: 0.1
+    test_frac: 0.1
+    seed: 2025
+
+    # Performance
+    use_mini: false
+    cache_dir: null            # Deprecated/ignored by Challenge1DataModule

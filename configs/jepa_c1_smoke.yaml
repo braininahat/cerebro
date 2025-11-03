@@ -1,0 +1,104 @@
+seed_everything: 42
+run_lr_finder: false
+run_batch_size_finder: false
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 5
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: jepa_c1_smoke
+      tags:
+      - signaljepa
+      - finetune
+      - challenge1
+      - mini
+      - test
+      - smoke
+      save_dir: outputs/jepa/finetune_c1_smoke
+      mode: offline
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: outputs/jepa/finetune_c1_smoke/checkpoints
+      filename: challenge1-{epoch:02d}-{val_nrmse:.4f}
+      monitor: val_nrmse
+      mode: min
+      save_top_k: 1
+      save_last: true
+  - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+    init_args:
+      leave: true
+  max_steps: 20
+  val_check_interval: 10
+model:
+  class_path: cerebro.trainers.supervised.SupervisedTrainer
+  init_args:
+    model:
+      class_path: cerebro.models.architectures.RegressorModel
+      init_args:
+        encoder_class: SignalJEPA
+        n_outputs: 1
+        dropout: 0.0
+        input_scale: 1000.0
+        encoder_kwargs:
+          n_chans: 129
+          n_times: 200
+          sfreq: 100
+          n_spat_filters: 4
+          feature_encoder__conv_layers_spec:
+          - - 8
+            - 32
+            - 8
+          - - 16
+            - 2
+            - 2
+          - - 32
+            - 2
+            - 2
+          - - 64
+            - 2
+            - 2
+          - - 64
+            - 2
+            - 2
+          feature_encoder__mode: default
+          feature_encoder__conv_bias: false
+          drop_prob: 0.0
+          pos_encoder__spat_dim: 30
+          pos_encoder__time_dim: 66
+          pos_encoder__sfreq_features: 1.0
+          pos_encoder__spat_kwargs: null
+          transformer__d_model: 64
+          transformer__num_encoder_layers: 8
+          transformer__num_decoder_layers: 4
+          transformer__nhead: 8
+    pretrained_checkpoint: outputs/jepa/pretrain_smoke/checkpoints/last.ckpt
+    loss_fn: mse
+    lr: 0.001
+    weight_decay: 1.0e-05
+    epochs: 2
+    warmup_epochs: 0
+data:
+  class_path: cerebro.data.challenge1.Challenge1DataModule
+  init_args:
+    data_dir: ${oc.env:HBN_ROOT,data}
+    releases:
+    - R1
+    batch_size: 256
+    num_workers: 4
+    excluded_subjects: []
+    window_len: 2.0
+    shift_after_stim: 0.5
+    sfreq: 100
+    epoch_len_s: 2.0
+    anchor: stimulus_anchor
+    val_frac: 0.1
+    test_frac: 0.1
+    seed: 2025

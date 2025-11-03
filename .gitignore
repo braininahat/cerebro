@@ -218,7 +218,15 @@ __marimo__/
 wandb/
 
 *.pt
-data/
+weights/
+/data/
 .vscode/
 .python-version
 response_time_distribution.png
+*.ckpt
+*.pkl
+*.zip
+outputs/
+*/outputs/
+wandb/
+.worktrees/

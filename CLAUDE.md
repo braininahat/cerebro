@@ -1,114 +1,191 @@
-# CLAUDE.md
+# CLAUDE.md - Cerebro Project
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides project-specific guidance for the Cerebro EEG Competition project.
+See user-level CLAUDE.md for general development patterns and memory-first workflow.
 
 ## Project Overview
 
-This repository contains code for the EEG2025 NeurIPS Challenge: "From Cross-Task to Cross-Subject EEG Decoding". The project focuses on developing EEG decoders that can transfer knowledge across cognitive tasks and generalize across subjects using the HBN-EEG dataset (3000+ participants, 6 cognitive tasks).
+Competition submission for NeurIPS 2025 EEG Foundation Challenge with a 10-day development timeline. Two regression tasks: Challenge 1 (30% weight) predicts response time from Contrast Change Detection task EEG; Challenge 2 (70% weight) predicts p_factor (externalizing psychopathology) from multi-task EEG. Overall score: 0.3 × NRMSE_C1 + 0.7 × NRMSE_C2.
 
-## Common Commands
+**Phased approach**: Days 1-4 supervised baselines (safety net) → Days 5-7 movie contrastive pretraining + multitask finetuning → Days 8-9 architecture iteration (only if contrastive beats baseline) → Day 10 submission.
 
-### Running Python Scripts
-```bash
-# Always use uv to run Python scripts
-uv run python script_name.py
+## Project-Specific Memory Patterns
 
-# Download mini datasets (already completed - 34.71 GB in eeg_mini_datasets/)
-uv run python download_mini_parallel.py
+### Cerebro-Specific Entity Examples
 
-# Analyze subject distribution across datasets
-uv run python analyze_subject_distribution.py
+```python
+# Competition-specific queries
+search_nodes("Challenge 1 windowing")  # EEG windowing strategies
+search_nodes("movie_pretrain optimizer")  # Contrastive learning config
+search_nodes("NRMSE calculation")  # Competition metric
+search_nodes("R5 protection")  # Validation data safeguards
 
-# Analyze task completion per subject
-uv run python analyze_tasks_per_subject.py
+# Entity creation for EEG components
+create_entities([{
+  name: "Challenge1DataModule",
+  entityType: "DataModule",
+  observations: [
+    "Two modes: dev (with local validation) and submission (no validation)",
+    "Implementation: cerebro/data/challenge1.py",
+    "R5 protection: ValueError if 'R5' in releases list",
+    "Subject-level splits to prevent data leakage",
+    "Windowing: 2.5s windows with 0.5s stimulus anchor"
+  ]
+}])
+
+# Competition-specific relationships
+create_relations([
+  {from: "Challenge1DataModule", to: "cerebro", relationType: "part_of"},
+  {from: "Challenge1DataModule", to: "EEGNeX", relationType: "uses"},
+  {from: "movie_pretrain", to: "InfoNCE", relationType: "uses_loss"}
+])
 ```
 
-### Data Access
-```bash
-# List mini dataset contents
-ls eeg_mini_datasets/R*_mini_L100/
+## Competition-Specific Architecture
 
-# Check AWS S3 bucket contents (public, no credentials needed)
-aws s3 ls s3://nmdatasets/NeurIPS25/ --no-sign-request
+### Supervised Training Configuration
+```python
+# Challenge 1: Response time prediction
+supervised_c1:
+  model: EEGNeX
+  loss: MSE
+  optimizer: AdamW(lr=0.001, weight_decay=0.00001)
+  scheduler: CosineAnnealingLR
+  epochs: 100
+  early_stopping: patience=10 on val_loss
 
-# Count .set files in a dataset
-find eeg_mini_datasets/R1_mini_L100 -name "*.set" | wc -l
+# Challenge 2: P_factor prediction  
+supervised_c2:
+  model: EEGNeX
+  loss: MSE
+  optimizer: AdamW(lr=0.0005, weight_decay=0.00001)
+  scheduler: ReduceLROnPlateau
+  epochs: 150
+  early_stopping: patience=15 on val_loss
 ```
 
-## Architecture Overview
+### Movie Contrastive Pretraining (Days 5-7)
+```python
+movie_pretrain:
+  model: EEGNeX with projection head
+  loss: InfoNCE(temperature=0.07)
+  optimizer: AdamW(lr=0.0001)
+  batch_size: 256
+  epochs: 200
+  data: All movie tasks (R1-R4, R6-R11)
+  
+multitask_finetune:
+  pretrained: movie_pretrain checkpoint
+  freeze_encoder_epochs: 5  # Freeze for 5 epochs, then fine-tune end-to-end
+  task_weights: {challenge1: 0.3, challenge2: 0.7}
+```
 
-### Data Pipeline
-1. **Data Download**: Scripts fetch EEG data from AWS S3 (`s3://nmdatasets/NeurIPS25/`)
-2. **Data Analysis**: Scripts analyze subject distribution and task completion
-3. **Model Development**: (To be implemented) Using braindecode/EEGDash for EEG processing
+## Competition Data
 
-### Directory Structure
-- `eeg_mini_datasets/`: Downloaded mini datasets (R1-R11, 100Hz, ~3-4GB each)
-- `eeg2025.github.io/`: Challenge website documentation (git submodule)
-- `downsample-datasets/`: MATLAB/Python scripts for downsampling to 100Hz (git submodule)
-- `*.csv`: Analysis outputs (subject distributions, task completions)
-- `*.json`: Metadata and analysis results
+### HBN Dataset Structure
+- **Releases**: 
+  - R1: ds005504-bdf through R11: ds005516-bdf
+  - Note: ds005513 (R5 candidate) does not exist
+- **Training data**: R1-R4, R6-R11 (10 releases)
+- **Competition validation data**: R5 only (held out, provides leaderboard feedback)
+- 129 channels (including reference Cz), 100 Hz sampling
+- 9 excluded subjects (listed in configs/data/hbn.yaml under challenge1.excluded_subjects)
 
-### Key Data Formats
-- **EEG Data**: EEGLAB .set files (without .fdt for mini datasets)
-- **Events**: .tsv files with onset, duration, value, event_code, feedback columns
-- **Metadata**: .json files with task descriptions and EEG parameters
-- **Participants**: .tsv with demographics and psychopathology scores
+### Challenge-Specific Preprocessing
 
-## Challenge Requirements
+#### Challenge 1 (Response Time)
+- **Windowing**: 2.5s windows with 0.5s pre-stimulus anchor
+- **Events**: "Stim" markers for stimulus onset
+- **Target**: Response time (log-transformed in some experiments)
+- **Implementation**: `annotate_trials_with_target()` adds RT to epochs
 
-### Challenge 1: Cross-Task Transfer Learning (40% final score)
-- **Input**: 2-second pre-trial EEG epochs from Contrast Change Detection (CCD) + full Surround Suppression (SuS) data
-- **Targets**: Response time (regression) + Success rate (classification)
-- **Metrics**: MAE (40%), R² (20%), AUC-ROC (30%), Balanced Accuracy (10%)
+#### Challenge 2 (P_factor)
+- **Windowing**: Task-dependent (varies by cognitive task)
+- **Aggregation**: Subject-level features across all tasks
+- **Target**: P_factor from participants.tsv
+- **Note**: Some subjects have `n/a` for factor scores
 
-### Challenge 2: Psychopathology Prediction (60% final score)
-- **Input**: All available EEG tasks (minimum 15 minutes per subject)
-- **Targets**: 4 continuous scores (p-factor, internalizing, externalizing, attention)
-- **Metrics**: CCC (50%), RMSE (30%), Spearman correlation (20%)
+## Competition Data Strategy
 
-### Constraints
-- Models must run on single GPU with 20GB memory at inference
-- Data downsampled to 100Hz, filtered 0.5-50Hz for evaluation
-- Code submission competition (not results submission)
+### Prototyping Phase (Days 1-9)
 
-## Data Specifications
+**Data splits**:
+- **Train**: Subset of {R1-R4, R6-R11} split at **subject level** (e.g., 80% of subjects)
+- **Val**: Held-out subjects from {R1-R4, R6-R11} (e.g., 20% of subjects)
+- **Test**: R5 (treated as external test, checked sparingly)
 
-### EEG Recording
-- 128-channel Magstim EGI system
-- Reference: Cz electrode
-- Sampling: 100Hz (downsampled from 500Hz)
-- Filtering: 0.5-50Hz bandpass
+**Why subject-level splits?**
+- Same subject may have multiple recordings across different tasks
+- Window-level or recording-level splits risk data leakage
+- Model could memorize subject-specific EEG patterns rather than task patterns
 
-### Tasks
-**Passive**: Resting State, Surround Suppression, Movie Watching (4 films)
-**Active**: Contrast Change Detection (3 runs), Sequence Learning (6/8 target), Symbol Search
+### Final Runs Phase (Day 10)
 
-### Available Features
-- Demographics: age, sex, handedness (EHQ score -100 to +100)
-- Psychopathology: p_factor, attention, internalizing, externalizing (from CBCL)
-- Task availability: Boolean flags for each task/run
+**Data splits**:
+- **Train**: ALL subjects from {R1-R4, R6-R11} (no validation split)
+- **Val/Test**: R5 (final submission to competition)
 
-## Key Scripts Purpose
+**Critical**: R5 is a competition validation set that provides leaderboard feedback, NOT a traditional test set. Never train on R5 under any circumstances.
 
-- `find_complete_subjects.py`: Identifies subjects present across multiple datasets (found: none overlap)
-- `analyze_subject_distribution.py`: Creates distribution matrix of subjects across datasets
-- `analyze_tasks_per_subject.py`: Analyzes task completion rates per subject
-- `download_mini_parallel.py`: Parallel download of mini datasets from S3 (5 workers, ~280 Mbps)
-- `download_eeg_data.py`: Downloads specific subjects using EEGDash API
+### DataModule Modes
 
-## Important Libraries
+#### Dev Mode (`mode="dev"`)
+**Purpose**: Development and hyperparameter tuning with local validation
 
-- **braindecode**: Deep learning for EEG data (main framework)
-- **EEGDash**: EEG data loading and API access
-- **MNE-Python**: EEG/MEG analysis (via braindecode)
-- **MOABB**: Mother of All BCI Benchmarks (benchmarking tools)
+**Configs**:
+- `configs/challenge1_base.yaml` - Standard dev mode with local test
+- `configs/challenge1_mini.yaml` - Fast prototyping with R1 mini dataset
+- `configs/challenge1_r5test.yaml` - Dev mode with R5 test evaluation
 
-## Dataset Facts
+**Usage**:
+```bash
+# Dev mode with local test split (fastest iteration)
+uv run cerebro fit --config configs/challenge1_base.yaml
 
-- 11 mini datasets (R1-R11) with 20 subjects each
-- No subjects appear in multiple datasets (completely disjoint)
-- Each subject has 220-240 .set files across all tasks
-- Total downloaded: 34.71 GB for all mini datasets
-- Participants.tsv contains target labels for both challenges
-- Before web search consult @knowledge_base.md, only searching the web if not already documented and document findings in that case. Also document whatever we learn experimentally along the way.
+# Dev mode with R5 test (validate against competition distribution)
+uv run cerebro fit --config configs/challenge1_r5test.yaml
+```
+
+#### Submission Mode (`mode="submission"`)
+**Purpose**: Final submission with maximum training data
+
+**Usage**:
+```bash
+# Day 10: Final submission training
+uv run cerebro fit --config configs/challenge1_submission.yaml
+```
+
+### R5 Protection
+
+**Multiple layers of protection prevent R5 contamination**:
+1. **ValueError guard**: `Challenge1DataModule.__init__()` raises error if "R5" in releases list
+2. **Mode validation**: Submission mode requires `test_on_r5=True` (raises error otherwise)
+3. **Separate caching**: R5 cached in `cache/challenge1/r5/` to avoid mixing with training data
+4. **Validation notebook**: `notebooks/08_validate_data_quality.py` checks for train/R5 subject overlap
+
+## Priority Guidelines (10-Day Timeline)
+
+**Must have**:
+- Working supervised baselines (C1 + C2)
+- Local scoring integration
+- Submission packaging
+
+**Should have**:
+- Movie contrastive pretraining
+- Multitask fine-tuning
+- Wandb tracking
+
+**Nice to have** (only if time permits):
+- SignalJEPA baseline
+- Spatial/temporal hierarchies
+- Hyperparameter sweeps
+- MOABB data integration
+
+## Key Design Decisions
+
+1. **Installable package**: Editable install (`uv pip install -e .`) for clean imports and IDE support
+2. **CLI entry point**: `uv run cerebro fit` command via package entry point (backward compatible with direct python)
+3. **Config-driven experiments**: Change hyperparameters via Lightning CLI, not code
+4. **Aggressive caching**: EEGChallengeDataset caches downloads, preprocessed data cached via pickle
+5. **Baselines first**: Supervised training is safety net before trying contrastive learning
+6. **Local scoring critical**: Test with `uv run python startkit/local_scoring.py` before submitting to competition

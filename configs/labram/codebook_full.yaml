@@ -1,0 +1,157 @@
+# LaBraM Codebook (Tokenizer) Training - Full HBN Dataset
+#
+# Phase 1 of LaBraM pretraining: Learn discrete EEG token vocabulary
+# Uses vector quantization to learn codebook of common EEG patterns
+#
+# Usage: uv run cerebro fit --config configs/labram/codebook_full.yaml
+#
+# Training time: ~24-48 hours on single GPU (depends on dataset size)
+# Output: Tokenizer checkpoint with learned codebook
+
+seed_everything: 42
+
+# Tuning flags
+run_lr_finder: false
+run_batch_size_finder: false
+
+# LR finder parameters (used if run_lr_finder=true)
+lr_finder_min: 1.0e-07
+lr_finder_max: 0.1
+lr_finder_num_training: 100
+
+# Batch size finder parameters (used if run_batch_size_finder=true)
+bs_finder_mode: power
+bs_finder_init_val: 64
+bs_finder_max_trials: 6
+bs_finder_steps_per_trial: 3
+
+model:
+  class_path: "cerebro.models.labram.tokenizer.VQNSP"
+
+  init_args:
+    # Model architecture
+    pretrained: false
+    as_tokenizer: false
+    pretrained_weight: null
+
+    # Codebook parameters
+    n_code: 8192  # CODEBOOK_SIZE - 8192 discrete EEG tokens
+    code_dim: 32  # CODEBOOK_EMD_DIM - 32-dimensional embedding per token
+
+    # Input configuration
+    EEG_size: 200  # 2 seconds @ 100Hz
+    patch_size: 100  # 1 second patches @ 100Hz
+    encoder_depth: 24  # Deep encoder for rich representations
+    decoder_depth: 3   # Shallow decoder
+
+    # EMA quantizer parameters
+    decay: 0.99  # EMA decay for codebook updates
+
+    # Optimizer
+    learning_rate: 0.0001
+    weight_decay: 0.05
+    scale_eeg: false
+
+    # Channel and temporal hints (HBN dataset)
+    n_chans: 129  # 128 channels + Cz reference
+    max_time_window_hint: 2  # 2 second windows
+
+# Trainer configuration
+trainer:
+  max_epochs: 200  # Full training (originally 1000, but 200 should be enough)
+  accelerator: auto
+  devices: 1
+  precision: "bf16-mixed"  # Use bfloat16 for faster training
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 50
+
+  # Logger configuration
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: labram_codebook_full
+      tags:
+        - labram
+        - codebook
+        - tokenizer
+        - full
+      notes: "LaBraM tokenizer training on full HBN dataset (R1-R4,R6-R11)"
+      save_dir: outputs/labram/codebook_full
+      mode: offline  # Change to "online" when ready
+
+  # Callbacks
+  callbacks:
+    # CheckpointCompatibilityCallback: Fix checkpoints for resuming (must be FIRST)
+    - class_path: cerebro.callbacks.CheckpointCompatibilityCallback
+
+    # ModelCheckpoint: Save best models
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/labram/codebook_full/checkpoints
+        filename: tokenizer-{epoch:02d}-{val_tok_loss:.4f}
+        monitor: val_tok_loss
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    # EarlyStopping: Stop if no improvement
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_tok_loss
+        patience: 20  # Increased patience for full training
+        mode: min
+        verbose: true
+
+    # TQDMProgressBar
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    # RichModelSummary
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 2
+
+# Data configuration
+data:
+  data_dir: ${oc.env:HBN_ROOT,data}
+
+  # Full HBN dataset for pretraining
+  # WARNING: R5 is COMPETITION VALIDATION - NEVER include!
+  releases:
+    - R1
+    - R2
+    - R3
+    - R4
+    - R6
+    - R7
+    - R8
+    - R9
+    - R10
+    - R11
+
+  data_req: pretrain
+
+  # Passive tasks for unsupervised learning
+  passive_tasks:
+    - restingState
+    - surroundSupp
+    - despicableMe
+    - thePresent
+    - diaryOfAWimpyKid
+    - funwithFractals
+
+  # Also include active task data
+  active_task: contrastChangeDetection
+
+  # DataLoader parameters
+  batch_size: 128  # Adjust based on GPU memory
+  num_workers: 16  # Parallel data loading
+  window_len_s: 2.0  # 2 second windows
+  stride_s: 1.0  # 1 second stride (50% overlap)
+  sfreq: 100
+  val_split: 0.1  # 10% validation split
+  seed: 2025

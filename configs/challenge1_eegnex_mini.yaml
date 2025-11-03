@@ -1,0 +1,132 @@
+# Lightning CLI configuration for Challenge 1 (Mini Dataset)
+# Fast prototyping with mini dataset and reduced epochs
+# Usage: uv run python src/cli/train.py fit --config configs/challenge1_mini.yaml
+
+# Seed everything for reproducibility
+seed_everything: 42
+
+# Tuning flags (disabled for mini)
+run_lr_finder: false
+run_batch_size_finder: false
+
+# Batch size finder parameters (used if run_batch_size_finder=true)
+bs_finder_mode: power
+bs_finder_init_val: 32
+bs_finder_max_trials: 6
+bs_finder_steps_per_trial: 3
+
+# Trainer configuration
+trainer:
+  max_epochs: 2  # Fast iteration
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 10
+
+  # Logger configuration (full spec required)
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: challenge1_mini
+      tags:
+        - challenge1
+        - mini
+        - debug
+      notes: "Fast prototyping with mini dataset"
+      log_model: false  # Don't upload artifacts for mini
+      save_dir: outputs/challenge1
+
+  # Callbacks (same as base)
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/challenge1/checkpoints
+        filename: challenge1-{epoch:02d}-{val_nrmse:.4f}
+        monitor: val_nrmse
+        mode: min
+        save_top_k: 3
+        save_last: true
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_nrmse
+        patience: 10
+        mode: min
+        verbose: true
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 1
+
+    # ModelAutopsy: Enabled temporarily for testing full suite
+    - class_path: cerebro.callbacks.ModelAutopsyCallback
+      init_args:
+        run_on_training_end: true
+        run_on_early_stop: false
+        diagnostics:
+          - predictions
+          - gradients
+          - activations
+          - integrated_gradients  # Captum: IG attribution analysis (memory optimized)
+          - layer_gradcam         # Captum: Layer-wise attention (memory optimized)
+          - failure_modes
+        save_plots: true
+        log_to_wandb: true
+        generate_report: true
+        upload_report: true           # Upload markdown report to wandb (default: true)
+        upload_summary_table: true    # Upload metrics table for cross-run comparison (default: true)
+        upload_raw_artifacts: false   # Upload compressed .npz (~50 MB, ~40s upload, opt-in)
+        num_samples: 500
+        top_k_failures: 100
+        ig_n_steps: 50
+        ig_baseline: zero
+
+# Model configuration (class registered in CLI, just specify __init__ params)
+model:
+  n_chans: 129
+  n_outputs: 1
+  n_times: 200
+  sfreq: 100
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 2  # Must match trainer.max_epochs
+  input_scale: 1000.0  # Input scaling: 1.0 (volt, baseline), 1000.0 (millivolt, faster convergence)
+
+# Data configuration (mini overrides)
+data:
+  data_dir: ${oc.env:HBN_ROOT,data}
+  # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training!
+  # Using R1 for mini prototyping (small enough for fast iteration)
+  releases:
+    - R1  # Mini prototyping with R1 (NOT R5!)
+  batch_size: 64  # Smaller batch for mini
+  num_workers: 4  # Fewer workers for mini
+  excluded_subjects:
+    - NDARWV769JM7
+    - NDARME789TD2
+    - NDARUA442ZVF
+    - NDARJP304NK1
+    - NDARTY128YLU
+    - NDARDW550GU6
+    - NDARLD243KRE
+    - NDARUJ292JXV
+    - NDARBA381JGH
+  shift_after_stim: 0.5
+  window_len: 2.0
+  use_mini: true  # Mini flag
+  cache_dir: null  # Deprecated/ignored by Challenge1DataModule
+  val_frac: 0.1
+  test_frac: 0.1
+  seed: 2025
+  sfreq: 100
+  epoch_len_s: 2.0
+  anchor: stimulus_anchor
+  # R5 Test Evaluation (Competition Validation Set)
+  mode: dev  # "dev" = split training releases for train/val/test
+  test_on_r5: true  # Use R5 as test set (even for mini prototyping to match competition evaluation)
+  r5_data_dir: ${oc.env:HBN_ROOT,data}  # R5 data location

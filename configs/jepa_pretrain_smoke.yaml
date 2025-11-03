@@ -1,0 +1,81 @@
+seed_everything: 42
+run_lr_finder: false
+run_batch_size_finder: false
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: 32-true
+  gradient_clip_val: 1.0
+  log_every_n_steps: 5
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: jepa_pretrain_smoke
+      tags:
+      - signaljepa
+      - pretrain
+      - mini
+      - test
+      - smoke
+      save_dir: outputs/jepa/pretrain_smoke
+      mode: offline
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: outputs/jepa/pretrain_smoke/checkpoints
+      filename: pretrain-{epoch:02d}-{val_loss:.4f}
+      monitor: val_loss
+      mode: min
+      save_top_k: 1
+      save_last: true
+  - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+    init_args:
+      leave: true
+  max_steps: 20
+  val_check_interval: 10
+model:
+  class_path: cerebro.trainers.jepa.JEPAPhase1Trainer
+  init_args:
+    model:
+      class_path: cerebro.models.architectures.JEPAFoundationModel
+      init_args:
+        n_chans: 129
+        n_times: 200
+        latent_dim: 96
+        sample_rate: 100
+        fno_modes: 50
+        mamba_d_state: 16
+        mamba_layers: 4
+    lr: 0.0001
+    weight_decay: 0.0001
+    warmup_epochs: 0
+    loss_weights:
+      state: 1.0
+      event: 0.5
+      trait: 0.1
+      stability: 0.5
+      mask: 0.5
+    mask_prob: 0.25
+    mask_every_n_batches: 5
+data:
+  class_path: cerebro.data.jepa_pretrain.JEPAPretrainDataModule
+  init_args:
+    data_dir: ${oc.env:HBN_ROOT,./data}
+    releases:
+    - R1
+    batch_size: 32
+    num_workers: 4
+    window_length: 4.0
+    stride: 2.0
+    crop_length: 2.0
+    val_split: 0.1
+    test_release: null  # Specify release for test (e.g., "R5") or null for no test split
+    n_chans_select: 129
+    sfreq: 100
+    mini: true
+    all_tasks:
+    - contrastChangeDetection
+    - restingState
+    - despicableMe

@@ -1,0 +1,163 @@
+# Lightning CLI configuration for Challenge 1 with SignalJEPA_PreLocal (Mini Dataset)
+# Usage: uv run cerebro fit --config configs/challenge1_jepa_mini.yaml
+#
+# This is a fast prototyping variant that uses:
+# - Mini dataset (R5 only, smaller subset)
+# - 2 epochs for quick testing
+# - All other settings from challenge1_jepa.yaml
+
+# Seed everything for reproducibility
+seed_everything: 42
+
+# Tuning flags (root level, not under trainer)
+run_lr_finder: false
+run_batch_size_finder: false
+
+# LR finder parameters (used if run_lr_finder=true)
+lr_finder_min: 1.0e-07
+lr_finder_max: 0.1
+lr_finder_num_training: 100
+
+# Batch size finder parameters (used if run_batch_size_finder=true)
+bs_finder_mode: power
+bs_finder_init_val: 32
+bs_finder_max_trials: 6
+bs_finder_steps_per_trial: 3
+
+# Trainer configuration
+trainer:
+  max_epochs: 2  # Quick test run
+  accelerator: auto  # Auto-detect GPU/CPU
+  devices: 1
+  precision: "bf16-mixed"
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 10
+
+  # Logger configuration
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: challenge1_signaljepa_mini
+      tags:
+        - challenge1
+        - supervised
+        - signaljepa
+        - mini
+      notes: "SignalJEPA_PreLocal mini baseline for Challenge 1 (fast prototyping)"
+      log_model: all
+      save_dir: outputs/challenge1
+
+  # Callbacks
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/challenge1/checkpoints
+        filename: challenge1-jepa-mini-{epoch:02d}-{val_nrmse:.4f}
+        monitor: val_nrmse
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_nrmse
+        patience: 10
+        mode: min
+        verbose: true
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 1
+
+    # ModelAutopsy: Comprehensive diagnostics on early stopping or training end
+    - class_path: cerebro.callbacks.ModelAutopsyCallback
+      init_args:
+        run_on_training_end: true
+        run_on_early_stop: true
+        diagnostics:
+          - predictions
+          - gradients
+          - activations
+          - integrated_gradients  # Captum: IG attribution analysis (memory optimized)
+          - layer_gradcam         # Captum: Layer-wise attention (memory optimized)
+          - failure_modes
+        save_plots: true
+        log_to_wandb: true
+        generate_report: true
+        upload_report: true           # Upload markdown report to wandb (default: true)
+        upload_summary_table: true    # Upload metrics table for cross-run comparison (default: true)
+        upload_raw_artifacts: false   # Upload compressed .npz (~50 MB, ~40s upload, opt-in)
+        num_samples: 500
+        top_k_failures: 100
+        ig_n_steps: 50
+        ig_baseline: zero
+
+# Model configuration: SignalJEPA_PreLocal (same as full config)
+model:
+  n_chans: 129
+  n_outputs: 1
+  n_times: 200
+  sfreq: 100
+  model_class: SignalJEPA_PreLocal
+  model_kwargs:
+    n_spat_filters: 4
+    feature_encoder__conv_layers_spec:
+      - [8, 32, 8]
+      - [16, 2, 2]
+      - [32, 2, 2]
+      - [64, 2, 2]
+      - [64, 2, 2]
+    feature_encoder__mode: default
+    feature_encoder__conv_bias: false
+    drop_prob: 0.0
+    pos_encoder__spat_dim: 30
+    pos_encoder__time_dim: 34
+    pos_encoder__sfreq_features: 1.0
+    pos_encoder__spat_kwargs: null
+    transformer__d_model: 64
+    transformer__num_encoder_layers: 8
+    transformer__num_decoder_layers: 4
+    transformer__nhead: 8
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 2  # Must match trainer.max_epochs
+  input_scale: 1000.0  # Input scaling: 1.0 (volt, baseline), 1000.0 (millivolt, faster convergence)
+
+# Data configuration: MINI DATASET
+data:
+  data_dir: ${oc.env:HBN_ROOT,data}  # Single directory for both mini and full
+  releases:
+    - R1  # Mini prototyping with R1 (NOT R5!)
+  batch_size: 512
+  num_workers: 8
+  excluded_subjects:
+    - NDARWV769JM7
+    - NDARME789TD2
+    - NDARUA442ZVF
+    - NDARJP304NK1
+    - NDARTY128YLU
+    - NDARDW550GU6
+    - NDARLD243KRE
+    - NDARUJ292JXV
+    - NDARBA381JGH
+  shift_after_stim: 0.5
+  window_len: 2.0
+  use_mini: true  # Use mini subset
+  cache_dir: null  # Deprecated/ignored by Challenge1DataModule
+  val_frac: 0.1
+  test_frac: 0.1
+  seed: 2025
+  sfreq: 100
+  epoch_len_s: 2.0
+  anchor: stimulus_anchor
+  # R5 Test Evaluation (Competition Validation Set)
+  mode: dev  # "dev" = split training releases for train/val/test
+  test_on_r5: true  # Use R5 as test set (even for mini prototyping to match competition evaluation)
+  r5_data_dir: ${oc.env:HBN_ROOT,data}  # R5 data location

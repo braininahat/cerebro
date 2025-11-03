@@ -1,0 +1,170 @@
+# Supervised Training for Challenge 1 with EEGNeX
+#
+# This config trains an EEGNeX model for Challenge 1 (response time prediction)
+# using the new architecture that separates models from trainers.
+#
+# Usage: uv run cerebro fit --config configs/supervised_eegnex_challenge1.yaml
+
+# Random seed for reproducibility
+seed_everything: 42
+
+# Tuning flags (root level)
+run_lr_finder: false
+run_batch_size_finder: false
+
+# LR finder parameters (if enabled)
+lr_finder_min: 1.0e-07
+lr_finder_max: 0.1
+lr_finder_num_training: 100
+
+# Batch size finder parameters (if enabled)
+bs_finder_mode: power
+bs_finder_init_val: 32
+bs_finder_max_trials: 6
+bs_finder_steps_per_trial: 3
+
+# Trainer configuration
+trainer:
+  max_epochs: 100
+  accelerator: auto
+  devices: 1
+  precision: "bf16-mixed"
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 10
+
+  # Wandb logger
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: supervised_eegnex_challenge1
+      tags:
+        - challenge1
+        - supervised
+        - eegnex
+        - baseline
+      notes: "EEGNeX supervised baseline for Challenge 1 (RT prediction)"
+      log_model: all
+      save_dir: outputs/challenge1
+
+  # Callbacks
+  callbacks:
+    # ModelCheckpoint: Save best models based on validation NRMSE
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/challenge1/checkpoints
+        filename: challenge1-{epoch:02d}-{val_nrmse:.4f}
+        monitor: val_nrmse
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    # EarlyStopping
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_nrmse
+        patience: 10
+        mode: min
+        verbose: true
+
+    # Progress bar
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    # Model summary
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 2
+
+    # Model autopsy (optional diagnostics)
+    - class_path: cerebro.callbacks.ModelAutopsyCallback
+      init_args:
+        run_on_training_end: true
+        run_on_early_stop: true
+        diagnostics:
+          - predictions
+          - gradients
+          - activations
+        save_plots: true
+        log_to_wandb: true
+        generate_report: true
+        num_samples: 500
+
+# Model configuration: SupervisedTrainer with RegressorModel
+model:
+  class_path: cerebro.trainers.supervised.SupervisedTrainer
+  init_args:
+    # The actual model (encoder + regression head)
+    model:
+      class_path: cerebro.models.architectures.RegressorModel
+      init_args:
+        encoder_class: EEGNeX  # Can swap to SignalJEPA
+        n_outputs: 1           # Single regression output (RT)
+        dropout: 0.0           # No dropout
+        input_scale: 1000.0    # Millivolt scaling for faster convergence
+        encoder_kwargs:        # Encoder-specific parameters
+          n_chans: 129
+          n_times: 200
+          sfreq: 100
+
+    # Training hyperparameters
+    loss_fn: mse               # Mean squared error for regression
+    lr: 0.001                  # Learning rate
+    weight_decay: 0.00001      # Weight decay (lower than contrastive)
+    epochs: 100                # Must match trainer.max_epochs
+    warmup_epochs: 0           # No warmup for supervised
+
+# Data configuration: Challenge 1 CCD task
+data:
+  class_path: cerebro.data.challenge1.Challenge1DataModule
+  init_args:
+    data_dir: ${oc.env:HBN_ROOT,data}
+    # Training releases (R5 held out for competition)
+    releases:
+      - R1
+      - R2
+      - R3
+      - R4
+      - R6
+      - R7
+      - R8
+      - R9
+      - R10
+      - R11
+
+    # Training parameters
+    batch_size: 512
+    num_workers: 8
+
+    # Excluded subjects (known issues)
+    excluded_subjects:
+      - NDARWV769JM7
+      - NDARME789TD2
+      - NDARUA442ZVF
+      - NDARJP304NK1
+      - NDARTY128YLU
+      - NDARDW550GU6
+      - NDARLD243KRE
+      - NDARUJ292JXV
+      - NDARBA381JGH
+
+    # Windowing parameters
+    shift_after_stim: 0.5      # Start window 0.5s after stimulus
+    window_len: 2.0            # 2 second windows
+    epoch_len_s: 2.0
+    sfreq: 100
+    anchor: stimulus_anchor
+
+    # Data splits
+    mode: dev                  # "dev" = train/val/test split, "submission" = all for train
+    test_on_r5: false          # Use local test split (set true for R5 evaluation)
+    val_frac: 0.1
+    test_frac: 0.1
+    seed: 2025
+
+    # Performance
+    use_mini: false            # Set true for fast prototyping
+    cache_dir: null           # Deprecated/ignored by Challenge1DataModule

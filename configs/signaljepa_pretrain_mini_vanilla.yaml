@@ -1,0 +1,98 @@
+# Vanilla SignalJEPA Masked Autoencoder Pretraining - Mini Dataset
+#
+# Self-supervised pretraining using braindecode's vanilla SignalJEPA with actual
+# GSN-HydroCel-129 electrode locations. Trains on all mini releases except R5.
+#
+# Usage: uv run cerebro fit --config configs/signaljepa_pretrain_mini_vanilla.yaml
+
+seed_everything: 42
+run_lr_finder: false
+run_batch_size_finder: false
+
+trainer:
+  max_epochs: 3  # Train for 3 epochs to validate setup
+  val_check_interval: 1.0  # Validate every epoch
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 5
+
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: vanilla_signaljepa_pretrain_mini
+      tags: [signaljepa, vanilla, masked_ae, pretrain, unsupervised, mini]
+      save_dir: outputs/vanilla_signaljepa_pretrain_mini
+      mode: offline
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/vanilla_signaljepa_pretrain_mini/checkpoints
+        filename: pretrain-{epoch:02d}-{val_loss:.4f}
+        monitor: val_loss
+        mode: min
+        save_top_k: 1
+        save_last: true
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+# Model: MaskedAutoencoderTrainer with VanillaSignalJEPA
+model:
+  class_path: cerebro.trainers.masked_pretraining.MaskedAutoencoderTrainer
+  init_args:
+    # Encoder: Vanilla SignalJEPA with real electrode locations
+    encoder:
+      class_path: cerebro.models.components.encoders.VanillaSignalJEPAEncoder
+      init_args:
+        n_chans: 129
+        n_times: 200  # 2s @ 100Hz
+        sfreq: 100
+        drop_prob: 0.0
+        # SignalJEPA hyperparameters
+        transformer__d_model: 64
+        transformer__num_encoder_layers: 8
+        transformer__nhead: 8
+
+    # Decoder: Simple MLP decoder
+    decoder:
+      class_path: cerebro.trainers.masked_pretraining.SimpleDecoder
+      init_args:
+        input_dim: 64  # Matches encoder transformer__d_model
+        n_chans: 129
+        n_times: 200
+        hidden_dim: 256
+
+    # Masking strategy (standard MAE approach)
+    time_mask_ratio: 0.5  # Mask 50% of timesteps
+    channel_mask_ratio: 0.3  # Mask 30% of channels
+
+    # Optimizer config
+    lr: 0.0001
+    weight_decay: 0.0001
+    warmup_epochs: 1  # 1 epoch warmup out of 3 total
+
+# Data: Unsupervised pretraining with all mini releases except R5
+data:
+  class_path: cerebro.data.labram_pretrain.LaBraMPretrainDataModule
+  init_args:
+    data_dir: ${oc.env:HBN_ROOT,data}
+    # All mini releases except R5 (R5 is test set)
+    releases: [R1, R2, R3, R4, R6, R7, R8, R9, R10, R11]
+    passive_tasks: [RestingState, DespicableMe, ThePresent]  # Passive tasks for pretraining
+    batch_size: 32
+    num_workers: 4
+    window_len: 2.0  # 2 second windows
+    patch_size: 100  # Patch size for reconstruction
+    sfreq: 100
+    val_frac: 0.2  # 20% of subjects for validation (subject-level split)
+    test_release: null  # R5 held out entirely as competition test set
+    seed: 2025
+    use_mini: true  # Use mini dataset for fast prototyping
+    excluded_subjects: []
+    n_channels: 129

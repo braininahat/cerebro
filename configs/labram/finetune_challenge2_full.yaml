@@ -1,0 +1,166 @@
+# LaBraM Challenge 2 Finetuning - Full HBN Dataset
+#
+# Phase 3b of LaBraM: Finetune pretrained encoder on Challenge 2 (p-factor prediction)
+# Requires pretrained checkpoint from Phase 2 (pretrain_full.yaml)
+#
+# Usage: uv run cerebro fit --config configs/labram/finetune_challenge2_full.yaml
+#
+# Training time: ~12-24 hours on single GPU
+# Output: Challenge 2 submission model
+
+seed_everything: 42
+
+# Tuning flags
+run_lr_finder: false
+run_batch_size_finder: false
+
+model:
+  class_path: "cerebro.models.labram.finetune.EEGRegressorPL"
+
+  init_args:
+    # NeuralTransformer architecture (must match pretrain)
+    EEG_size: 200  # 2s @ 100Hz
+    patch_size: 100
+    in_chans: 1
+    out_chans: 8
+    num_classes: 1  # Single regression output (externalizing score)
+    embed_dim: 200
+    depth: 12
+    num_heads: 10
+    mlp_ratio: 4.0
+    qkv_bias: false
+    qk_scale: null
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.0
+    init_values: null
+    use_abs_pos_emb: true
+    use_rel_pos_bias: false
+    use_shared_rel_pos_bias: false
+    use_mean_pooling: true
+    init_scale: 0.001
+    n_chans_hint: 129
+    max_time_window_hint: 2
+
+    # Pretrained weights (UPDATE THIS PATH!)
+    pretrained: true
+    pretrained_weight: outputs/labram/pretrain_full/checkpoints/last.ckpt
+
+    # Training parameters
+    lr: 0.0001
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    use_cosine_per_step: true
+    eta_min: 0.000001
+    scale_input: false
+
+# Trainer configuration
+trainer:
+  max_epochs: 150  # Challenge 2 may need more epochs
+  accelerator: auto
+  devices: 1
+  precision: "bf16-mixed"
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 50
+
+  # Logger
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: labram_finetune_challenge2_full
+      tags:
+        - labram
+        - finetune
+        - challenge2
+        - externalizing
+        - full
+      notes: "LaBraM finetuning on Challenge 2 (externalizing prediction)"
+      save_dir: outputs/labram/finetune_c2_full
+      mode: offline
+
+  # Callbacks
+  callbacks:
+    - class_path: cerebro.callbacks.CheckpointCompatibilityCallback
+
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/labram/finetune_c2_full/checkpoints
+        filename: challenge2-{epoch:02d}-{val_nrmse_epoch:.4f}
+        monitor: val/nrmse_epoch
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/nrmse_epoch
+        patience: 20
+        mode: min
+        verbose: true
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 2
+
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+
+# Data configuration
+data:
+  data_dir: ${oc.env:HBN_ROOT,data}
+
+  # Full HBN dataset
+  releases:
+    - R1
+    - R2
+    - R3
+    - R4
+    - R6
+    - R7
+    - R8
+    - R9
+    - R10
+    - R11
+
+  data_req: challenge2
+
+  # Multi-task data loading
+  active_task: contrastChangeDetection
+  # Can add more tasks:
+  # - surroundSupp
+  # - seqLearning8target
+  # - symbolSearch
+
+  # DataLoader parameters
+  batch_size: 512
+  num_workers: 16
+
+  # Windowing (Challenge 2: fixed-length)
+  window_size_s: 2.0  # 4s windows (longer for trait prediction)
+  window_stride_s: 2.0  # 2s stride
+  sfreq: 100
+
+  # Splits
+  val_frac: 0.1
+  test_frac: 0.1
+  seed: 2025
+
+  # Excluded subjects (known issues)
+  excluded_subjects:
+    - NDARWV769JM7
+    - NDARME789TD2
+    - NDARUA442ZVF
+    - NDARJP304NK1
+    - NDARTY128YLU
+    - NDARDW550GU6
+    - NDARLD243KRE
+    - NDARUJ292JXV
+    - NDARBA381JGH

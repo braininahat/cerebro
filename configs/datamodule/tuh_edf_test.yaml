@@ -1,0 +1,41 @@
+# Test config for TUH EDF DataModule with incremental Zarr processing
+# Use this to test memory-efficient preprocessing with checkpoint resume capability
+
+class_path: cerebro.data.tuh_edf.TUHEDFDataModule
+
+init_args:
+  # Data paths
+  tuh_dir: /projects/academic/wenyaoxu/anarghya/research/eeg-data/tuh/tueg/v2.0.1
+  cache_dir: null  # Uses CACHE_PATH/tuh from .env
+
+  # Filtering
+  montages: ['01_tcp_ar']  # Standard montage only
+  # Note: Channels are automatically standardized to 21 common 10-20 EEG channels
+  max_recordings: 500  # Test with small subset first (remove for full dataset)
+  min_recording_duration_s: 4.0
+
+  # Preprocessing (matching HBN)
+  window_size_s: 4.0    # 4-second windows
+  window_stride_s: 2.0  # 2-second stride (50% overlap)
+  crop_size_s: 2.0      # Final 2-second crops from 4s windows
+  sfreq: 100.0          # Resample to 100Hz
+  apply_bandpass: true  # 0.5-49 Hz bandpass filter
+  l_freq: 0.5
+  h_freq: 49.0          # Must be < Nyquist (sfreq/2 = 50 Hz)
+
+  # Caching (Zarr with Blosc compression)
+  # - Processes one recording at a time (low memory footprint)
+  # - Checkpoint manifest allows resume after interruptions
+  # - Compression: zstd level 5 (~1.2x ratio, faster than uncompressed I/O)
+  use_cache: true
+  filelist_cache: data/tuh/filelist.txt  # Cache file list (~100-300x faster than scanning)
+
+  # DataLoader settings
+  batch_size: 256
+  num_workers: 8
+
+  # Train/val/test splits (subject-level)
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  seed: 42

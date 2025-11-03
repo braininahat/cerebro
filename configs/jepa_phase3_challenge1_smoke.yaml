@@ -1,0 +1,120 @@
+# SignalJEPA Phase 3: Challenge 1 Supervised Finetuning - Smoke Test
+#
+# This is Phase 3 of the 3-phase training pipeline (Path 3):
+# Phase 1: JEPA Pretrain → Phase 2: Contrastive → Phase 3: Supervised (THIS)
+#
+# Loads contrastive-enhanced encoder from Phase 2, adds regression head,
+# trains on Challenge 1 (response time prediction).
+#
+# Usage: WANDB_MODE=offline uv run cerebro fit --config configs/jepa_phase3_challenge1_smoke.yaml
+
+seed_everything: 42
+run_lr_finder: false
+run_batch_size_finder: false
+
+# Trainer configuration
+trainer:
+  max_steps: 20               # Smoke test: just 20 steps (~2 min)
+  accelerator: auto
+  devices: 1
+  precision: "bf16-mixed"
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 5
+  val_check_interval: 10
+
+  # Logging
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: jepa_phase3_c1_smoke
+      tags: [signaljepa, phase3, challenge1, path3, smoke, test]
+      save_dir: outputs/jepa/phase3_c1_smoke
+      mode: offline
+
+  # Callbacks
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/jepa/phase3_c1_smoke/checkpoints
+        filename: challenge1-{epoch:02d}-{val_nrmse:.4f}
+        monitor: val_nrmse
+        mode: min
+        save_top_k: 1
+        save_last: true
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+# Model configuration
+model:
+  class_path: cerebro.trainers.supervised.SupervisedTrainer
+  init_args:
+    # Model: SignalJEPA encoder + regression head
+    model:
+      class_path: cerebro.models.architectures.RegressorModel
+      init_args:
+        encoder_class: SignalJEPA
+        n_outputs: 1                      # Single regression output (response time)
+        dropout: 0.0
+        input_scale: 1000.0               # Millivolt scaling
+        encoder_kwargs:
+          n_chans: 129
+          n_times: 200                    # 2.0s at 100 Hz
+          sfreq: 100
+          n_spat_filters: 4
+          feature_encoder__conv_layers_spec:
+            - [8, 32, 8]
+            - [16, 2, 2]
+            - [32, 2, 2]
+            - [64, 2, 2]
+            - [64, 2, 2]
+          feature_encoder__mode: default
+          feature_encoder__conv_bias: false
+          drop_prob: 0.0
+          pos_encoder__spat_dim: 30
+          pos_encoder__time_dim: 66
+          pos_encoder__sfreq_features: 1.0
+          pos_encoder__spat_kwargs: null
+          transformer__d_model: 64
+          transformer__num_encoder_layers: 8
+          transformer__num_decoder_layers: 4
+          transformer__nhead: 8
+
+    # Load Phase 2 contrastive checkpoint
+    pretrained_checkpoint: outputs/jepa/phase2_contrastive_smoke/checkpoints/last.ckpt
+
+    # Supervised training hyperparameters
+    loss_fn: mse
+    lr: 0.001                             # Higher LR for supervised finetuning
+    weight_decay: 0.00001
+    epochs: 20                            # Total epochs (smoke test uses max_steps)
+    warmup_epochs: 0
+
+# Data configuration: Challenge 1
+data:
+  class_path: cerebro.data.challenge1.Challenge1DataModule
+  init_args:
+    data_dir: ${oc.env:HBN_ROOT,data}
+    releases: [R1]                        # Smoke test: only R1
+
+    # DataLoader settings
+    batch_size: 256
+    num_workers: 4
+
+    # Window parameters
+    window_len: 2.0                       # 2.0s windows
+    shift_after_stim: 0.5                 # 0.5s after stimulus
+    sfreq: 100
+    epoch_len_s: 2.0
+    anchor: stimulus_anchor
+
+    # Splits
+    val_frac: 0.1
+    test_frac: 0.1
+    seed: 2025
+
+    # Excluded subjects (none for smoke test)
+    excluded_subjects: []

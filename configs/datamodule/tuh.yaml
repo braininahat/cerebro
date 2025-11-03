@@ -1,0 +1,24 @@
+data:
+  class_path: cerebro.data.tuh.TUHDataModule
+  init_args:
+    # HDF5 file path (virtual or sharded)
+    hdf5_path: ${oc.env:TUH_HDF5_PATH,data/tuh/tuh_eeg_virtual.h5}
+
+    # Target variable (set to null if unsupervised pretraining)
+    target_name: null  # Options: 'age', 'gender', or null for unsupervised
+
+    # DataLoader parameters
+    batch_size: 512
+    num_workers: 16  # Adjust based on CPU cores
+
+    # Train/val/test splits (subject-level to prevent data leakage)
+    train_ratio: 0.8
+    val_ratio: 0.1
+    test_ratio: 0.1
+    seed: 42
+
+    # Optional filters (null = no filtering)
+    recording_ids: null  # Specific recording IDs to load
+    subjects: null       # Filter by subject IDs
+    sessions: null       # Filter by session numbers
+    montages: null       # Filter by montage type (e.g., ['01_tcp_ar'])

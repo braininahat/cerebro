@@ -1,0 +1,77 @@
+# Test config for ported architecture (Phase 7)
+#
+# Tests:
+# - SupervisedTrainer (new trainer)
+# - RegressorModel (new architecture)
+# - EEGNeXEncoder (via builder)
+# - HBNDataModule (existing, backward compat)
+#
+# Usage: WANDB_MODE=offline uv run cerebro fit --config configs/test_ported_architecture.yaml
+
+seed_everything: 42
+
+run_lr_finder: false
+run_batch_size_finder: false
+
+trainer:
+  max_epochs: 1
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  deterministic: true
+  fast_dev_run: 5  # Only 5 batches for quick test
+
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: test_ported_architecture
+      tags: [test, debug]
+      offline: true
+      save_dir: outputs/test
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.RichModelSummary
+      init_args:
+        max_depth: 2
+
+# NEW ARCHITECTURE: SupervisedTrainer + RegressorModel
+model:
+  class_path: cerebro.trainers.supervised.SupervisedTrainer
+  init_args:
+    model:
+      class_path: cerebro.models.architectures.RegressorModel
+      init_args:
+        encoder_class: EEGNeX
+        n_outputs: 1
+        dropout: 0.0
+        input_scale: 1000.0
+        encoder_kwargs:
+          n_chans: 129
+          n_times: 200
+          sfreq: 100
+
+    loss_fn: mse
+    lr: 0.001
+    weight_decay: 0.00001
+    epochs: 1
+    warmup_epochs: 0
+
+# EXISTING DATA MODULE (backward compat test)
+data:
+  class_path: cerebro.data.hbn.HBNDataModule
+  init_args:
+    data_dir: ${oc.env:HBN_ROOT,data}
+    data_req: challenge1
+    releases: [R1]
+    batch_size: 64
+    num_workers: 2
+    use_mini: true
+    sfreq: 100
+    window_len: 2.0
+    shift_after_stim: 0.5
+    val_frac: 0.1
+    test_frac: 0.1
+    seed: 2025

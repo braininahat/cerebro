@@ -1,0 +1,135 @@
+# S-JEPA pretraining config with 60% spatial block masking and 16s windows
+#
+# PAPER'S BEST CONFIGURATION: "16s-60% × full-pre-local"
+# This config implements the 16s window pretraining that achieves top results.
+#
+# Key differences from 2s config:
+# - window_length: 16.0 seconds (paper's best)
+# - n_times: 1600 (16s @ 100Hz)
+# - Larger batch size needed due to longer windows
+# - More memory intensive but better representations
+
+seed_everything: 42
+run_lr_finder: true
+run_batch_size_finder: false
+
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  max_epochs: 100
+  log_every_n_steps: 50  # Log less frequently for full dataset
+
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: sjepa_pretrain_16s_60pct
+      tags:
+        - sjepa
+        - pretrain
+        - full_dataset
+        - spatial_mask_60pct
+        - 16s_windows
+        - paper_best
+      save_dir: outputs/sjepa/pretrain_16s_60pct/${now:%Y%m%d_%H%M%S}
+      mode: offline
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/sjepa/pretrain_16s_60pct/${now:%Y%m%d_%H%M%S}/checkpoints
+        filename: sjepa-{epoch:02d}-{val/loss:.4f}
+        monitor: val/loss
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    - class_path: cerebro.callbacks.LatestCheckpointSymlinkCallback
+
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 15  # More patience for full dataset
+        mode: min
+        verbose: true
+
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+model:
+  class_path: cerebro.trainers.sjepa_pretrain.SJEPATrainer
+  init_args:
+    encoder:
+      class_path: cerebro.models.components.encoders.VanillaSignalJEPAEncoder
+      init_args:
+        n_chans: 129
+        n_times: 1600  # 16s @ 100Hz (PAPER'S BEST)
+        sfreq: 100
+        drop_prob: 0.0
+        transformer__d_model: 64
+        transformer__num_encoder_layers: 8
+        transformer__nhead: 8
+
+    mask_diameter_pct: 60  # 60% of head size - largest mask tested in paper
+    ema_momentum: 0.996
+    predictor_depth: 4
+    predictor_heads: 8
+
+    lr: 0.0001
+    weight_decay: 0.05
+    warmup_epochs: 10
+    max_epochs: 100
+
+data:
+  class_path: cerebro.data.jepa_pretrain.JEPAPretrainDataModule
+  init_args:
+    data_dir: ${oc.env:HBN_ROOT,./data}
+
+    # Training releases (R5 excluded - competition validation set)
+    releases:
+      - R1
+      - R2
+      - R3
+      - R4
+      # R5 excluded (competition validation set)
+      - R6
+      - R7
+      - R8
+      - R9
+      - R10
+      - R11
+
+    # All 7 tasks for maximum pretraining coverage
+    all_tasks:
+      - contrastChangeDetection
+      - restingState
+      - despicableMe
+      - thePresent
+      - diaryOfAWimpyKid
+      - funwithFractals
+      - surroundSupp
+
+    window_length: 16.0  # 16 SECOND WINDOWS (PAPER'S BEST)
+    stride: 8.0  # 50% overlap for 16s windows
+    crop_length: null  # No random cropping during pretraining
+
+    val_split: 0.2  # 80/20 train/val split at subject level
+    test_release: "R5"  # Competition validation set
+
+    n_chans_select: 129
+    sfreq: 100
+    mini: false  # FULL DATASET
+
+    # Adjusted for longer windows
+    batch_size: 64  # Smaller batch due to 16s windows (8x more memory than 2s)
+    num_workers: 16
+    prefetch_factor: 2
+    persistent_workers: true  # Keep workers alive between epochs

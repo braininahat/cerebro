@@ -1,0 +1,135 @@
+# SignalJEPA Multi-Dataset Pretraining: HBN + TUH
+#
+# This config trains SignalJEPA jointly on HBN (129 channels) and TUH (21 channels)
+# by projecting TUH into HBN's channel space with pre-masking for unmapped channels.
+#
+# Key features:
+# - TUH resampled 250/256Hz → 100Hz (anti-aliasing handled by UniversalCacheManager)
+# - TUH channels (21) → HBN space (129) via docs/tuh_to_hbn.json mapping
+# - Unmapped HBN positions (108) filled with zeros and always masked
+# - Radius-based spatial masking applied on top of pre-masking
+#
+# All JEPAPretrainDataModule parameters are now documented below with correct names.
+
+seed_everything: 2025
+
+# Trainer configuration
+trainer:
+  accelerator: gpu
+  devices: 1
+  max_epochs: 200
+  precision: 16-mixed
+  gradient_clip_val: 1.0
+  log_every_n_steps: 50
+  check_val_every_n_epoch: 5
+  enable_checkpointing: true
+  enable_model_summary: true
+  deterministic: false  # For speed
+
+# Data configuration
+data:
+  class_path: cerebro.data.jepa_pretrain.JEPAPretrainDataModule
+  init_args:
+    # Basic data paths
+    data_dir: "data"
+
+    # DataLoader settings
+    batch_size: 256
+    num_workers: 8
+    prefetch_factor: 2  # Batches each worker prefetches (increase to 4-8 for better GPU utilization)
+    persistent_workers: false  # Keep workers alive between epochs (faster but more memory)
+
+    # Windowing settings
+    window_length: 2.0  # Window length in seconds (2s for S-JEPA)
+    stride: 1.0  # Stride between windows in seconds (smaller = more windows, slower training)
+    crop_length: null  # Optional: Enable temporal augmentation with random crops (e.g., 1.5)
+
+    # Data splits
+    val_split: 0.1  # Validation split fraction (subject-level to prevent leakage)
+    test_release: "R5"  # Competition validation set
+    seed: 2025  # Random seed for reproducible subject-level splits
+
+    # EEG preprocessing
+    sfreq: 100  # Target sampling rate for all datasets (TUH resampled 250/256Hz → 100Hz)
+    n_chans_select: 129  # Number of channels (HBN standard, TUH projected to this space)
+
+    # Task selection
+    mini: false  # Fast prototyping mode (uses mini datasets)
+    all_tasks: null  # Tasks to include (null = all 7 HBN tasks: CCD, movies, resting, etc.)
+
+    # Multi-dataset support
+    channel_projection: true  # Enable TUH → HBN channel projection
+    datasets:
+      # HBN dataset (129 channels, native 100Hz after preprocessing)
+      - name: "hbn"
+        releases: ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
+        tasks: ["restingState", "DespicableMe", "contrastChangeDetection", "thePresent", "diaryOfAWimpyKid", "funwithFractals", "surroundSupp"]
+        mini: false
+
+      # TUH dataset (21 channels, will be resampled 250/256Hz → 100Hz)
+      - name: "tuh"
+        releases: ["tuh_eeg"]
+        tasks: ["all"]  # or ["01_tcp_ar", "02_tcp_le"] for specific types
+        tuh_path: "/data/TUH/tuh_eeg"  # Update this path
+
+# Model configuration
+model:
+  class_path: cerebro.trainers.sjepa_pretrain.SJEPATrainer
+  init_args:
+    # Encoder configuration (VanillaSignalJEPAEncoder)
+    encoder:
+      class_path: cerebro.models.components.encoders.VanillaSignalJEPAEncoder
+      init_args:
+        n_chans: 129            # HBN channel count (TUH projected to this space)
+        n_times: 200            # 2s @ 100Hz
+        sfreq: 100              # Sampling rate
+        drop_prob: 0.0          # Dropout (0 = no dropout for pretraining)
+        transformer__d_model: 64            # Transformer hidden dimension
+        transformer__num_encoder_layers: 8  # Contextual encoder depth
+        transformer__nhead: 8               # Attention heads
+
+    # Masking strategy
+    mask_diameter_pct: 60  # 60% of head diameter for spatial block masking
+
+    # EMA target encoder
+    ema_momentum: 0.996  # EMA decay rate for target encoder updates
+
+    # Predictor architecture
+    predictor_depth: 4   # Transformer decoder layers
+    predictor_heads: 8   # Attention heads in predictor
+
+    # Optimization
+    lr: 0.0001           # Learning rate (AdamW)
+    weight_decay: 0.05   # AdamW weight decay
+    warmup_epochs: 10    # Cosine schedule warmup epochs
+    max_epochs: 200      # Total epochs for cosine schedule
+
+# Checkpointing
+callbacks:
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: "checkpoints/sjepa_hbn_tuh"
+      filename: "sjepa-{epoch:03d}-{val/loss:.4f}"
+      monitor: "val/loss"
+      mode: "min"
+      save_top_k: 3
+      save_last: true
+
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: "step"
+
+  - class_path: lightning.pytorch.callbacks.EarlyStopping
+    init_args:
+      monitor: "val/loss"
+      patience: 20
+      mode: "min"
+
+# Logging
+logger:
+  class_path: lightning.pytorch.loggers.WandbLogger
+  init_args:
+    project: "cerebro-sjepa"
+    name: "sjepa_hbn_tuh_60pct"
+    save_dir: "logs"
+    log_model: false

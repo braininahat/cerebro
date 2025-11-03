@@ -1,0 +1,146 @@
+# S-JEPA fine-tuning with PostLocal architecture (full fine-tuning) - Challenge 2
+#
+# PostLocal architecture:
+#   Local encoder → 3D Conv spatial filter → FC → output
+#
+# Challenge 2: P_factor prediction from multi-task EEG
+#
+# Usage:
+#   # 1. First run pretraining
+#   uv run cerebro fit --config configs/sjepa/pretrain_full_80pct.yaml
+#
+#   # 2. Then fine-tune
+#   uv run cerebro fit --config configs/sjepa/finetune_challenge2_postlocal_full.yaml \
+#     --model.pretrained_checkpoint="outputs/sjepa/pretrain_full_80pct/latest/checkpoints/last.ckpt"
+
+seed_everything: 42
+run_lr_finder: false
+run_batch_size_finder: false
+
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  max_epochs: 100
+  log_every_n_steps: 5
+
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: sjepa_finetune_c2_postlocal_full
+      tags:
+        - sjepa
+        - finetune
+        - challenge2
+        - postlocal
+        - full_finetuning
+        - unfrozen_encoder
+      save_dir: outputs/sjepa/finetune_c2_postlocal_full/${now:%Y%m%d_%H%M%S}
+      mode: offline
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/sjepa/finetune_c2_postlocal_full/${now:%Y%m%d_%H%M%S}/checkpoints
+        filename: finetune-{epoch:02d}-{val/loss:.4f}
+        monitor: val/loss
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    - class_path: cerebro.callbacks.LatestCheckpointSymlinkCallback
+
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 50
+        mode: min
+        verbose: true
+
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+model:
+  class_path: cerebro.trainers.sjepa_finetune_postlocal.PostLocalFinetuneTrainer
+  init_args:
+    # Uses latest checkpoint from corresponding pretraining run.
+    # Override via CLI if needed:
+    # --model.pretrained_checkpoint="path/to/specific/checkpoint.ckpt"
+    pretrained_checkpoint: outputs/sjepa/pretrain_full_80pct/latest/checkpoints/last.ckpt
+
+    # Architecture params
+    n_outputs: 1
+    n_spat_filters: 4
+
+    # Freezing strategy
+    freeze_encoder: false
+    warmup_epochs: 10
+
+    # Optimizer params
+    lr: 0.001
+    encoder_lr_multiplier: 0.1
+
+    # LR finder at warmup transition (data-driven optimization)
+    warmup_reruns_lr_finder: false  # Set to true to auto-tune LR when encoder unfreezes
+    lr_finder_min: 1.0e-8
+    lr_finder_max: 1.0e-2
+    lr_finder_num_training: 100
+
+    weight_decay: 0.0001
+    scheduler_patience: 10
+    scheduler_factor: 0.5
+
+    # Loss function
+    loss_fn: mse
+
+data:
+  class_path: cerebro.data.jepa_pretrain.JEPAPretrainDataModule
+  init_args:
+    data_dir: ${oc.env:HBN_ROOT,./data}
+
+    # Training releases (all except R5)
+    releases:
+      - R1
+      - R2
+      - R3
+      - R4
+      # R5 excluded (competition validation set)
+      - R6
+      - R7
+      - R8
+      - R9
+      - R10
+      - R11
+
+    # Challenge 2: All tasks
+    all_tasks:
+      - contrastChangeDetection
+      - restingState
+      - DespicableMe
+      - ThePresent
+      - DiaryOfAWimpyKid
+      - FunwithFractals
+      - surroundSupp
+
+    # Challenge 2: Subject-level target field (p_factor prediction)
+    subject_target_field: p_factor
+
+    # Window parameters (matches pretraining for cache reuse)
+    window_length: 2.0
+    stride: 1.0
+
+    # Data splits and loading (MATCHES PRETRAINING)
+    batch_size: 64
+    num_workers: 4
+    val_split: 0.2  # 80:20 train:val split (matches pretrain)
+    test_release: "R5"  # Competition validation set
+    seed: 42  # Same seed as pretrain for split reproducibility
+    mini: false  # Full dataset

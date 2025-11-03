@@ -1,0 +1,122 @@
+# JEPA Phase 1 Self-Supervised Pretraining Configuration
+# From magnum_opus.md Phase 1: SSL on all data (2 weeks / 50 epochs)
+#
+# Usage:
+#   uv run cerebro fit --config configs/jepa_phase1_pretrain.yaml
+
+seed_everything: 42
+
+# Tuning flags (run before training starts)
+run_lr_finder: true
+run_batch_size_finder: false
+
+# LR finder parameters
+lr_finder_min: 1.0e-06
+lr_finder_max: 1.0e-03
+lr_finder_num_training: 50
+
+# Batch size finder parameters
+bs_finder_mode: power
+bs_finder_init_val: 32
+bs_finder_max_trials: 6
+bs_finder_steps_per_trial: 3
+
+trainer:
+  max_epochs: 50
+  accelerator: auto
+  devices: 1
+  precision: "32-true"  # FNO uses complex numbers, not compatible with AMP
+  gradient_clip_val: 1.0
+  val_check_interval: 1.0
+
+  # Logging
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: ${oc.env:WANDB_PROJECT,eeg2025}
+      name: jepa_phase1_pretrain
+      save_dir: outputs/wandb
+      log_model: false
+
+  # Callbacks
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/jepa_phase1/checkpoints
+        filename: "epoch{epoch:02d}-loss{val_loss:.4f}"
+        monitor: val_loss
+        mode: min
+        save_top_k: 3
+        save_last: true
+
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_loss
+        patience: 10
+        mode: min
+        verbose: true
+
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+# Model: JEPAPhase1Trainer wrapping JEPAFoundationModel
+model:
+  class_path: cerebro.trainers.jepa.JEPAPhase1Trainer
+  init_args:
+    model:
+      class_path: cerebro.models.architectures.JEPAFoundationModel
+      init_args:
+        n_chans: 129  # HBN dataset: 129 channels including Cz reference (per startkit)
+        n_times: 200  # 2s at 100 Hz (trainer receives 4s, splits to 2s×2s before encoding)
+        latent_dim: 96  # 24 (trait) + 36 (state) + 36 (event)
+        sample_rate: 100
+        fno_modes: 50  # 50 Hz covers all EEG bands (delta/theta/alpha/beta/gamma)
+        mamba_d_state: 16
+        mamba_layers: 4
+
+    # Training hyperparameters (from magnum_opus.md Phase 1)
+    lr: 1.0e-5
+    weight_decay: 1.0e-4
+    warmup_epochs: 0  # Scheduler reads trainer.max_epochs directly
+
+    # Loss weights (from magnum_opus.md)
+    loss_weights:
+      state: 1.0
+      event: 0.5
+      trait: 0.1
+      stability: 0.5
+      mask: 0.5
+
+    # Masking config
+    mask_prob: 0.25
+    mask_every_n_batches: 5
+
+# Data: All tasks from all releases (except R5)
+data:
+  class_path: cerebro.data.jepa_pretrain.JEPAPretrainDataModule
+  init_args:
+    data_dir: ${oc.env:HBN_ROOT,./data}
+    releases: ["R1", "R2", "R3", "R4", "R6", "R7", "R8", "R9", "R10", "R11"]
+    batch_size: 1024
+    num_workers: 8
+    window_length: 8.0  # 8s windows (double from 4s to ensure encoder sees 2s after split)
+    stride: 4.0  # 4s stride (double from 2s for consistency)
+    crop_length: 4.0  # Random crop to 4s (400 samples), splits to 2s×2s for temporal prediction
+    val_split: 0.1
+    test_release: null  # Specify release for test (e.g., "R5") or null for no test split
+    n_chans_select: 129  # All 129 channels including Cz reference
+    sfreq: 100
+    mini: false
+    all_tasks:
+      - contrastChangeDetection
+      - restingState
+      - DespicableMe
+      - ThePresent
+      - DiaryOfAWimpyKid
+      - FunwithFractals
+      - surroundSupp

@@ -1,0 +1,6 @@
+[submodule "startkit"]
+	path = startkit
+	url = https://github.com/eeg2025/startkit.git
+[submodule "LaBraM"]
+	path = LaBraM
+	url = https://github.com/935963004/LaBraM.git

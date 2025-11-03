@@ -1,0 +1,108 @@
+# SignalJEPA Phase 2: Movie Contrastive Learning - Smoke Test
+#
+# This is Phase 2 of the 3-phase training pipeline:
+# Phase 1: JEPA Pretrain → Phase 2: Contrastive (THIS) → Phase 3: Supervised
+#
+# Loads pretrained JEPA encoder from Phase 1, adds projection head,
+# trains with InfoNCE loss on movie ISC pairs.
+#
+# Usage: WANDB_MODE=offline uv run cerebro fit --config configs/jepa_phase2_contrastive_smoke.yaml
+
+seed_everything: 42
+
+# Trainer configuration
+trainer:
+  max_steps: 20               # Smoke test: just 20 steps (~2 min)
+  accelerator: auto
+  devices: 1
+  precision: "bf16-mixed"     # Fast training with mixed precision
+  gradient_clip_val: 1.0
+  deterministic: true
+  log_every_n_steps: 5
+  val_check_interval: 10
+
+  # Logging
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eeg2025
+      entity: ubcse-eeg2025
+      name: jepa_phase2_contrastive_smoke
+      tags: [jepa, phase2, contrastive, movie, isc, smoke, test]
+      save_dir: outputs/jepa/phase2_contrastive_smoke
+      mode: offline
+
+  # Callbacks
+  callbacks:
+    - class_path: cerebro.callbacks.CheckpointCompatibilityCallback
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: outputs/jepa/phase2_contrastive_smoke/checkpoints
+        filename: contrastive-{epoch:02d}-{val_loss:.4f}
+        monitor: val_loss
+        mode: min
+        save_top_k: 1
+        save_last: true
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        leave: true
+
+# Model configuration: ContrastiveTrainer + ContrastiveModel
+model:
+  class_path: cerebro.trainers.contrastive.ContrastiveTrainer
+  init_args:
+    # Model: SignalJEPA encoder + projection head
+    model:
+      class_path: cerebro.models.architectures.ContrastiveModel
+      init_args:
+        encoder_class: SignalJEPA        # Use SignalJEPA encoder
+        projection_dim: 128               # Standard contrastive projection dim
+        hidden_dim: 256                   # MLP hidden size
+        dropout: 0.1                      # Dropout in projection head
+        input_scale: 1000.0               # Millivolt scaling
+        encoder_kwargs:
+          n_chans: 129
+          n_times: 200                    # 2.0s at 100 Hz
+          sfreq: 100
+
+    # Load Phase 1 checkpoint
+    pretrained_checkpoint: outputs/jepa/pretrain_smoke/checkpoints/last.ckpt
+
+    # Contrastive training hyperparameters
+    pairing_strategy: all_pairs           # SimCLR-style (use all batch as negatives)
+    temperature: 0.07                     # Standard InfoNCE temperature
+    lr: 0.0001                            # Lower LR for finetuning
+    weight_decay: 0.0001                  # L2 regularization
+    epochs: 20                            # Total epochs (smoke test uses max_steps)
+    warmup_epochs: 2                      # Warmup for 2 epochs
+
+# Data configuration: Movie ISC pairs
+data:
+  class_path: cerebro.data.movies.MovieDataModule
+  init_args:
+    data_dir: ${oc.env:HBN_ROOT,data}
+    releases: [R1]                        # Smoke test: only R1
+
+    # Movies for contrastive learning
+    movie_names:
+      - DespicableMe
+      - ThePresent
+
+    # Windowing parameters
+    window_len_s: 2.0                     # 2.0s windows (200 samples at 100 Hz)
+    stride_s: 2.0                         # No overlap for faster loading
+    time_bin_size_s: 1.0                  # Time bin for positive pairs
+
+    # Contrastive pair strategies
+    pos_strategy: same_movie_time         # Positive: same movie+time, different subject
+    neg_strategy: diff_movie_mixed        # Negative: different movie, any subject
+    return_triplets: false                # Return (anchor, pos) pairs (all_pairs strategy)
+
+    # DataLoader settings
+    batch_size: 64                        # Larger batch for all_pairs strategy
+    num_workers: 4
+    val_frac: 0.0                         # No validation for smoke test (faster)
+    test_release: null                    # Specify release for test (e.g., "R5") or null for no test split
+    seed: 2025
+    use_mini: true                        # Mini: 20 subjects per release
+    cache_dir: null  # Uses CACHE_PATH/movies from .env
