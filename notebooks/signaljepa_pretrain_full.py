@@ -102,7 +102,7 @@ class Config:
     temporal_mask_span_ms = 200  # Mask spans of 200ms (20 samples @ 100Hz)
 
     # Feature toggles
-    use_mae = False  # Enable/disable MAE reconstruction (spatial+temporal masking)
+    use_mae = True  # Enable/disable MAE reconstruction (spatial+temporal masking)
     use_contrastive = False  # Enable/disable contrastive learning (ISC movie pairing)
     use_auxiliary = True    # Enable/disable all auxiliary demographic heads
 
@@ -135,18 +135,18 @@ class Config:
     # Contrastive learning (ISC-based pairing)
     temperature = 0.07  # Temperature for InfoNCE
     contrastive_batch_size = 128  # Larger for contrastive
-    use_triplet_negatives = False  # Use explicit hard negatives from ISC triplets (toggleable)
+    use_triplet_negatives = True  # Use explicit hard negatives from ISC triplets (toggleable)
     time_bin_size_s = 1.0  # Time bin size for ISC pairing (1s = good balance)
     pos_strategy = "same_movie_time"  # ISC positive pairs: same (movie, time_bin)
     neg_strategy = "diff_movie_mixed"  # Hard negatives: different movies
     val_frac = 0.1  # Fraction of subjects for validation (subject-level split)
 
     # Training
-    batch_size = 512  # MAE batch size
+    batch_size = 256  # MAE batch size
     learning_rate = 0.0003  # AdamW learning rate
     weight_decay = 0.05  # Higher for pretraining
-    n_epochs = 1  # Long pretraining
-    warmup_epochs = 10
+    n_epochs = 5  # Long pretraining
+    warmup_epochs = 1
     grad_clip = 1.0
     early_stopping_patience = 15  # Stop if no improvement for 15 epochs
 
@@ -154,13 +154,13 @@ class Config:
     use_muon = True  # Disabled for stability (NaN issues with high LR)
 
     # Muon hyperparameters (for 2D weight matrices)
-    muon_lr = 0.02              # 10-50x higher than AdamW (paper recommendation)
+    muon_lr = 0.01              # 10-50x higher than AdamW (paper recommendation)
     muon_momentum = 0.95        # Nesterov momentum
     muon_weight_decay = 0.01    # Moderate regularization
     muon_ns_steps = 5           # Newton-Schulz iterations (informational - uses default)
 
     # AdamW hyperparameters (for 1D params when using Muon)
-    adamw_aux_lr = 3e-4         # AdamW LR for biases/layer norms
+    adamw_aux_lr = 1e-3         # AdamW LR for biases/layer norms
     adamw_aux_betas = (0.9, 0.95)  # AdamW betas (informational - uses default)
     adamw_aux_weight_decay = 0.01  # Match Muon weight decay
 
@@ -203,8 +203,9 @@ class Config:
     experiment_name = f"signaljepa_pretrain_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     # Checkpoint loading (for progressive training: MAE → +Contrastive → +Aux)
-    pretrained_checkpoint_path: Optional[str] = "/home/varun/repos/cerebro/cache/signaljepa_pretrain/base_mae_1/best_pretrain.pt"  # Path to pretrained checkpoint
+    pretrained_checkpoint_path: Optional[str] = None  # Path to pretrained checkpoint
     # "/home/varun/repos/cerebro/cache/signaljepa_pretrain/base_mae_1/best_pretrain.pt"
+    # "/home/varun/repos/cerebro/cache/signaljepa_pretrain/best_mae_1_aux_1/best_pretrain.pt"
     load_encoder_only: bool = True  # Only load encoder weights (not optimizer/scheduler)
 
     # Output
@@ -1676,6 +1677,37 @@ else:
 print("\n🔄 Wrapping validation MAE dataset with subject metadata...")
 mae_val_windows_wrapped = BaseConcatDataset([DatasetWrapper(w) for w in mae_val_windows.datasets])
 print(f"   ✅ Wrapped {len(mae_val_windows_wrapped)} MAE windows")
+
+# Extract demographics from validation datasets (needed for validation auxiliary loss)
+print("\n🔍 Adding demographics from validation data...")
+val_datasets = list(mae_val_windows.datasets)
+if movie_val_windows is not None:
+    val_datasets.extend(list(movie_val_windows.datasets))
+
+val_subjects_added = 0
+for ds in val_datasets:
+    subject = ds.description.get('subject')
+    if subject and subject not in demographics:  # Don't overwrite training subjects
+        demo_dict = {
+            'age': ds.description.get('age'),
+            'sex': ds.description.get('sex'),
+            'p_factor': ds.description.get('p_factor'),
+            'attention': ds.description.get('attention'),
+            'internalizing': ds.description.get('internalizing'),
+            'ehq_total': ds.description.get('ehq_total'),
+        }
+
+        # Filter out NaN values and None
+        import math
+        demo_dict = {k: v for k, v in demo_dict.items()
+                     if v is not None and not (isinstance(v, float) and math.isnan(v))}
+
+        if demo_dict:  # Only add if we have at least some demographics
+            demographics[subject] = demo_dict
+            val_subjects_added += 1
+
+print(f"   ✅ Added demographics for {val_subjects_added} validation subjects")
+print(f"   📊 Total demographics: {len(demographics)} subjects (train + val)")
 
 # Create validation dataloaders
 mae_val_loader = DataLoader(
