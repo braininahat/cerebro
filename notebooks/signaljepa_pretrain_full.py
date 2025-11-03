@@ -34,6 +34,14 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torch import optim
 
+# Muon optimizer (optional, falls back to AdamW if not available)
+try:
+    from muon import SingleDeviceMuonWithAuxAdam  # For single-GPU training
+    MUON_AVAILABLE = True
+except ImportError:
+    MUON_AVAILABLE = False
+    print("⚠️  Muon optimizer not available. Install with: uv pip install git+https://github.com/KellerJordan/Muon")
+
 # SignalJEPA imports
 from braindecode.models import SignalJEPA
 from cerebro.utils.electrode_locations import load_hbn_chs_info
@@ -108,16 +116,30 @@ class Config:
 
     # Contrastive learning
     temperature = 0.07  # Temperature for InfoNCE
-    contrastive_batch_size = 256  # Larger for contrastive
+    contrastive_batch_size = 512  # Larger for contrastive
 
     # Training
-    batch_size = 32  # MAE batch size
+    batch_size = 64  # MAE batch size
     learning_rate = 0.0003  # AdamW learning rate
     weight_decay = 0.05  # Higher for pretraining
     n_epochs = 200  # Long pretraining
     warmup_epochs = 10
     grad_clip = 1.0
     early_stopping_patience = 15  # Stop if no improvement for 15 epochs
+
+    # Optimizer selection
+    use_muon = True  # Toggle Muon optimizer (1.35x faster convergence)
+
+    # Muon hyperparameters (for 2D weight matrices)
+    muon_lr = 0.02              # 10-50x higher than AdamW (paper recommendation)
+    muon_momentum = 0.95        # Nesterov momentum
+    muon_weight_decay = 0.01    # Moderate regularization
+    muon_ns_steps = 5           # Newton-Schulz iterations (informational - uses default)
+
+    # AdamW hyperparameters (for 1D params when using Muon)
+    adamw_aux_lr = 3e-4         # AdamW LR for biases/layer norms
+    adamw_aux_betas = (0.9, 0.95)  # AdamW betas (informational - uses default)
+    adamw_aux_weight_decay = 0.01  # Match Muon weight decay
 
     # Data loading
     num_workers = 32
@@ -1092,12 +1114,84 @@ total_params = sum(p.numel() for p in model.parameters())
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"📊 Model parameters: {total_params:,} (trainable: {trainable_params:,})")
 
+# %% Optimizer Factory Functions
+def create_muon_optimizer(model, cfg):
+    """Create hybrid Muon + AdamW optimizer for single-GPU training.
+
+    Muon optimizes 2D weight matrices (Linear/Conv layers) with orthogonalization.
+    AdamW optimizes 1D parameters (biases, layer norms, mask token).
+
+    Args:
+        model: SignalJEPAPretrainer model
+        cfg: Config object with Muon hyperparameters
+
+    Returns:
+        SingleDeviceMuonWithAuxAdam optimizer with hybrid parameter groups
+    """
+    # Separate 2D matrices from 1D parameters
+    muon_params = []
+    adamw_params = []
+
+    print("\n🔍 Parameter grouping for Muon optimizer:")
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        # Skip target encoder (EMA-updated, not optimized)
+        if 'target_encoder' in name:
+            continue
+
+        if param.ndim >= 2:
+            # 2D+ parameters → Muon (with orthogonalization)
+            muon_params.append(param)
+            print(f"  ✓ Muon: {name:60s} {str(param.shape):20s}")
+        else:
+            # 1D parameters → AdamW (standard adaptive LR)
+            adamw_params.append(param)
+            print(f"  ○ AdamW: {name:60s} {str(param.shape):20s}")
+
+    print(f"\n📊 Muon parameters: {len(muon_params)} groups")
+    print(f"📊 AdamW parameters: {len(adamw_params)} groups")
+
+    # Create parameter groups
+    # NOTE: SingleDeviceMuonWithAuxAdam requires different keys based on use_muon flag:
+    #   - Muon groups: params, lr, momentum, weight_decay, use_muon
+    #   - Adam groups: params, lr, betas, eps, weight_decay, use_muon
+    param_groups = [
+        dict(
+            params=muon_params,
+            lr=cfg.muon_lr,
+            momentum=cfg.muon_momentum,
+            weight_decay=cfg.muon_weight_decay,
+            use_muon=True
+            # ns_steps removed - Muon uses default value of 5 (optimal from paper)
+        ),
+        dict(
+            params=adamw_params,
+            lr=cfg.adamw_aux_lr,
+            betas=cfg.adamw_aux_betas,  # AdamW uses betas for momentum
+            eps=1e-10,  # Numerical stability for Adam optimizer
+            weight_decay=cfg.adamw_aux_weight_decay,
+            use_muon=False
+        )
+    ]
+
+    return SingleDeviceMuonWithAuxAdam(param_groups)
+
+# %% Create Optimizer
 # Optimizer and scheduler
-optimizer = optim.AdamW(
-    [p for p in model.parameters() if p.requires_grad],
-    lr=cfg.learning_rate,
-    weight_decay=cfg.weight_decay
-)
+if cfg.use_muon and MUON_AVAILABLE:
+    print("🚀 Using Muon optimizer for 2D weight matrices")
+    optimizer = create_muon_optimizer(model, cfg)
+else:
+    if cfg.use_muon and not MUON_AVAILABLE:
+        print("⚠️  Muon requested but not available. Falling back to AdamW.")
+    print("📊 Using standard AdamW optimizer")
+    optimizer = optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=cfg.learning_rate,
+        weight_decay=cfg.weight_decay
+    )
 
 scheduler = optim.lr_scheduler.CosineAnnealingLR(
     optimizer,
@@ -1107,11 +1201,18 @@ scheduler = optim.lr_scheduler.CosineAnnealingLR(
 
 # Initialize wandb
 if cfg.use_wandb:
+    # Add Muon tag if using Muon optimizer
+    tags = ["signaljepa", "pretraining", "mae", "contrastive", "auxiliary"]
+    if cfg.use_muon and MUON_AVAILABLE:
+        tags.append("muon")
+    else:
+        tags.append("adamw")
+
     wandb.init(
         project="cerebro-signaljepa-pretrain",
         name=cfg.experiment_name,
         config=vars(cfg),
-        tags=["signaljepa", "pretraining", "mae", "contrastive", "auxiliary"]
+        tags=tags
     )
 
 # %% Auxiliary Loss Function
