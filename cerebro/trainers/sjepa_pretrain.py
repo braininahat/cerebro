@@ -90,19 +90,39 @@ class SpatialBlockMasker:
         mask = self.distances[center_ch_idx] <= self.radius_threshold
         return torch.from_numpy(mask).float()
 
-    def get_batch_masks(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        """Generate independent masks for each sample in batch.
+    def get_batch_masks(
+        self,
+        batch_size: int,
+        device: torch.device,
+        unmapped_masks: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Generate independent masks for each sample in batch with optional pre-masking.
+
+        For multi-dataset training (e.g., HBN + TUH), unmapped channels from smaller
+        datasets are pre-masked before applying radius-based spatial masking.
 
         Args:
             batch_size: Number of masks to generate
             device: Device to place masks on
+            unmapped_masks: Optional (batch_size, n_chans) boolean tensor where True = always mask
+                          Used for TUH samples to mask unmapped HBN channels
 
         Returns:
             Batch of masks (batch_size, n_chans) where 1 = masked, 0 = visible
         """
         masks = []
-        for _ in range(batch_size):
-            masks.append(self.get_mask())
+        for i in range(batch_size):
+            # Generate radius-based spatial mask
+            spatial_mask = self.get_mask()  # (n_chans,)
+
+            # Apply pre-masking if provided (for TUH or other smaller datasets)
+            if unmapped_masks is not None:
+                # Force unmapped channels to be masked (logical OR)
+                # This ensures TUH's missing channels are always masked
+                spatial_mask = spatial_mask | unmapped_masks[i].cpu()
+
+            masks.append(spatial_mask)
+
         return torch.stack(masks).to(device)  # (batch_size, n_chans)
 
 
@@ -299,41 +319,77 @@ class SJEPATrainer(L.LightningModule):
 
         return predicted, target_masked, mask
 
-    def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
+    def training_step(self, batch, batch_idx: int) -> torch.Tensor:
         """Training step with L1 loss on masked token predictions.
 
+        Supports multi-dataset training with optional unmapped channel masks.
+
         Args:
-            batch: EEG tensor (batch_size, n_chans, n_times)
+            batch: Either:
+                  - torch.Tensor (batch_size, n_chans, n_times) for single dataset
+                  - Tuple[torch.Tensor, torch.Tensor] for multi-dataset with projection
+                    (EEG tensor, unmapped_masks)
 
         Returns:
             L1 loss between predicted and target masked tokens
         """
-        x = batch  # RawEEGDataset returns just EEG tensors, no labels
+        # Unpack batch (multi-dataset returns tuple, single-dataset returns tensor)
+        if isinstance(batch, tuple) and len(batch) == 2:
+            x, unmapped_masks = batch  # Multi-dataset with projection
+        else:
+            x = batch  # Single dataset (HBN only)
+            unmapped_masks = None
+
+        # Generate masks (with pre-masking for TUH if needed)
+        mask = self.masker.get_batch_masks(
+            x.shape[0], x.device, unmapped_masks=unmapped_masks
+        )
 
         # Forward pass with masking
-        predicted, target, mask = self.forward(x)
+        predicted, target, mask = self.forward(x, mask=mask)
 
         # L1 loss (per paper, not MSE)
         loss = F.l1_loss(predicted, target, reduction='mean')
 
         # Logging
         self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log('train/mask_ratio', mask.mean(), on_step=False, on_epoch=True)
+        self.log('train/mask_ratio', mask.float().mean(), on_step=False, on_epoch=True)
 
         # Update target encoder via EMA
         self._update_target_encoder()
 
         return loss
 
-    def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
-        """Validation step."""
-        x = batch
+    def validation_step(self, batch, batch_idx: int) -> torch.Tensor:
+        """Validation step.
 
-        predicted, target, mask = self.forward(x)
+        Supports multi-dataset validation with optional unmapped channel masks.
+
+        Args:
+            batch: Either tensor or tuple (EEG tensor, unmapped_masks)
+
+        Returns:
+            L1 validation loss
+        """
+        # Unpack batch
+        if isinstance(batch, tuple) and len(batch) == 2:
+            x, unmapped_masks = batch
+        else:
+            x = batch
+            unmapped_masks = None
+
+        # Generate masks (with pre-masking if needed)
+        mask = self.masker.get_batch_masks(
+            x.shape[0], x.device, unmapped_masks=unmapped_masks
+        )
+
+        # Forward pass
+        predicted, target, mask = self.forward(x, mask=mask)
         loss = F.l1_loss(predicted, target, reduction='mean')
 
+        # Logging
         self.log('val/loss', loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val/mask_ratio', mask.mean(), on_step=False, on_epoch=True)
+        self.log('val/mask_ratio', mask.float().mean(), on_step=False, on_epoch=True)
 
         return loss
 

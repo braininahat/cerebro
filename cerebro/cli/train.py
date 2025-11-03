@@ -33,6 +33,8 @@ Usage:
 """
 
 import logging
+import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -212,6 +214,9 @@ class CerebroCLI(LightningCLI):
         # Setup Rich logging
         self._setup_logging()
 
+        # Copy config YAML to output directory
+        self._copy_config()
+
         # Log configuration
         self._log_config_to_wandb()
 
@@ -239,6 +244,9 @@ class CerebroCLI(LightningCLI):
 
         log_dir.mkdir(parents=True, exist_ok=True)
 
+        # Store for use by _copy_config()
+        self.output_dir = log_dir
+
         # Determine mini or full from config
         use_mini = self.datamodule.hparams.get("use_mini", False)
         log_file = log_dir / f"train_{'mini' if use_mini else 'full'}.log"
@@ -253,6 +261,28 @@ class CerebroCLI(LightningCLI):
         )
 
         logger.info(f"[bold green]Logging to:[/bold green] {log_file}")
+
+    def _copy_config(self):
+        """Copy input config YAML to output directory for reproducibility."""
+        # Find --config argument in sys.argv
+        config_path = None
+        for i, arg in enumerate(sys.argv):
+            if arg == "--config" and i + 1 < len(sys.argv):
+                config_path = Path(sys.argv[i + 1])
+                break
+
+        if config_path is None or not config_path.exists():
+            logger.warning("[yellow]No --config argument found, skipping config copy[/yellow]")
+            return
+
+        # Use output directory set by _setup_logging()
+        if not hasattr(self, 'output_dir'):
+            logger.warning("[yellow]No output_dir available, skipping config copy[/yellow]")
+            return
+
+        dest_path = self.output_dir / config_path.name
+        shutil.copy2(config_path, dest_path)
+        logger.info(f"[green]✓ Copied config to:[/green] {dest_path}")
 
     def _log_config_to_wandb(self):
         """Log comprehensive configuration to wandb.
@@ -453,7 +483,7 @@ def cli_main():
     OmegaConf.register_new_resolver("now", cached_now_resolver, replace=True)
 
     CerebroCLI(
-        save_config_callback=None,  # Wandb handles config saving
+        save_config_callback=None,  # We handle config copying manually
         # Use OmegaConf for interpolation
         parser_kwargs={"parser_mode": "omegaconf"},
     )

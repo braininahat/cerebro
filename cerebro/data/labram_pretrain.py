@@ -13,6 +13,7 @@ Where:
 
 import hashlib
 import logging
+import os
 import pickle
 from pathlib import Path
 from typing import List, Optional
@@ -100,9 +101,8 @@ class LaBraMPretrainDataModule(L.LightningDataModule):
         patch_size: Samples per patch (e.g., 100 for 1s @ 100Hz)
         sfreq: Sampling frequency in Hz
         use_mini: If True, use mini dataset for prototyping
-        cache_dir: Directory for caching preprocessed data
         val_frac: Fraction of data for validation
-        test_frac: Fraction of data for testing
+        test_release: Specific release for test (e.g., "R5")
         seed: Random seed for reproducibility
         excluded_subjects: List of subject IDs to exclude
         n_channels: Expected number of EEG channels
@@ -119,7 +119,6 @@ class LaBraMPretrainDataModule(L.LightningDataModule):
         patch_size: int = 100,
         sfreq: int = 100,
         use_mini: bool = False,
-        cache_dir: Optional[str] = None,
         test_release: Optional[str] = None,  # Specific release for test (e.g., "R5")
         val_frac: float = 0.1,
         seed: int = 2025,
@@ -144,21 +143,25 @@ class LaBraMPretrainDataModule(L.LightningDataModule):
         self.excluded_subjects = excluded_subjects or []
         self.n_channels = n_channels
 
-        # Cache directory
-        if cache_dir:
-            cache_root = Path(cache_dir)
-        else:
-            cache_root = self.data_dir / "cache"
+        # Cache directory - use CACHE_PATH (fail if not set)
+        cache_path = os.getenv("CACHE_PATH")
+        if not cache_path:
+            raise ValueError(
+                "CACHE_PATH environment variable not set. "
+                "Set it in your .env file or export it before running."
+            )
+        self.cache_root = Path(cache_path)
 
         # Initialize universal cache manager (two-level caching)
         self.cache_mgr = UniversalCacheManager(
-            cache_root=str(cache_root),
+            cache_root=str(self.cache_root),
             preprocessing_params={
                 "sfreq": self.sfreq,
                 "bandpass": None,  # No bandpass filtering for LaBraM
                 "n_channels": self.n_channels,
                 "standardize": False,
-            }
+            },
+            data_dir=str(self.data_dir)  # For EEGChallengeDataset downloads
         )
 
         # Window parameters

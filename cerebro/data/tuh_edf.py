@@ -1,17 +1,20 @@
 """
-TUH EEG Dataset with EDF backend and Zarr-based window caching.
+TUH EEG Dataset with EDF backend and memory-mapped numpy window caching.
 
 This module provides a Lightning DataModule for loading TUH EEG data
 directly from EDF files with preprocessing and window caching support.
 
 **KEY FEATURES**:
-- Zarr-based storage: Incremental checkpointing, no OOM on large datasets
-- Lazy loading: Only load windows needed for current batch
+- Memory-mapped numpy storage: Incremental checkpointing, no OOM on large datasets
+- Lazy loading: Only load windows needed for current batch via .npy memmap files
 - Adaptive parallelization: Uses max CPU cores safely with memory monitoring
 - Robust resuming: Parquet manifest tracks progress, resume from any point
 - Memory-efficient: Processes 1.7TB dataset on 427GB RAM without crashes
 
 Similar to HBNDataModule but optimized for massive TUH dataset (1.7TB).
+
+NOTE: Legacy Zarr-based LazyZarrWindowDataset class is deprecated.
+Current implementation uses MemmapWindowDataset from unified_cache.lazy_dataset.
 """
 
 import atexit
@@ -328,11 +331,17 @@ class CroppedWindowDataset(Dataset):
 
 
 # ============================================================================
-# LAZY ZARR-BASED DATASET (MEMORY-EFFICIENT)
+# LEGACY ZARR-BASED DATASET (DEPRECATED - USE MemmapWindowDataset)
 # ============================================================================
 
 class LazyZarrWindowDataset(Dataset):
-    """Lazy-loading dataset that reads windows from Zarr on-demand.
+    """[DEPRECATED] Lazy-loading dataset that reads windows from Zarr on-demand.
+
+    **DEPRECATION WARNING**: This class uses the legacy Zarr storage format.
+    New code should use `MemmapWindowDataset` from `cerebro.data.unified_cache.lazy_dataset`
+    which uses memory-mapped numpy (.npy) files instead.
+
+    This class is kept for backward compatibility with old cached data only.
 
     Only loads windows needed for current batch, dramatically reducing RAM usage.
     Compatible with PyTorch DataLoader (thread-safe reads).
@@ -362,6 +371,12 @@ class LazyZarrWindowDataset(Dataset):
         mode: str = "train",
         target_col: str = "target",
     ):
+        warnings.warn(
+            "LazyZarrWindowDataset is deprecated. Use MemmapWindowDataset from "
+            "cerebro.data.unified_cache.lazy_dataset instead (uses .npy memmap files).",
+            DeprecationWarning,
+            stacklevel=2
+        )
         self.zarr_array = zarr.open(str(zarr_path), mode='r')  # Read-only
         self.metadata = metadata.reset_index(drop=True)
         self.crop_len = crop_len
@@ -629,7 +644,7 @@ class TUHEDFDataModule(L.LightningDataModule):
         l_freq: Low frequency for bandpass (default: 0.5, matching HBN)
         h_freq: High frequency for bandpass (default: 50.0, matching HBN)
         min_recording_duration_s: Minimum recording duration (default: 4.0, matching HBN)
-        cache_dir: Directory for caching windows (default: tuh_dir/cache)
+        cache_dir: Directory for caching (deprecated, uses CACHE_PATH from env)
         use_cache: Use cached windows if available (default: True)
         filelist_cache: Path to cached file list txt file (optional, e.g., 'data/tuh/filelist.txt')
             If provided and exists, loads file paths from cache instead of scanning directory.
@@ -691,11 +706,14 @@ class TUHEDFDataModule(L.LightningDataModule):
         if not self.tuh_dir.exists():
             raise FileNotFoundError(f"TUH directory not found: {tuh_dir}")
 
-        # Setup cache directory
-        if cache_dir is None:
-            self.cache_dir = self.tuh_dir / "cache"
-        else:
-            self.cache_dir = Path(cache_dir)
+        # Use CACHE_PATH for caching (fail if not set)
+        cache_path = os.getenv("CACHE_PATH")
+        if not cache_path:
+            raise ValueError(
+                "CACHE_PATH environment variable not set. "
+                "Set it in your .env file or export it before running."
+            )
+        self.cache_dir = Path(cache_path) / "tuh"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Will be populated in setup()

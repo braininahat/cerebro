@@ -39,6 +39,6 @@ Usage:
 """
 
 from cerebro.data.unified_cache.cache_manager import UniversalCacheManager
-from cerebro.data.unified_cache.lazy_dataset import LazyZarrWindowDataset, MemmapWindowDataset
+from cerebro.data.unified_cache.lazy_dataset import MemmapWindowDataset
 
-__all__ = ["UniversalCacheManager", "LazyZarrWindowDataset", "MemmapWindowDataset"]
+__all__ = ["UniversalCacheManager", "MemmapWindowDataset"]

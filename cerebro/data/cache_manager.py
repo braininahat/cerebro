@@ -8,10 +8,15 @@ Key Design Principles:
 - Cache keys based on preprocessing params only (not data selection like releases/seed)
 - Manifest-based tracking for fault tolerance and status monitoring
 - Generic interface usable across all data modules (LaBraM, JEPA, Movies, etc.)
+- Expects cache_root under CACHE_PATH environment variable (set in .env)
 
 Example Usage:
+    import os
+    from pathlib import Path
+
+    cache_root = Path(os.getenv("CACHE_PATH")) / "labram_pretrain"
     cache_mgr = GranularCacheManager(
-        cache_root="data/cache/labram_pretrain",
+        cache_root=str(cache_root),
         preprocessing_params={
             "sfreq": 100,
             "tasks": ["restingState"],
@@ -48,7 +53,8 @@ class GranularCacheManager:
     """Manages per-release caching with manifest tracking.
 
     Args:
-        cache_root: Root directory for this module's cache (e.g., "data/cache/labram_pretrain")
+        cache_root: Root directory for this module's cache (e.g., "{CACHE_PATH}/labram_pretrain")
+                    Should be under CACHE_PATH environment variable (set in .env)
         preprocessing_params: Dict of preprocessing parameters that affect cache compatibility
                               (e.g., {"sfreq": 100, "tasks": ["restingState"], "mini": True})
                               NOTE: Should NOT include data selection params (releases, seed, splits)

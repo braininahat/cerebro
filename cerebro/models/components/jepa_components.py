@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 
 try:
-    from neuralop.models import FNO1d
+    from neuralop.models import FNO
 except ImportError:
     raise ImportError(
         "neuraloperator not found. Install with: uv add neuraloperator"
@@ -185,8 +185,8 @@ class JEPAEncoder(BaseEncoder):
         # Temporal FNO: Learn frequency domain patterns (alpha/beta/gamma/delta/theta)
         # Applied across TIME dimension - FFT learns which frequencies matter
         # modes=50 keeps frequencies 0-50 Hz (covers all EEG bands)
-        self.temporal_fno = FNO1d(
-            n_modes_height=fno_modes,    # Keep fno_modes Fourier modes (default 50)
+        self.temporal_fno = FNO(
+            n_modes=(fno_modes,),         # Single-element tuple for 1D
             in_channels=n_chans,          # Process all 129 channels
             out_channels=n_chans,         # Keep 129 channels
             hidden_channels=64,

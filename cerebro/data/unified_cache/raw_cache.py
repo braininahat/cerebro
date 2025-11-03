@@ -1,7 +1,7 @@
 """Level 1: Raw preprocessed cache builder.
 
-Builds per-recording Zarr cache with preprocessing applied.
-Stores one Zarr array per (subject × task × release) recording.
+Builds per-recording memory-mapped numpy cache with preprocessing applied.
+Stores one .npy memory-mapped array per (subject × task × release) recording.
 """
 
 import logging
@@ -11,9 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-import zarr
 from eegdash import EEGChallengeDataset
-from numcodecs import Blosc
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -38,7 +36,8 @@ def _process_recording_worker(
         ds: Dataset object from EEGChallengeDataset
         dataset: Dataset name
         mini: Mini flag
-        zarr_path: Path to save Zarr array
+        zarr_path: Path to save numpy array (parameter name kept for backward compatibility,
+                   but now saves .npy memory-mapped files instead of Zarr)
         preprocessing_params: Preprocessing parameters dict
         preprocessing_hash: Hash of preprocessing params
 
@@ -71,38 +70,34 @@ def _process_recording_worker(
         raw = ds.raw
 
         # Apply preprocessing
+        # CRITICAL: Apply bandpass BEFORE resampling for proper anti-aliasing
+        # This matches HBN preprocessing (0.5-50Hz filter, then 500Hz→100Hz resample)
         target_sfreq = preprocessing_params["sfreq"]
-        if raw.info["sfreq"] != target_sfreq:
-            raw = raw.resample(target_sfreq)
-
         bandpass = preprocessing_params.get("bandpass")
+
+        # Step 1: Apply bandpass filter at original sampling rate
+        # Serves as anti-aliasing filter before downsampling
         if bandpass:
             raw = raw.filter(l_freq=bandpass[0], h_freq=bandpass[1])
+
+        # Step 2: Resample to target frequency
+        # Filter has already removed frequencies > Nyquist of target rate
+        if raw.info["sfreq"] != target_sfreq:
+            raw = raw.resample(target_sfreq)
 
         if preprocessing_params.get("standardize", False):
             data = raw.get_data()
             data = (data - data.mean(axis=1, keepdims=True)) / (data.std(axis=1, keepdims=True) + 1e-8)
             raw._data = data
 
-        # Save to Zarr (use 'w-' mode to fail if exists - atomic check)
-        zarr_path.parent.mkdir(parents=True, exist_ok=True)
+        # Save to memory-mapped numpy array (no compression for zero-copy access)
+        npy_path = zarr_path.with_suffix('.npy')
+        npy_path.parent.mkdir(parents=True, exist_ok=True)
         data = raw.get_data()
 
-        compressor = Blosc(cname='zstd', clevel=5, shuffle=Blosc.BITSHUFFLE)
-        try:
-            # Use 'w-' mode (exclusive create) to atomically fail if exists
-            z = zarr.open(
-                str(zarr_path),
-                mode='w-',  # Create only, fail if exists (prevents race conditions)
-                shape=data.shape,
-                chunks=(data.shape[0], min(10000, data.shape[1])),
-                dtype=np.float32,
-                compressor=compressor,
-                zarr_format=2,
-            )
-            z[:] = data.astype(np.float32)
-        except (FileExistsError, ValueError) as e:
-            # Another worker created this zarr - that's ok, skip
+        # Check if file exists (atomic check)
+        if npy_path.exists():
+            # Another worker created this file - that's ok, skip
             return {
                 "dataset": dataset,
                 "release": ds.description.get("release_number", "unknown"),
@@ -115,10 +110,27 @@ def _process_recording_worker(
                 "n_samples": 0,
                 "duration_s": 0.0,
                 "preprocessing_hash": preprocessing_hash,
-                "raw_zarr_path": str(zarr_path),
+                "raw_zarr_path": str(npy_path),  # Keep field name for compatibility
                 "error_msg": "Already created by another worker (race condition detected)",
                 "success": True,
             }
+
+        # Write using memory-mapped array
+        try:
+            arr = np.lib.format.open_memmap(
+                str(npy_path),
+                mode='w+',
+                dtype=np.float32,
+                shape=data.shape
+            )
+            arr[:] = data.astype(np.float32)
+            arr.flush()
+            del arr
+        except Exception as e:
+            # Handle any write errors
+            if npy_path.exists():
+                npy_path.unlink()
+            raise e
 
         # Return metadata
         return {
@@ -133,7 +145,7 @@ def _process_recording_worker(
             "n_samples": raw.n_times,
             "duration_s": raw.times[-1],
             "preprocessing_hash": preprocessing_hash,
-            "raw_zarr_path": str(zarr_path),
+            "raw_zarr_path": str(npy_path),  # Keep field name for compatibility
             "error_msg": "",
             "success": True,
         }
@@ -176,41 +188,98 @@ def _process_recording_chunk(
 
     for recording_id, ds in chunk:
         try:
-            # Build zarr path
-            zarr_path = recordings_dir / f"{recording_id}_{preprocessing_hash}.zarr"
+            # Build npy path
+            npy_path = recordings_dir / f"{recording_id}_{preprocessing_hash}.npy"
 
             # Extract raw
             raw = ds.raw
 
-            # Apply preprocessing
+            # Apply preprocessing FIRST (before annotations to preserve extras)
+            # CRITICAL: Apply bandpass BEFORE resampling for proper anti-aliasing
             target_sfreq = preprocessing_params["sfreq"]
-            if raw.info["sfreq"] != target_sfreq:
-                raw = raw.resample(target_sfreq)
-
             bandpass = preprocessing_params.get("bandpass")
+
+            # Step 1: Apply bandpass filter at original sampling rate
             if bandpass:
                 raw = raw.filter(l_freq=bandpass[0], h_freq=bandpass[1])
+
+            # Step 2: Resample to target frequency
+            if raw.info["sfreq"] != target_sfreq:
+                raw = raw.resample(target_sfreq)
 
             if preprocessing_params.get("standardize", False):
                 data = raw.get_data()
                 data = (data - data.mean(axis=1, keepdims=True)) / (data.std(axis=1, keepdims=True) + 1e-8)
                 raw._data = data
 
-            # Save to Zarr
-            zarr_path.parent.mkdir(parents=True, exist_ok=True)
+            # Apply task-specific annotations AFTER preprocessing
+            # (must happen after resampling to preserve annotations.extras)
+            # Note: Annotations use time in seconds, so they remain valid after resampling
+            task = ds.description.get("task", "unknown")
+            if task == "contrastChangeDetection":
+                from eegdash.hbn.windows import annotate_trials_with_target, add_aux_anchors
+
+                # Step 1: Pair Stim+Response events and compute RT
+                # This reads from BIDS _events.tsv via raw.filenames
+                annotate_trials_with_target(
+                    raw,
+                    target_field='rt_from_stimulus',
+                    epoch_length=2.0,  # Not used for windowing, just metadata
+                    require_stimulus=True,
+                    require_response=True
+                )
+
+                # Step 2: Add "stimulus_anchor" description for event-locked windowing
+                add_aux_anchors(raw)
+                # Let any errors propagate - don't fail silently!
+
+            # Save to memory-mapped numpy array (no compression)
+            npy_path.parent.mkdir(parents=True, exist_ok=True)
             data = raw.get_data()
 
-            compressor = Blosc(cname='zstd', clevel=5, shuffle=Blosc.BITSHUFFLE)
-            z = zarr.open(
-                str(zarr_path),
-                mode='w',  # Safe to use 'w' - no collisions with pre-partitioning
-                shape=data.shape,
-                chunks=(data.shape[0], min(10000, data.shape[1])),
+            # Write using memory-mapped array
+            arr = np.lib.format.open_memmap(
+                str(npy_path),
+                mode='w+',
                 dtype=np.float32,
-                compressor=compressor,
-                zarr_format=2,
+                shape=data.shape
             )
-            z[:] = data.astype(np.float32)
+            arr[:] = data.astype(np.float32)
+            arr.flush()
+            del arr
+
+            # Save annotations alongside (for event-locked windowing)
+            if raw.annotations is not None and len(raw.annotations) > 0:
+                import json
+                annotations_path = npy_path.with_suffix('.annotations.json')
+
+                annotations_data = {
+                    'onsets': raw.annotations.onset.tolist(),
+                    'durations': raw.annotations.duration.tolist(),
+                    'descriptions': raw.annotations.description.tolist(),
+                }
+
+                # Add extras (RT and other metadata)
+                if hasattr(raw.annotations, 'extras') and raw.annotations.extras is not None:
+                    extras_serializable = []
+                    for extra in raw.annotations.extras:
+                        # Use duck typing to handle MNE's custom dict-like objects
+                        if extra is not None and hasattr(extra, 'items'):
+                            extra_dict = {}
+                            for k, v in extra.items():
+                                if isinstance(v, (np.integer, np.floating)):
+                                    extra_dict[k] = float(v)
+                                elif isinstance(v, np.ndarray):
+                                    extra_dict[k] = v.tolist()
+                                else:
+                                    extra_dict[k] = v
+                            extras_serializable.append(extra_dict)
+                        else:
+                            extras_serializable.append(None)
+                    annotations_data['extras'] = extras_serializable
+
+                with open(annotations_path, 'w') as f:
+                    json.dump(annotations_data, f, indent=2)
 
             # Return metadata
             results.append({
@@ -225,7 +294,7 @@ def _process_recording_chunk(
                 "n_samples": raw.n_times,
                 "duration_s": raw.times[-1],
                 "preprocessing_hash": preprocessing_hash,
-                "raw_zarr_path": str(zarr_path),
+                "raw_zarr_path": str(npy_path),  # Keep field name for compatibility
                 "error_msg": "",
                 "success": True,
             })
@@ -264,11 +333,13 @@ class RawCacheBuilder:
 
     Args:
         cache_manager: Parent UniversalCacheManager instance
+        data_dir: Directory for raw dataset downloads (e.g., HBN_ROOT)
     """
 
-    def __init__(self, cache_manager):
+    def __init__(self, cache_manager, data_dir: Optional[Path] = None):
         self.cache_mgr = cache_manager
         self.raw_manifest = self.cache_mgr.raw_manifest
+        self.data_dir = data_dir
 
     def build(
         self,
@@ -282,13 +353,34 @@ class RawCacheBuilder:
 
         Args:
             dataset: Dataset name ("hbn", "tuh")
+            releases: List of release IDs (e.g., ["R1", "R2"]) or TUH subset names
+            tasks: List of task names or "all"
+            mini: Use mini dataset
+            **kwargs: Dataset-specific parameters (e.g., tuh_path for TUH)
+        """
+        if dataset == "hbn":
+            self._build_hbn(releases, tasks, mini, **kwargs)
+        elif dataset == "tuh":
+            self._build_tuh(releases, tasks, mini, **kwargs)
+        else:
+            raise NotImplementedError(f"Dataset '{dataset}' not supported. Use 'hbn' or 'tuh'")
+
+    def _build_hbn(
+        self,
+        releases: List[str],
+        tasks: List[str],
+        mini: bool = False,
+        **kwargs
+    ):
+        """Build HBN cache from EEGChallengeDataset.
+
+        Args:
             releases: List of release IDs (e.g., ["R1", "R2"])
             tasks: List of task names or "all"
             mini: Use mini dataset
-            **kwargs: Dataset-specific parameters
+            **kwargs: Additional parameters
         """
-        if dataset != "hbn":
-            raise NotImplementedError(f"Dataset '{dataset}' not yet supported. Currently supports: 'hbn'")
+        dataset = "hbn"
 
         logger.info(f"Building raw cache for {dataset}")
         logger.info(f"  Releases: {releases}")
@@ -300,12 +392,20 @@ class RawCacheBuilder:
         for release in releases:
             logger.info(f"  Loading {release}...")
             try:
-                eeg_dataset = EEGChallengeDataset(
-                    release=release,
-                    cache_dir=str(self.cache_mgr.cache_root.parent),
-                    mini=mini,
-                    query={"task": tasks} if tasks != "all" else None
-                )
+                # Use data_dir for downloads (falls back to cache_root.parent if not set)
+                download_dir = str(self.data_dir) if self.data_dir else str(self.cache_mgr.cache_root.parent)
+
+                # Suppress EEGChallengeDataset competition notice warning
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message=".*EEGChallengeDataset.*Competition Data Notice.*")
+                    eeg_dataset = EEGChallengeDataset(
+                        release=release,
+                        cache_dir=download_dir,
+                        mini=mini,
+                        query={"task": tasks} if tasks != "all" else None
+                    )
+
                 all_recordings.extend(eeg_dataset.datasets)
                 logger.info(f"    ✓ Loaded {len(eeg_dataset.datasets)} recordings")
             except Exception as e:
@@ -315,19 +415,122 @@ class RawCacheBuilder:
         if not all_recordings:
             raise ValueError("No recordings loaded!")
 
+        self._process_recordings_parallel(all_recordings, dataset, mini)
+
+    def _build_tuh(
+        self,
+        releases: List[str],
+        tasks: List[str],
+        mini: bool = False,
+        **kwargs
+    ):
+        """Build TUH cache from braindecode TUH loader.
+
+        Args:
+            releases: List of subset names (e.g., ["tuh_eeg_subset"])
+            tasks: List of recording types (e.g., ["01_tcp_ar", "02_tcp_le"]) or "all"
+            mini: Not used for TUH (kept for interface compatibility)
+            **kwargs: Must include 'tuh_path' (path to TUH dataset root)
+        """
+        dataset = "tuh"
+        tuh_path = kwargs.get("tuh_path")
+        if not tuh_path:
+            raise ValueError("tuh_path must be provided in kwargs for TUH dataset")
+
+        tuh_path = Path(tuh_path)
+        if not tuh_path.exists():
+            raise ValueError(f"TUH path does not exist: {tuh_path}")
+
+        logger.info(f"Building raw cache for {dataset}")
+        logger.info(f"  TUH path: {tuh_path}")
+        logger.info(f"  Recording types filter: {tasks if tasks != 'all' else 'all'}")
+
+        # Import here to avoid requiring braindecode for HBN-only usage
+        try:
+            from braindecode.datasets import TUH as TUHDataset
+        except ImportError:
+            raise ImportError("braindecode is required for TUH dataset. Install with: uv pip install braindecode")
+
+        # Load TUH dataset
+        logger.info(f"  Loading TUH recordings from {tuh_path}...")
+        try:
+            tuh_ds = TUHDataset(
+                path=str(tuh_path),
+                recording_ids=None,  # Load all
+                target_name=None,    # No classification target
+                preload=False,       # Don't preload to memory
+                add_physician_reports=False,
+                n_jobs=1  # Single process for loading (parallel processing happens later)
+            )
+            logger.info(f"    ✓ Loaded {len(tuh_ds.datasets)} recordings")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load TUH dataset: {e}")
+
+        if not tuh_ds.datasets:
+            raise ValueError("No recordings loaded from TUH dataset!")
+
+        # Filter by recording types if specified
+        all_recordings = tuh_ds.datasets
+        if tasks != "all":
+            # TUH description includes session info with recording type
+            filtered_recordings = []
+            for ds in all_recordings:
+                # Recording type is in the path (e.g., "01_tcp_ar", "02_tcp_le")
+                rec_type = ds.description.get("path", "").split("/")[-2] if "/" in ds.description.get("path", "") else ""
+                if any(task in rec_type for task in tasks):
+                    filtered_recordings.append(ds)
+            logger.info(f"  Filtered to {len(filtered_recordings)} recordings matching {tasks}")
+            all_recordings = filtered_recordings
+
+        if not all_recordings:
+            raise ValueError(f"No recordings found matching recording types: {tasks}")
+
+        self._process_recordings_parallel(all_recordings, dataset, mini=False)
+
+    def _process_recordings_parallel(
+        self,
+        all_recordings: List,
+        dataset: str,
+        mini: bool
+    ):
+        """Process recordings in parallel with chunked execution.
+
+        Args:
+            all_recordings: List of dataset objects (from EEGChallengeDataset or TUH)
+            dataset: Dataset name ("hbn" or "tuh")
+            mini: Mini dataset flag
+        """
+
         logger.info(f"\nTotal recordings to process: {len(all_recordings)}")
 
         # Identify missing recordings
-        recording_ids = [
-            self.cache_mgr._get_recording_id(
+        recording_ids = []
+        for ds in all_recordings:
+            # Extract metadata based on dataset type
+            if dataset == "hbn":
+                release = ds.description.get("release", "unknown")
+                subject = ds.description.get("subject", "unknown")
+                task = ds.description.get("task", "unknown")
+            elif dataset == "tuh":
+                # TUH has different metadata structure
+                release = "tuh_eeg"  # Use dataset name as "release"
+                subject = ds.description.get("subject", "unknown")
+                # Task is the session/recording type (e.g., "s001_2004/02_tcp_le")
+                path_parts = ds.description.get("path", "").split("/")
+                session = path_parts[-3] if len(path_parts) >= 3 else "unknown"
+                rec_type = path_parts[-2] if len(path_parts) >= 2 else "unknown"
+                task = f"{session}_{rec_type}"
+            else:
+                raise ValueError(f"Unknown dataset type: {dataset}")
+
+            recording_id = self.cache_mgr._get_recording_id(
                 dataset=dataset,
-                release=ds.description.get("release", "unknown"),
-                subject=ds.description.get("subject", "unknown"),
-                task=ds.description.get("task", "unknown"),
+                release=release,
+                subject=subject,
+                task=task,
                 mini=mini
             )
-            for ds in all_recordings
-        ]
+            recording_ids.append(recording_id)
 
         missing_ids = self.raw_manifest.get_missing_recordings(recording_ids)
         missing_recordings = [
@@ -343,7 +546,6 @@ class RawCacheBuilder:
             return
 
         # Process missing recordings in parallel with pre-partitioning
-        # Pre-partition recordings into chunks to guarantee no worker collisions
         import os
         max_workers = min(32, os.cpu_count())
 
@@ -464,9 +666,9 @@ class RawCacheBuilder:
         # Apply preprocessing
         raw = self._preprocess_raw(raw)
 
-        # Save to Zarr
-        zarr_path = self.cache_mgr._get_raw_zarr_path(recording_id)
-        self._save_to_zarr(raw, zarr_path)
+        # Save to memory-mapped numpy
+        npy_path = self.cache_mgr._get_raw_zarr_path(recording_id).with_suffix('.npy')
+        self._save_to_npy(raw, npy_path)
 
         # Update manifest
         self.raw_manifest.mark_complete({
@@ -481,12 +683,14 @@ class RawCacheBuilder:
             "n_samples": raw.n_times,
             "duration_s": raw.times[-1],
             "preprocessing_hash": self.cache_mgr.preprocessing_hash,
-            "raw_zarr_path": str(zarr_path),
+            "raw_zarr_path": str(npy_path),  # Keep field name for compatibility
             "error_msg": "",
         })
 
     def _preprocess_raw(self, raw):
         """Apply preprocessing to raw recording.
+
+        CRITICAL: Filter BEFORE resample for proper anti-aliasing.
 
         Args:
             raw: MNE Raw object
@@ -494,17 +698,18 @@ class RawCacheBuilder:
         Returns:
             Preprocessed MNE Raw object
         """
-        # Resample if needed
         target_sfreq = self.cache_mgr.preprocessing_params["sfreq"]
-        if raw.info["sfreq"] != target_sfreq:
-            raw = raw.resample(target_sfreq)
-
-        # Apply bandpass filter if specified
         bandpass = self.cache_mgr.preprocessing_params.get("bandpass")
+
+        # Step 1: Bandpass filter at original sampling rate (anti-aliasing)
         if bandpass:
             raw = raw.filter(l_freq=bandpass[0], h_freq=bandpass[1])
 
-        # Standardize if specified
+        # Step 2: Resample to target frequency
+        if raw.info["sfreq"] != target_sfreq:
+            raw = raw.resample(target_sfreq)
+
+        # Step 3: Standardize if specified
         if self.cache_mgr.preprocessing_params.get("standardize", False):
             data = raw.get_data()
             data = (data - data.mean(axis=1, keepdims=True)) / (data.std(axis=1, keepdims=True) + 1e-8)
@@ -512,29 +717,92 @@ class RawCacheBuilder:
 
         return raw
 
-    def _save_to_zarr(self, raw, zarr_path: Path):
-        """Save MNE Raw to Zarr format.
+    def _save_to_npy(self, raw, npy_path: Path):
+        """Save MNE Raw to memory-mapped numpy format + annotations as JSON.
 
         Args:
             raw: MNE Raw object
-            zarr_path: Path to save Zarr array
+            npy_path: Path to save .npy array
         """
-        zarr_path.parent.mkdir(parents=True, exist_ok=True)
+        npy_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Get data
         data = raw.get_data()  # Shape: (n_channels, n_samples)
 
-        # Create Zarr array with compression (use v2 format for compatibility)
-        compressor = Blosc(cname='zstd', clevel=5, shuffle=Blosc.BITSHUFFLE)
-        z = zarr.open(
-            str(zarr_path),
-            mode='w',
-            shape=data.shape,
-            chunks=(data.shape[0], min(10000, data.shape[1])),  # Chunk along time
+        # Create memory-mapped array (no compression for zero-copy access)
+        arr = np.lib.format.open_memmap(
+            str(npy_path),
+            mode='w+',
             dtype=np.float32,
-            compressor=compressor,
-            zarr_format=2,  # Use v2 format for compressor API compatibility
+            shape=data.shape
         )
 
         # Write data
-        z[:] = data.astype(np.float32)
+        arr[:] = data.astype(np.float32)
+        arr.flush()
+        del arr
+
+        # Save annotations alongside (for event-locked windowing)
+        if raw.annotations is not None and len(raw.annotations) > 0:
+            self._save_annotations(raw.annotations, npy_path)
+
+    def _save_annotations(self, annotations, npy_path: Path):
+        """Save MNE annotations to JSON for event-locked windowing.
+
+        Args:
+            annotations: MNE Annotations object
+            npy_path: Path to corresponding .npy file (will save as .annotations.json)
+        """
+        import json
+
+        annotations_path = npy_path.with_suffix('.annotations.json')
+
+        # Extract annotation data
+        annotations_data = {
+            'onsets': annotations.onset.tolist(),
+            'durations': annotations.duration.tolist(),
+            'descriptions': annotations.description.tolist(),
+        }
+
+        # Add extras (contains RT and other event metadata)
+        if hasattr(annotations, 'extras') and annotations.extras is not None:
+            # Convert extras to JSON-serializable format
+            extras_serializable = []
+            for extra in annotations.extras:
+                if extra is not None and isinstance(extra, dict):
+                    # Convert numpy types to Python types
+                    extra_dict = {}
+                    for k, v in extra.items():
+                        if isinstance(v, (np.integer, np.floating)):
+                            extra_dict[k] = float(v)
+                        elif isinstance(v, np.ndarray):
+                            extra_dict[k] = v.tolist()
+                        else:
+                            extra_dict[k] = v
+                    extras_serializable.append(extra_dict)
+                else:
+                    extras_serializable.append(None)
+            annotations_data['extras'] = extras_serializable
+
+        # Save to JSON
+        with open(annotations_path, 'w') as f:
+            json.dump(annotations_data, f, indent=2)
+
+    def _load_annotations(self, npy_path: Path) -> Optional[Dict]:
+        """Load annotations from JSON file.
+
+        Args:
+            npy_path: Path to .npy file (will load .annotations.json)
+
+        Returns:
+            Annotations dict or None if file doesn't exist
+        """
+        import json
+
+        annotations_path = npy_path.with_suffix('.annotations.json')
+
+        if not annotations_path.exists():
+            return None
+
+        with open(annotations_path, 'r') as f:
+            return json.load(f)

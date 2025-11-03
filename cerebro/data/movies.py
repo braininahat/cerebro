@@ -13,6 +13,7 @@ Pipeline:
 """
 
 import logging
+import os
 import pickle
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -54,7 +55,7 @@ class MovieDataModule(L.LightningDataModule):
         test_release: Specific release to use as test set (e.g., "R5"), or None for no test
         seed: Random seed for reproducible splits
         use_mini: If True, use mini subset for fast prototyping
-        cache_dir: Directory for caching preprocessed windows
+        cache_dir: Directory for caching (deprecated, uses CACHE_PATH from env)
 
     Example:
         >>> # Development mode with R5 test set
@@ -107,10 +108,14 @@ class MovieDataModule(L.LightningDataModule):
             ]
         self.movie_names = movie_names
 
-        # Default cache directory
-        if cache_dir is None:
-            cache_dir = Path(data_dir) / "cache" / "movies"
-        cache_root = Path(cache_dir)
+        # Use CACHE_PATH for caching (fail if not set)
+        cache_path = os.getenv("CACHE_PATH")
+        if not cache_path:
+            raise ValueError(
+                "CACHE_PATH environment variable not set. "
+                "Set it in your .env file or export it before running."
+            )
+        cache_root = Path(cache_path) / "movies"
 
         # Initialize granular cache manager
         # Cache key includes only preprocessing params (NOT releases or seed)

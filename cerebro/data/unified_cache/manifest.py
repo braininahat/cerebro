@@ -254,7 +254,7 @@ RAW_MANIFEST_SCHEMA = {
     "n_samples": "int64",
     "duration_s": "float64",
     "preprocessing_hash": "string",
-    "raw_zarr_path": "string",
+    "raw_zarr_path": "string",  # NOTE: Field name kept for backward compatibility, stores .npy memmap paths
     "status": "string",
     "error_msg": "string",
     "timestamp": "string",
@@ -266,7 +266,7 @@ WINDOW_MANIFEST_SCHEMA = {
     "window_len_s": "float64",
     "stride_s": "float64",
     "n_windows": "int64",
-    "window_zarr_path": "string",
+    "window_zarr_path": "string",  # NOTE: Field name kept for backward compatibility, stores .npy memmap paths
     "metadata_path": "string",
     "status": "string",
     "error_msg": "string",

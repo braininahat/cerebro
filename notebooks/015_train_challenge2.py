@@ -57,7 +57,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Load data paths from environment
 load_dotenv()
-DATA_ROOT = Path(os.getenv("EEG2025_DATA_ROOT", str(REPO_ROOT / "data"))).resolve()
+DATA_ROOT = Path(os.getenv("HBN_ROOT", str(REPO_ROOT / "data"))).resolve()
 MINI_DIR = (DATA_ROOT / "mini").resolve()
 FULL_DIR = (DATA_ROOT / "full").resolve()
 

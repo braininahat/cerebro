@@ -199,6 +199,7 @@ class Challenge1Task:
             window_stride_samples=self.sfreq,
             preload=True,
             drop_bad_windows=False,  # Already filtered boundary violations above
+            verbose=False,  # Suppress "Used Annotations" logging spam
         )
 
         logger.info(f"[bold]Created {len(single_windows)} windows[/bold]")

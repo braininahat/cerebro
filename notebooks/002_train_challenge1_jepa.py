@@ -89,7 +89,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Load data paths from environment
 load_dotenv()
-DATA_ROOT = Path(os.getenv("EEG2025_DATA_ROOT", str(REPO_ROOT / "data"))).resolve()
+DATA_ROOT = Path(os.getenv("HBN_ROOT", str(REPO_ROOT / "data"))).resolve()
 
 # Load wandb config from environment
 WANDB_TEAM = os.getenv("WANDB_TEAM", "ubcse-eeg2025")
