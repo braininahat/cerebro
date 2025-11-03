@@ -24,6 +24,7 @@ from collections import defaultdict
 from typing import List, Tuple, Dict, Optional
 import numpy as np
 from tqdm.auto import tqdm
+from joblib import Parallel, delayed
 from dotenv import load_dotenv
 import pandas as pd
 from datetime import datetime
@@ -112,11 +113,17 @@ class Config:
         # EXCLUDED: externalizing (Challenge 2 target), rt_from_stimulus (Challenge 1 target)
     }
 
-    # Loss weights
+    # Loss weights (initial values for GradNorm)
     mae_loss_weight = 0.45  # MAE reconstruction
     contrastive_loss_weight = 0.5  # Movie contrastive
     aux_total_weight = 0.05  # Total weight for all auxiliary heads
     auxiliary_loss_weight = 0.05  # Alias for aux_total_weight
+
+    # GradNorm - Dynamic loss weight balancing
+    use_gradnorm = True  # Enable GradNorm for automatic weight balancing
+    gradnorm_alpha = 1.5  # Restoring force strength (1.5 = moderate balancing)
+    gradnorm_warmup_epochs = 5  # Wait 5 epochs before enabling GradNorm
+    gradnorm_update_freq = 10  # Update weights every 10 batches
 
     # Contrastive learning (ISC-based pairing)
     temperature = 0.07  # Temperature for InfoNCE
@@ -137,7 +144,7 @@ class Config:
     early_stopping_patience = 15  # Stop if no improvement for 15 epochs
 
     # Optimizer selection
-    use_muon = True  # Toggle Muon optimizer (1.35x faster convergence)
+    use_muon = False  # Disabled for stability (NaN issues with high LR)
 
     # Muon hyperparameters (for 2D weight matrices)
     muon_lr = 0.02              # 10-50x higher than AdamW (paper recommendation)
@@ -529,6 +536,127 @@ class SignalJEPAPretrainer(nn.Module):
         return self.aux_heads(pooled)
 
 
+# %% GradNorm - Dynamic Loss Weight Balancing
+class GradNorm:
+    """GradNorm: Gradient Normalization for Adaptive Loss Balancing in Deep Multitask Networks.
+
+    Dynamically adjusts loss weights to balance gradient magnitudes across tasks.
+    Paper: https://arxiv.org/abs/1711.02257
+
+    Args:
+        n_tasks: Number of tasks
+        alpha: Restoring force strength (higher = more aggressive balancing, default=1.5)
+        warmup_epochs: Number of epochs before enabling GradNorm (default=5)
+        update_freq: Update weights every N batches (default=10)
+    """
+
+    def __init__(self, n_tasks: int = 3, alpha: float = 1.5, warmup_epochs: int = 5, update_freq: int = 10):
+        self.n_tasks = n_tasks
+        self.alpha = alpha
+        self.warmup_epochs = warmup_epochs
+        self.update_freq = update_freq
+
+        # Initial task weights (learnable)
+        self.task_weights = torch.nn.Parameter(torch.ones(n_tasks))
+
+        # Track initial task losses for relative weighting
+        self.initial_losses = None
+
+        # Batch counter
+        self.batch_count = 0
+
+    def compute_grad_norm(self, loss: torch.Tensor, parameters) -> float:
+        """Compute L2 norm of gradients for a single task loss.
+
+        Args:
+            loss: Scalar loss for one task
+            parameters: Model parameters to compute gradients for
+
+        Returns:
+            L2 norm of gradients
+        """
+        # Compute gradients for this task
+        grads = torch.autograd.grad(
+            loss,
+            parameters,
+            retain_graph=True,
+            create_graph=False,
+            allow_unused=True
+        )
+
+        # Compute L2 norm (filter out None gradients)
+        grad_norm = 0.0
+        for grad in grads:
+            if grad is not None:
+                grad_norm += (grad ** 2).sum().item()
+
+        return np.sqrt(grad_norm)
+
+    def update_weights(
+        self,
+        task_losses: list[torch.Tensor],
+        shared_parameters,
+        current_epoch: int
+    ) -> torch.Tensor:
+        """Update task weights based on gradient norm balancing.
+
+        Args:
+            task_losses: List of scalar losses [mae_loss, contrastive_loss, aux_loss]
+            shared_parameters: Shared model parameters (e.g., encoder)
+            current_epoch: Current training epoch
+
+        Returns:
+            Normalized task weights
+        """
+        self.batch_count += 1
+
+        # Skip update if in warmup or not at update frequency
+        if current_epoch < self.warmup_epochs or self.batch_count % self.update_freq != 0:
+            # Return current weights (softmax normalized)
+            return torch.softmax(self.task_weights, dim=0)
+
+        # Initialize initial losses on first update
+        if self.initial_losses is None:
+            self.initial_losses = torch.tensor([l.item() for l in task_losses])
+
+        # Compute gradient norms for each task
+        grad_norms = []
+        for task_loss in task_losses:
+            grad_norm = self.compute_grad_norm(task_loss, shared_parameters)
+            grad_norms.append(grad_norm)
+
+        grad_norms = np.array(grad_norms)
+
+        # Compute average gradient norm
+        avg_grad_norm = grad_norms.mean()
+
+        # Compute relative inverse training rates
+        current_losses = torch.tensor([l.item() for l in task_losses])
+        loss_ratios = current_losses / self.initial_losses
+
+        # Compute target gradient norms (GradNorm formula)
+        # G_W(t) = avg_grad * [r_i(t)]^alpha where r_i is relative inverse training rate
+        target_grad_norms = avg_grad_norm * (loss_ratios.numpy() ** self.alpha)
+
+        # Update task weights to push gradient norms toward targets
+        # Simple gradient step on L1 distance
+        grad_diff = grad_norms - target_grad_norms
+
+        # Update weights (gradient descent)
+        with torch.no_grad():
+            self.task_weights -= 0.01 * torch.from_numpy(grad_diff).float()
+
+            # Clamp weights to prevent collapse
+            self.task_weights.clamp_(min=0.1, max=10.0)
+
+        # Return softmax-normalized weights
+        return torch.softmax(self.task_weights, dim=0)
+
+    def get_weights(self) -> torch.Tensor:
+        """Get current normalized task weights."""
+        return torch.softmax(self.task_weights, dim=0)
+
+
 # %% InfoNCE Loss
 def info_nce_loss(
     z_i: torch.Tensor,
@@ -563,6 +691,10 @@ def info_nce_loss(
         # Compute similarity matrix
         sim_matrix = torch.mm(z, z.t()) / temperature  # (3*batch, 3*batch)
 
+        # CRITICAL: Clamp logits to prevent exp() overflow (NaN prevention)
+        # Standard practice in SimCLR/MoCo: [-20, 20] allows exp() without overflow
+        sim_matrix = torch.clamp(sim_matrix, min=-20.0, max=20.0)
+
         # Remove self-similarities
         mask = torch.eye(3 * batch_size, device=z.device).bool()
         sim_matrix.masked_fill_(mask, float('-inf'))
@@ -583,6 +715,10 @@ def info_nce_loss(
 
         # Compute similarity matrix
         sim_matrix = torch.mm(z, z.t()) / temperature  # (2*batch, 2*batch)
+
+        # CRITICAL: Clamp logits to prevent exp() overflow (NaN prevention)
+        # Standard practice in SimCLR/MoCo: [-20, 20] allows exp() without overflow
+        sim_matrix = torch.clamp(sim_matrix, min=-20.0, max=20.0)
 
         # Create positive pair mask
         # Positive pairs: (i, i+N) and (i+N, i)
@@ -653,6 +789,21 @@ def collate_with_metadata(batch):
     window_inds_list = [item[2] for item in batch]
     infos_list = [item[3] for item in batch]  # Keep as list of dicts
 
+    # Defensive check: ensure all arrays have the same shape
+    if len(X_list) > 0:
+        shapes = [x.shape for x in X_list]
+        if len(set(shapes)) > 1:
+            shape_counts = {}
+            for s in shapes:
+                shape_counts[s] = shape_counts.get(s, 0) + 1
+            raise ValueError(
+                f"Shape mismatch in batch! Cannot stack arrays with different shapes.\n"
+                f"  Found {len(set(shapes))} different shapes in batch of {len(X_list)} items:\n"
+                f"  Shape distribution: {shape_counts}\n"
+                f"  This indicates that validation failed to filter inconsistent windows.\n"
+                f"  Check validate_windowed_dataset_shapes() is being called correctly."
+            )
+
     # Convert to tensors and stack
     # Braindecode datasets return numpy arrays, so convert first
     if isinstance(X_list[0], np.ndarray):
@@ -708,6 +859,228 @@ def collate_triplets(batch):
     )
 
 
+def filter_short_trials(dataset, min_samples):
+    """Filter out trials/recordings shorter than min_samples from a BaseConcatDataset.
+
+    Args:
+        dataset: BaseConcatDataset containing individual trial/recording datasets
+        min_samples: Minimum number of samples required (e.g., 200 for 2s windows at 100Hz)
+
+    Returns:
+        Filtered BaseConcatDataset with only trials >= min_samples
+    """
+    from braindecode.datasets import BaseConcatDataset
+
+    valid_trials = []
+    filtered_count = 0
+
+    for trial_ds in dataset.datasets:
+        try:
+            # Check if trial has .raw attribute (MNE Raw object with n_times)
+            if hasattr(trial_ds, 'raw') and hasattr(trial_ds.raw, 'n_times'):
+                trial_length = trial_ds.raw.n_times
+            # Otherwise, check total duration across all epochs
+            elif len(trial_ds) > 0:
+                # Sum up all epoch durations (each epoch is (data, metadata))
+                # Calculate total samples across all epochs
+                total_samples = sum(trial_ds[i][0].shape[1] for i in range(len(trial_ds)))
+                trial_length = total_samples
+            else:
+                # Empty trial, skip
+                filtered_count += 1
+                continue
+
+            if trial_length >= min_samples:
+                valid_trials.append(trial_ds)
+            else:
+                filtered_count += 1
+
+        except Exception:
+            # Skip trials that can't be accessed
+            filtered_count += 1
+            pass
+
+    if len(valid_trials) == 0:
+        # No valid trials found - return empty dataset
+        return BaseConcatDataset([])
+
+    return BaseConcatDataset(valid_trials)
+
+
+def validate_windowed_dataset_shapes(windows_dataset, expected_n_channels=129, expected_n_times=200):
+    """Validate that all windows have consistent shapes (channels and timepoints).
+
+    Filters out recordings with incorrect channel counts or time lengths.
+
+    Args:
+        windows_dataset: BaseConcatDataset of windowed data
+        expected_n_channels: Expected number of channels (default 129 for HBN)
+        expected_n_times: Expected number of timepoints (default 200 for 2s windows at 100Hz)
+
+    Returns:
+        Filtered BaseConcatDataset with only valid windows
+    """
+    from braindecode.datasets import BaseConcatDataset
+
+    valid_datasets = []
+    filtered_count = 0
+    channels_mismatch = 0
+    timepoints_mismatch = 0
+    shape_details = {}  # Track what shapes we're seeing
+
+    for ds in windows_dataset.datasets:
+        if len(ds) == 0:
+            filtered_count += 1
+            continue
+
+        try:
+            # Check first window's shape
+            first_window = ds[0][0]  # (data, metadata)
+            n_channels = first_window.shape[0]
+            timepoints = first_window.shape[1]
+
+            # Track shape occurrences for debugging
+            shape_key = f"({n_channels}, {timepoints})"
+            shape_details[shape_key] = shape_details.get(shape_key, 0) + 1
+
+            # Strict validation: both dimensions must match exactly
+            if n_channels != expected_n_channels:
+                channels_mismatch += 1
+                filtered_count += 1
+            elif timepoints != expected_n_times:
+                timepoints_mismatch += 1
+                filtered_count += 1
+            else:
+                valid_datasets.append(ds)
+        except Exception:
+            filtered_count += 1
+
+    if filtered_count > 0:
+        print(f"    ⚠️  Filtered {filtered_count} recording(s) with incorrect shape")
+        if channels_mismatch > 0:
+            print(f"       ├─ {channels_mismatch} with wrong channel count (expected {expected_n_channels})")
+        if timepoints_mismatch > 0:
+            print(f"       └─ {timepoints_mismatch} with wrong timepoint count (expected {expected_n_times})")
+
+        # Show what shapes we encountered (for debugging)
+        wrong_shapes = {k: v for k, v in shape_details.items() if k != f"({expected_n_channels}, {expected_n_times})"}
+        if wrong_shapes and len(wrong_shapes) <= 5:  # Only show if not too many
+            print(f"       Incorrect shapes found: {wrong_shapes}")
+
+    if len(valid_datasets) == 0:
+        return BaseConcatDataset([])
+
+    return BaseConcatDataset(valid_datasets)
+
+
+def _count_task_release_recordings(task, release, hbn_root, use_mini):
+    """Count recordings for a single (task, release) pair (for parallel execution).
+
+    Args:
+        task: Task name (e.g., "RestingState")
+        release: Release name (e.g., "R11")
+        hbn_root: Path to HBN data root
+        use_mini: Whether to use mini dataset
+
+    Returns:
+        Tuple of (task, release, count)
+    """
+    try:
+        ds = EEGChallengeDataset(
+            task=task,
+            release=release,
+            cache_dir=Path(str(hbn_root)),
+            mini=use_mini,
+            description_fields=["subject", "age", "sex", "p_factor", "attention", "internalizing", "ehq_total"]
+        )
+        count = len(ds.datasets)
+        return (task, release, count)
+    except Exception:
+        return (task, release, 0)
+
+
+def _process_task_windows(task, task_idx, total_tasks, task_release_counts, train_releases, hbn_root, use_mini, window_len, sfreq):
+    """Process all releases for a single task (for parallel execution).
+
+    Args:
+        task: Task name (e.g., "RestingState")
+        task_idx: Task index (for progress reporting)
+        total_tasks: Total number of tasks
+        task_release_counts: Dict mapping task -> release -> count
+        train_releases: List of release names to process
+        hbn_root: Path to HBN data root
+        use_mini: Whether to use mini dataset
+        window_len: Window length in seconds
+        sfreq: Sampling frequency in Hz
+
+    Returns:
+        List of windowed datasets for this task
+    """
+    print(f"\n{'='*60}")
+    print(f"Processing Task {task_idx+1}/{total_tasks}: {task}")
+    print(f"{'='*60}")
+
+    task_windows = []
+
+    for release_idx, release in enumerate(train_releases):
+        n_recordings = task_release_counts[task].get(release, 0)
+
+        if n_recordings == 0:
+            print(f"  [{release_idx+1}/{len(train_releases)}] {release}: Skipped (no recordings)")
+            continue
+
+        print(f"  [{release_idx+1}/{len(train_releases)}] {release}: Windowing {n_recordings} recordings...", end="", flush=True)
+
+        try:
+            # Load this specific (task, release) pair
+            ds = EEGChallengeDataset(
+                task=task,
+                release=release,
+                cache_dir=Path(str(hbn_root)),
+                mini=use_mini,
+                description_fields=["subject", "age", "sex", "p_factor", "attention", "internalizing", "ehq_total"]
+            )
+
+            # Filter out trials shorter than window size
+            min_samples = int(window_len * sfreq)  # 200 samples for 2s
+            original_count = len(ds.datasets)
+            ds = filter_short_trials(ds, min_samples)
+            filtered_count = original_count - len(ds.datasets)
+
+            if len(ds.datasets) == 0:
+                print(f" ⚠️  All {original_count} trials too short, skipping")
+                continue
+
+            # Window the filtered dataset
+            release_windows = create_fixed_length_windows(
+                ds,
+                window_size_samples=min_samples,
+                window_stride_samples=min_samples,  # No overlap
+                drop_last_window=True,
+                preload=True
+            )
+
+            # Validate channel counts and shape consistency (129 channels x 200 timepoints)
+            release_windows = validate_windowed_dataset_shapes(release_windows, expected_n_channels=129, expected_n_times=200)
+
+            if len(release_windows.datasets) == 0:
+                print(f" ⚠️  All recordings filtered due to shape issues, skipping")
+                continue
+
+            task_windows.append(release_windows)
+
+            # Report results
+            if filtered_count > 0:
+                print(f" ✓ {len(release_windows)} windows ({filtered_count}/{original_count} trials filtered)")
+            else:
+                print(f" ✓ {len(release_windows)} windows")
+
+        except Exception as e:
+            print(f" ✗ Error: {e}")
+
+    return task_windows
+
+
 # %% DatasetWrapper for Subject Metadata
 class DatasetWrapper(BaseDataset):
     """Wraps windowed dataset to add subject metadata for auxiliary loss."""
@@ -736,25 +1109,27 @@ print("="*60)
 
 # Load masked pretraining tasks only (count recordings first)
 print("\n📊 Counting recordings per task...")
+
+# Count all (task, release) pairs in parallel (2-4x speedup)
+count_results = Parallel(n_jobs=16, backend='loky', verbose=0)(
+    delayed(_count_task_release_recordings)(
+        task=task,
+        release=release,
+        hbn_root=cfg.HBN_ROOT,
+        use_mini=cfg.use_mini
+    )
+    for task in cfg.masked_tasks
+    for release in cfg.train_releases
+)
+
+# Build task_release_counts dict from results
 task_release_counts = {}
 total_recordings = 0
-
-for task in cfg.masked_tasks:
-    task_release_counts[task] = {}
-    for release in cfg.train_releases:
-        try:
-            ds = EEGChallengeDataset(
-                task=task,
-                release=release,
-                cache_dir=Path(str(cfg.HBN_ROOT)),
-                mini=cfg.use_mini,
-                description_fields=["subject", "age", "sex", "p_factor", "attention", "internalizing", "ehq_total"]
-            )
-            count = len(ds.datasets)
-            task_release_counts[task][release] = count
-            total_recordings += count
-        except Exception as e:
-            task_release_counts[task][release] = 0
+for task, release, count in count_results:
+    if task not in task_release_counts:
+        task_release_counts[task] = {}
+    task_release_counts[task][release] = count
+    total_recordings += count
 
 print(f"\n✅ Found {total_recordings} total recordings across {len(cfg.masked_tasks)} tasks")
 
@@ -793,57 +1168,24 @@ if mae_windows is None:
     # Process each (task, release) pair separately with progress
     all_windowed_datasets = []
 
-    for task_idx, task in enumerate(cfg.masked_tasks):
-        print(f"\n{'='*60}")
-        print(f"Processing Task {task_idx+1}/{len(cfg.masked_tasks)}: {task}")
-        print(f"{'='*60}")
+    # Process tasks in parallel (2x speedup: ~8min → ~4min)
+    task_results = Parallel(n_jobs=2, backend='loky', verbose=0)(
+        delayed(_process_task_windows)(
+            task=task,
+            task_idx=task_idx,
+            total_tasks=len(cfg.masked_tasks),
+            task_release_counts=task_release_counts,
+            train_releases=cfg.train_releases,
+            hbn_root=cfg.HBN_ROOT,
+            use_mini=cfg.use_mini,
+            window_len=cfg.window_len,
+            sfreq=cfg.sfreq
+        )
+        for task_idx, task in enumerate(cfg.masked_tasks)
+    )
 
-        for release_idx, release in enumerate(cfg.train_releases):
-            n_recordings = task_release_counts[task].get(release, 0)
-
-            if n_recordings == 0:
-                print(f"  [{release_idx+1}/{len(cfg.train_releases)}] {release}: Skipped (no recordings)")
-                continue
-
-            print(f"  [{release_idx+1}/{len(cfg.train_releases)}] {release}: Windowing {n_recordings} recordings...", end="", flush=True)
-
-            try:
-                # Load this specific (task, release) pair
-                ds = EEGChallengeDataset(
-                    task=task,
-                    release=release,
-                    cache_dir=Path(str(cfg.HBN_ROOT)),
-                    mini=cfg.use_mini,
-                    description_fields=["subject", "age", "sex", "p_factor", "attention", "internalizing", "ehq_total"]
-                )
-
-                # Window this subset
-                release_windows = create_fixed_length_windows(
-                    ds,
-                    window_size_samples=int(cfg.window_len * cfg.sfreq),
-                    window_stride_samples=int(cfg.window_len * cfg.sfreq),  # No overlap
-                    drop_last_window=True,
-                    preload=True
-                )
-
-                # Validate all windows have expected shape (129 channels, window_size_samples)
-                expected_shape = (129, int(cfg.window_len * cfg.sfreq))
-                if len(release_windows) > 0:
-                    # Check for shape consistency
-                    invalid_count = 0
-                    for i in range(len(release_windows)):
-                        if release_windows[i][0].shape != expected_shape:
-                            invalid_count += 1
-
-                    if invalid_count > 0:
-                        print(f" ⚠️  Found {invalid_count}/{len(release_windows)} windows with wrong shape, skipping release")
-                        continue  # Skip this release entirely if it has malformed windows
-
-                all_windowed_datasets.append(release_windows)
-                print(f" ✓ {len(release_windows)} windows")
-
-            except Exception as e:
-                print(f" ✗ Error: {e}")
+    # Flatten results: [task1_windows, task2_windows] → all_windowed_datasets
+    all_windowed_datasets = [w for task_ws in task_results for w in task_ws]
 
     # Concatenate all windowed datasets
     print(f"\n{'='*60}")
@@ -854,43 +1196,13 @@ if mae_windows is None:
     print(f"✅ Windowing completed in {elapsed/60:.1f} minutes")
     print(f"   Total windows: {len(mae_windows):,}")
 
-    # Final validation: ensure all windows have consistent shapes
-    expected_shape = (129, int(cfg.window_len * cfg.sfreq))
-    print(f"\n🔍 Validating window shapes (expected: {expected_shape})...")
-    invalid_indices = []
-    for i in range(len(mae_windows)):
-        if mae_windows[i][0].shape != expected_shape:
-            invalid_indices.append(i)
-
-    if invalid_indices:
-        print(f"⚠️  Found {len(invalid_indices)} windows with wrong shape, filtering...")
-        from torch.utils.data import Subset
-        valid_indices = [i for i in range(len(mae_windows)) if i not in set(invalid_indices)]
-        mae_windows = Subset(mae_windows, valid_indices)
-        print(f"✅ Filtered dataset: {len(mae_windows):,} valid windows")
-
     # Save to cache for future runs
     print(f"\n💾 Saving to cache...")
     save_windowed_dataset(mae_windows, PRETRAIN_CACHE_DIR, "mae", mae_cache_key)
     print(f"✅ MAE dataset cached - next run will be much faster!")
 else:
-    print(f"✅ Using cached MAE dataset (skipped windowing)")
+    print(f"✅ Using cached MAE dataset")
     print(f"   Total windows: {len(mae_windows):,}")
-
-    # Validate cached dataset shapes
-    expected_shape = (129, int(cfg.window_len * cfg.sfreq))
-    print(f"\n🔍 Validating cached window shapes (expected: {expected_shape})...")
-    invalid_indices = []
-    for i in range(len(mae_windows)):
-        if mae_windows[i][0].shape != expected_shape:
-            invalid_indices.append(i)
-
-    if invalid_indices:
-        print(f"⚠️  Found {len(invalid_indices)} cached windows with wrong shape, filtering...")
-        from torch.utils.data import Subset
-        valid_indices = [i for i in range(len(mae_windows)) if i not in set(invalid_indices)]
-        mae_windows = Subset(mae_windows, valid_indices)
-        print(f"✅ Filtered cached dataset: {len(mae_windows):,} valid windows")
 
 # Wrap with subject metadata for auxiliary loss
 print("\n🔄 Wrapping MAE dataset with subject metadata...")
@@ -1048,23 +1360,36 @@ if mae_val_windows is None:
                     mini=cfg.use_mini,
                     description_fields=["subject", "age", "sex", "p_factor", "attention", "internalizing", "ehq_total"]
                 )
-                windows = create_fixed_length_windows(ds, window_size_samples=int(cfg.window_len * cfg.sfreq),
-                                                     window_stride_samples=int(cfg.window_len * cfg.sfreq),
-                                                     drop_last_window=False, preload=True)
 
-                # Validate window shapes before adding
-                expected_shape = (129, int(cfg.window_len * cfg.sfreq))
-                valid_windows = []
-                invalid_count = 0
-                for w in windows.datasets:
-                    if w[0][0].shape == expected_shape:  # w[0] is the WindowsDataset, w[0][0] is the first window's data
-                        valid_windows.append(w)
-                    else:
-                        invalid_count += 1
+                # Filter out trials shorter than window size
+                min_samples = int(cfg.window_len * cfg.sfreq)
+                original_count = len(ds.datasets)
+                ds = filter_short_trials(ds, min_samples)
+                filtered_count = original_count - len(ds.datasets)
 
-                all_mae_val_windows.extend(valid_windows)
-                if invalid_count > 0:
-                    print(f"    {task}/{release}: {len(valid_windows)} windows ({invalid_count} filtered)")
+                if len(ds.datasets) == 0:
+                    continue  # Skip if all trials too short
+
+                # Window the filtered dataset
+                windows = create_fixed_length_windows(
+                    ds,
+                    window_size_samples=min_samples,
+                    window_stride_samples=min_samples,
+                    drop_last_window=False,
+                    preload=True
+                )
+
+                # Validate channel counts and shape consistency (129 channels x 200 timepoints)
+                windows = validate_windowed_dataset_shapes(windows, expected_n_channels=129, expected_n_times=200)
+
+                if len(windows.datasets) == 0:
+                    continue  # Skip if all recordings filtered
+
+                all_mae_val_windows.extend(windows.datasets)
+
+                # Report results
+                if filtered_count > 0:
+                    print(f"    {task}/{release}: {len(windows)} windows ({filtered_count}/{original_count} trials filtered)")
                 else:
                     print(f"    {task}/{release}: {len(windows)} windows")
             except:
@@ -1072,37 +1397,9 @@ if mae_val_windows is None:
 
     mae_val_windows = BaseConcatDataset(all_mae_val_windows)
 
-    # Final validation for val dataset
-    expected_shape = (129, int(cfg.window_len * cfg.sfreq))
-    invalid_val_indices = []
-    for i in range(len(mae_val_windows)):
-        if mae_val_windows[i][0].shape != expected_shape:
-            invalid_val_indices.append(i)
-
-    if invalid_val_indices:
-        print(f"  ⚠️  Found {len(invalid_val_indices)} validation windows with wrong shape, filtering...")
-        from torch.utils.data import Subset
-        valid_val_indices = [i for i in range(len(mae_val_windows)) if i not in set(invalid_val_indices)]
-        mae_val_windows = Subset(mae_val_windows, valid_val_indices)
-        print(f"  ✅ Filtered validation dataset: {len(mae_val_windows):,} valid windows")
-
     save_windowed_dataset(mae_val_windows, PRETRAIN_CACHE_DIR, "mae_val", mae_val_cache_key)
 else:
     print(f"  ✅ Loaded {len(mae_val_windows)} windows from cache")
-
-    # Validate cached validation dataset shapes
-    expected_shape = (129, int(cfg.window_len * cfg.sfreq))
-    invalid_val_cached_indices = []
-    for i in range(len(mae_val_windows)):
-        if mae_val_windows[i][0].shape != expected_shape:
-            invalid_val_cached_indices.append(i)
-
-    if invalid_val_cached_indices:
-        print(f"  ⚠️  Found {len(invalid_val_cached_indices)} cached validation windows with wrong shape, filtering...")
-        from torch.utils.data import Subset
-        valid_val_cached_indices = [i for i in range(len(mae_val_windows)) if i not in set(invalid_val_cached_indices)]
-        mae_val_windows = Subset(mae_val_windows, valid_val_cached_indices)
-        print(f"  ✅ Filtered cached validation dataset: {len(mae_val_windows):,} valid windows")
 
 # Load validation movie windows with ISC metadata
 print(f"\n📦 Loading validation movie windows with ISC metadata...")
@@ -1209,6 +1506,24 @@ total_params = sum(p.numel() for p in model.parameters())
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"📊 Model parameters: {total_params:,} (trainable: {trainable_params:,})")
 
+# Initialize GradNorm for dynamic loss weight balancing
+if cfg.use_gradnorm:
+    print(f"\\n🎯 Initializing GradNorm for dynamic loss balancing")
+    print(f"   Alpha: {cfg.gradnorm_alpha} (restoring force)")
+    print(f"   Warmup: {cfg.gradnorm_warmup_epochs} epochs")
+    print(f"   Update frequency: every {cfg.gradnorm_update_freq} batches")
+    gradnorm = GradNorm(
+        n_tasks=3,  # MAE, contrastive, auxiliary
+        alpha=cfg.gradnorm_alpha,
+        warmup_epochs=cfg.gradnorm_warmup_epochs,
+        update_freq=cfg.gradnorm_update_freq
+    )
+    # Get shared parameters (context encoder) for gradient norm computation
+    shared_params = list(model.context_encoder.parameters())
+else:
+    gradnorm = None
+    print("\\n📊 Using fixed loss weights (GradNorm disabled)")
+
 # %% Optimizer Factory Functions
 def create_muon_optimizer(model, cfg):
     """Create hybrid Muon + AdamW optimizer for single-GPU training.
@@ -1275,33 +1590,43 @@ def create_muon_optimizer(model, cfg):
 
 # %% Create Optimizer
 # Optimizer and scheduler
-if cfg.use_muon and MUON_AVAILABLE:
-    print("🚀 Using Muon optimizer for 2D weight matrices")
-    optimizer = create_muon_optimizer(model, cfg)
-else:
-    if cfg.use_muon and not MUON_AVAILABLE:
-        print("⚠️  Muon requested but not available. Falling back to AdamW.")
-    print("📊 Using standard AdamW optimizer")
-    optimizer = optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=cfg.learning_rate,
-        weight_decay=cfg.weight_decay
-    )
+print("📊 Using standard AdamW optimizer (stable for multi-task learning)")
+optimizer = optim.AdamW(
+    [p for p in model.parameters() if p.requires_grad],
+    lr=cfg.learning_rate,
+    weight_decay=cfg.weight_decay
+)
 
-scheduler = optim.lr_scheduler.CosineAnnealingLR(
+# Create warmup + cosine annealing scheduler
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+
+# Warmup scheduler: linear ramp from 0 to target LR over warmup_epochs
+warmup_scheduler = LinearLR(
     optimizer,
-    T_max=cfg.n_epochs,
+    start_factor=0.1,  # Start at 10% of target LR
+    end_factor=1.0,    # End at 100% of target LR
+    total_iters=cfg.warmup_epochs
+)
+
+# Main scheduler: cosine annealing after warmup
+main_scheduler = CosineAnnealingLR(
+    optimizer,
+    T_max=cfg.n_epochs - cfg.warmup_epochs,
     eta_min=1e-6
 )
 
+# Combined scheduler: warmup → cosine annealing
+scheduler = SequentialLR(
+    optimizer,
+    schedulers=[warmup_scheduler, main_scheduler],
+    milestones=[cfg.warmup_epochs]
+)
+
+print(f"📈 LR schedule: {cfg.warmup_epochs} epoch warmup → cosine annealing")
+
 # Initialize wandb
 if cfg.use_wandb:
-    # Add Muon tag if using Muon optimizer
-    tags = ["signaljepa", "pretraining", "mae", "contrastive", "auxiliary"]
-    if cfg.use_muon and MUON_AVAILABLE:
-        tags.append("muon")
-    else:
-        tags.append("adamw")
+    tags = ["signaljepa", "pretraining", "mae", "contrastive", "auxiliary", "adamw", "stable"]
 
     wandb.init(
         project="cerebro-signaljepa-pretrain",
@@ -1368,31 +1693,52 @@ def compute_auxiliary_loss(model, X, batch_infos, demographics, aux_config, devi
         preds = aux_preds[head_name][valid_indices]
 
         # Compute loss based on head type
-        if head_config['type'] == 'regression':
-            # Convert numeric targets to float tensor
-            targets_tensor = torch.tensor(targets, device=device, dtype=torch.float32)
-            loss = F.mse_loss(preds.squeeze(), targets_tensor)
-        else:  # classification
-            # Convert sex strings to indices: 'M'=0, 'F'=1
-            if head_name == 'sex':
-                targets_indices = [0 if t == 'M' else 1 for t in targets]
-                targets_tensor = torch.tensor(targets_indices, device=device, dtype=torch.long)
-            else:
-                # Generic classification: assume integer labels
-                targets_tensor = torch.tensor(targets, device=device, dtype=torch.long)
-            loss = F.cross_entropy(preds, targets_tensor)
+        try:
+            if head_config['type'] == 'regression':
+                # Convert numeric targets to float tensor
+                targets_tensor = torch.tensor(targets, device=device, dtype=torch.float32)
+                loss = F.mse_loss(preds.squeeze(), targets_tensor)
+            else:  # classification
+                # Convert sex strings to indices: 'M'=0, 'F'=1
+                if head_name == 'sex':
+                    targets_indices = [0 if t == 'M' else 1 for t in targets]
+                    targets_tensor = torch.tensor(targets_indices, device=device, dtype=torch.long)
+                else:
+                    # Generic classification: assume integer labels
+                    targets_tensor = torch.tensor(targets, device=device, dtype=torch.long)
+                loss = F.cross_entropy(preds, targets_tensor)
 
-        # Add weighted loss
-        total_loss += head_config['weight'] * loss
-        valid_count += 1
+            # Check for NaN/Inf in individual head loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                if not hasattr(compute_auxiliary_loss, f'_warned_{head_name}_nan'):
+                    print(f"⚠️  NaN/Inf in {head_name} loss - skipping this head")
+                    setattr(compute_auxiliary_loss, f'_warned_{head_name}_nan', True)
+                continue  # Skip this head instead of poisoning total
+
+            # Add weighted loss
+            total_loss += head_config['weight'] * loss
+            valid_count += 1
+
+        except Exception as e:
+            # Catch any unexpected errors (tensor shape mismatches, etc.)
+            if not hasattr(compute_auxiliary_loss, f'_warned_{head_name}_error'):
+                print(f"⚠️  Error computing {head_name} loss: {e}")
+                setattr(compute_auxiliary_loss, f'_warned_{head_name}_error', True)
+            continue
 
     # Normalize by number of heads that had valid targets
     if valid_count > 0:
         total_loss = total_loss / valid_count
+    else:
+        # No valid targets in batch - return zero loss with gradient
+        # This prevents NaN propagation when demographic data is sparse
+        total_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
-    # Ensure total_loss is always a tensor (even if 0.0)
-    if not isinstance(total_loss, torch.Tensor):
-        total_loss = torch.tensor(total_loss, device=device)
+        # Warn once about empty batches
+        if not hasattr(compute_auxiliary_loss, '_warned_empty_batch'):
+            print("⚠️  WARNING: Auxiliary loss batch has no valid demographic data")
+            print("   This is expected if subjects lack p_factor/attention/etc.")
+            compute_auxiliary_loss._warned_empty_batch = True
 
     return total_loss
 
@@ -1497,6 +1843,14 @@ best_loss = float('inf')
 patience_counter = 0
 training_history = []
 
+# EMA tracking for loss stability
+loss_ema = None
+loss_ema_alpha = 0.1  # EMA smoothing factor (lower = smoother)
+
+# Checkpoint tracking
+checkpoint_counter = 0
+last_checkpoint_epoch = -1
+
 for epoch in range(cfg.n_epochs):
     print(f"\n📅 Epoch {epoch+1}/{cfg.n_epochs}")
     print("-" * 40)
@@ -1565,16 +1919,79 @@ for epoch in range(cfg.n_epochs):
         # === Auxiliary Step ===
         aux_loss = compute_auxiliary_loss(model, X_mae, batch_infos, demographics, cfg.aux_heads, device)
 
-        # === Combined Loss ===
+        # === GradNorm Weight Update (if enabled) ===
+        if cfg.use_gradnorm and gradnorm is not None:
+            # Update task weights based on gradient norms
+            task_losses = [mae_loss, contrastive_loss, aux_loss]
+            dynamic_weights = gradnorm.update_weights(task_losses, shared_params, epoch)
+
+            # Use dynamic weights for loss combination
+            mae_weight = dynamic_weights[0].item()
+            contrast_weight = dynamic_weights[1].item()
+            aux_weight = dynamic_weights[2].item()
+        else:
+            # Use fixed config weights
+            mae_weight = cfg.mae_loss_weight
+            contrast_weight = cfg.contrastive_loss_weight
+            aux_weight = cfg.auxiliary_loss_weight
+
+        # === Combined Loss with Dynamic/Fixed Weights ===
         total_loss = (
-            cfg.mae_loss_weight * mae_loss +
-            cfg.contrastive_loss_weight * contrastive_loss +
-            cfg.auxiliary_loss_weight * aux_loss
+            mae_weight * mae_loss +
+            contrast_weight * contrastive_loss +
+            aux_weight * aux_loss
         )
+
+        # === NaN Detection (Pre-Backward) ===
+        # Check for NaN/Inf in losses BEFORE backprop
+        if torch.isnan(mae_loss) or torch.isinf(mae_loss):
+            print(f"🛑 NaN/Inf in MAE loss at epoch {epoch+1}, batch {batch_idx}")
+            print(f"   MAE: {mae_loss.item()}, Contrast: {contrastive_loss.item()}, Aux: {aux_loss.item()}")
+            optimizer.zero_grad(set_to_none=True)
+            continue
+
+        if torch.isnan(contrastive_loss) or torch.isinf(contrastive_loss):
+            print(f"🛑 NaN/Inf in contrastive loss at epoch {epoch+1}, batch {batch_idx}")
+            print(f"   MAE: {mae_loss.item()}, Contrast: {contrastive_loss.item()}, Aux: {aux_loss.item()}")
+            optimizer.zero_grad(set_to_none=True)
+            continue
+
+        if torch.isnan(aux_loss) or torch.isinf(aux_loss):
+            print(f"🛑 NaN/Inf in auxiliary loss at epoch {epoch+1}, batch {batch_idx}")
+            print(f"   MAE: {mae_loss.item()}, Contrast: {contrastive_loss.item()}, Aux: {aux_loss.item()}")
+            optimizer.zero_grad(set_to_none=True)
+            continue
+
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            print(f"🛑 NaN/Inf in total loss at epoch {epoch+1}, batch {batch_idx}")
+            print(f"   MAE: {mae_loss.item()}, Contrast: {contrastive_loss.item()}, Aux: {aux_loss.item()}")
+            optimizer.zero_grad(set_to_none=True)
+            continue
 
         # Backward
         optimizer.zero_grad(set_to_none=True)
         total_loss.backward()
+
+        # === NaN Detection (Post-Backward) ===
+        # Check for NaN/Inf in gradients AFTER backprop
+        has_nan_grad = False
+        max_grad_norm = 0.0
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                grad_norm = param.grad.norm().item()
+                max_grad_norm = max(max_grad_norm, grad_norm)
+                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                    print(f"⚠️  NaN/Inf gradient in {name}")
+                    has_nan_grad = True
+
+        if has_nan_grad:
+            print(f"🛑 NaN gradients detected at epoch {epoch+1}, batch {batch_idx}")
+            print(f"   MAE: {mae_loss.item():.4f}, Contrast: {contrastive_loss.item():.4f}, Aux: {aux_loss.item():.4f}")
+            print(f"   Skipping batch to prevent optimizer corruption")
+            optimizer.zero_grad(set_to_none=True)
+            continue
+
+        # Gradient clipping (only if no NaN)
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         optimizer.step()
 
@@ -1591,8 +2008,41 @@ for epoch in range(cfg.n_epochs):
             'mae': f"{mae_loss.item():.4f}",
             'contrast': f"{contrastive_loss.item():.4f}",
             'aux': f"{aux_loss.item():.4f}",
-            'total': f"{total_loss.item():.4f}"
+            'total': f"{total_loss.item():.4f}",
+            'grad': f"{max_grad_norm:.2f}"
         })
+
+        # Periodic detailed monitoring (every 100 batches)
+        if batch_idx % 100 == 0 and cfg.use_wandb:
+            # Compute similarity statistics for monitoring
+            with torch.no_grad():
+                z_anchor_monitor = model.forward_contrastive(anchor)
+                z_positive_monitor = model.forward_contrastive(positive)
+                sim_monitor = torch.mm(z_anchor_monitor, z_positive_monitor.t())
+
+            log_dict = {
+                'batch_mae_loss': mae_loss.item(),
+                'batch_contrastive_loss': contrastive_loss.item(),
+                'batch_auxiliary_loss': aux_loss.item(),
+                'batch_total_loss': total_loss.item(),
+                'max_gradient_norm': max_grad_norm,
+                'similarity_mean': sim_monitor.mean().item(),
+                'similarity_std': sim_monitor.std().item(),
+                'similarity_max': sim_monitor.max().item(),
+                'similarity_min': sim_monitor.min().item(),
+                'batch_idx': batch_idx + epoch * len(mae_loader)
+            }
+
+            # Add GradNorm weights if enabled
+            if cfg.use_gradnorm and gradnorm is not None:
+                log_dict.update({
+                    'gradnorm_mae_weight': mae_weight,
+                    'gradnorm_contrastive_weight': contrast_weight,
+                    'gradnorm_auxiliary_weight': aux_weight,
+                    'gradnorm_active': epoch >= cfg.gradnorm_warmup_epochs
+                })
+
+            wandb.log(log_dict)
 
     # Epoch summary
     avg_mae = np.mean(epoch_losses['mae'])
@@ -1602,11 +2052,18 @@ for epoch in range(cfg.n_epochs):
                  avg_contrast * cfg.contrastive_loss_weight +
                  avg_aux * cfg.auxiliary_loss_weight)
 
+    # Update EMA for loss stability tracking
+    if loss_ema is None:
+        loss_ema = avg_total
+    else:
+        loss_ema = loss_ema_alpha * avg_total + (1 - loss_ema_alpha) * loss_ema
+
     print(f"\n📈 Train Epoch {epoch+1} Summary:")
     print(f"  MAE Loss: {avg_mae:.4f}")
     print(f"  Contrastive Loss: {avg_contrast:.4f}")
     print(f"  Auxiliary Loss: {avg_aux:.4f}")
     print(f"  Total Loss: {avg_total:.4f}")
+    print(f"  Loss EMA: {loss_ema:.4f}")
 
     # Validate
     print(f"\n📊 Running validation...")
@@ -1631,17 +2088,30 @@ for epoch in range(cfg.n_epochs):
     # Log to wandb
     if cfg.use_wandb:
         wandb.log({
-            'train_mae_loss': avg_mae,
-            'train_contrastive_loss': avg_contrast,
-            'train_auxiliary_loss': avg_aux,
-            'train_total_loss': avg_total,
-            'val_mae_loss': val_losses['mae'],
-            'val_contrastive_loss': val_losses['contrastive'],
-            'val_auxiliary_loss': val_losses['auxiliary'],
-            'val_total_loss': val_losses['total'],
-            'lr': optimizer.param_groups[0]['lr'],
-            'epoch': epoch + 1
+            'epoch_train_mae_loss': avg_mae,
+            'epoch_train_contrastive_loss': avg_contrast,
+            'epoch_train_auxiliary_loss': avg_aux,
+            'epoch_train_total_loss': avg_total,
+            'epoch_val_mae_loss': val_losses['mae'],
+            'epoch_val_contrastive_loss': val_losses['contrastive'],
+            'epoch_val_auxiliary_loss': val_losses['auxiliary'],
+            'epoch_val_total_loss': val_losses['total'],
+            'learning_rate': optimizer.param_groups[0]['lr'],
+            'epoch': epoch + 1,
+            # Loss component ratios (for debugging balance)
+            'mae_contribution': (avg_mae * cfg.mae_loss_weight) / avg_total,
+            'contrastive_contribution': (avg_contrast * cfg.contrastive_loss_weight) / avg_total,
+            'auxiliary_contribution': (avg_aux * cfg.auxiliary_loss_weight) / avg_total,
         })
+
+    # Detect loss explosion (safeguard against instability)
+    if loss_ema > 100.0 or (epoch > 10 and val_losses['total'] > 2 * best_loss):
+        print(f"\n🛑 LOSS EXPLOSION DETECTED!")
+        print(f"   Current val loss: {val_losses['total']:.4f}")
+        print(f"   Best val loss: {best_loss:.4f}")
+        print(f"   Loss EMA: {loss_ema:.4f}")
+        print(f"   Training has become unstable. Stopping to prevent divergence.")
+        break
 
     # Save checkpoint based on VALIDATION loss
     if val_losses['total'] < best_loss:
@@ -1655,6 +2125,7 @@ for epoch in range(cfg.n_epochs):
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
             'val_loss': val_losses['total'],
+            'loss_ema': loss_ema,
             'config': vars(cfg),
             'history': training_history
         }
@@ -1670,6 +2141,25 @@ for epoch in range(cfg.n_epochs):
             print(f"   No improvement for {cfg.early_stopping_patience} epochs")
             print(f"   Best Val Loss: {best_loss:.4f}")
             break
+
+    # Periodic checkpoint saving (every 10 epochs) for rollback capability
+    if (epoch + 1) % 10 == 0 and epoch != last_checkpoint_epoch:
+        checkpoint_counter += 1
+        periodic_checkpoint = {
+            'epoch': epoch,
+            'encoder_state_dict': model.context_encoder.state_dict(),
+            'full_model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'val_loss': val_losses['total'],
+            'loss_ema': loss_ema,
+            'config': vars(cfg),
+            'history': training_history
+        }
+        checkpoint_path = cfg.checkpoint_dir / f"checkpoint_epoch{epoch+1:03d}.pt"
+        torch.save(periodic_checkpoint, checkpoint_path)
+        last_checkpoint_epoch = epoch
+        print(f"💾 Periodic checkpoint saved: {checkpoint_path.name}")
 
     # Step scheduler
     scheduler.step()
