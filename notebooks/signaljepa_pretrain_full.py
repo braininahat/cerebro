@@ -101,15 +101,19 @@ class Config:
     temporal_mask_ratio = 0.4  # Mask 40% of time steps
     temporal_mask_span_ms = 200  # Mask spans of 200ms (20 samples @ 100Hz)
 
+    # Feature toggles
+    use_contrastive = False  # Enable/disable contrastive learning (ISC movie pairing)
+    use_auxiliary = False    # Enable/disable all auxiliary demographic heads
+
     # Auxiliary head dimensions
     aux_hidden_dim = 128
     aux_heads = {
-        'age': {'type': 'regression', 'n_outputs': 1, 'weight': 0.15},
-        'sex': {'type': 'classification', 'n_outputs': 2, 'weight': 0.05},
-        'p_factor': {'type': 'regression', 'n_outputs': 1, 'weight': 0.1},  # Safe - C2 is externalizing
-        'attention': {'type': 'regression', 'n_outputs': 1, 'weight': 0.05},
-        'internalizing': {'type': 'regression', 'n_outputs': 1, 'weight': 0.05},
-        'ehq_total': {'type': 'regression', 'n_outputs': 1, 'weight': 0.05},
+        'age': {'type': 'regression', 'n_outputs': 1, 'weight': 0.15, 'enabled': True},
+        'sex': {'type': 'classification', 'n_outputs': 2, 'weight': 0.05, 'enabled': True},
+        'p_factor': {'type': 'regression', 'n_outputs': 1, 'weight': 0.1, 'enabled': True},  # Safe - C2 is externalizing
+        'attention': {'type': 'regression', 'n_outputs': 1, 'weight': 0.05, 'enabled': True},
+        'internalizing': {'type': 'regression', 'n_outputs': 1, 'weight': 0.05, 'enabled': True},
+        'ehq_total': {'type': 'regression', 'n_outputs': 1, 'weight': 0.05, 'enabled': True},
         # EXCLUDED: externalizing (Challenge 2 target), rt_from_stimulus (Challenge 1 target)
     }
 
@@ -122,7 +126,7 @@ class Config:
     # GradNorm - Dynamic loss weight balancing
     use_gradnorm = True  # Enable GradNorm for automatic weight balancing
     gradnorm_alpha = 1.5  # Restoring force strength (1.5 = moderate balancing)
-    gradnorm_warmup_epochs = 5  # Wait 5 epochs before enabling GradNorm
+    gradnorm_warmup_epochs = 0  # Wait 5 epochs before enabling GradNorm
     gradnorm_update_freq = 10  # Update weights every 10 batches
 
     # Contrastive learning (ISC-based pairing)
@@ -135,7 +139,7 @@ class Config:
     val_frac = 0.1  # Fraction of subjects for validation (subject-level split)
 
     # Training
-    batch_size = 128  # MAE batch size
+    batch_size = 512  # MAE batch size
     learning_rate = 0.0003  # AdamW learning rate
     weight_decay = 0.05  # Higher for pretraining
     n_epochs = 200  # Long pretraining
@@ -144,7 +148,7 @@ class Config:
     early_stopping_patience = 15  # Stop if no improvement for 15 epochs
 
     # Optimizer selection
-    use_muon = False  # Disabled for stability (NaN issues with high LR)
+    use_muon = True  # Disabled for stability (NaN issues with high LR)
 
     # Muon hyperparameters (for 2D weight matrices)
     muon_lr = 0.02              # 10-50x higher than AdamW (paper recommendation)
@@ -317,6 +321,23 @@ class SpatialBlockMasker:
 
 
 # %% Auxiliary Prediction Heads
+def filter_enabled_aux_heads(aux_heads_config: Optional[dict]) -> Optional[dict]:
+    """Filter auxiliary heads to only include enabled ones.
+
+    Args:
+        aux_heads_config: Dictionary of auxiliary head configurations
+
+    Returns:
+        Filtered dict with only enabled heads, or None if no heads enabled
+    """
+    if not aux_heads_config:
+        return None
+
+    enabled_heads = {k: v for k, v in aux_heads_config.items() if v.get('enabled', True)}
+
+    return enabled_heads if enabled_heads else None
+
+
 class AuxiliaryHeads(nn.Module):
     """Auxiliary prediction heads for demographic/phenotypic variables.
 
@@ -444,15 +465,23 @@ class SignalJEPAPretrainer(nn.Module):
         )
 
     @torch.no_grad()
-    def update_target_encoder(self):
-        """EMA update of target encoder parameters."""
+    def update_target_encoder(self, momentum: Optional[float] = None):
+        """EMA update of target encoder parameters.
+
+        Args:
+            momentum: Optional EMA momentum. If None, uses self.ema_momentum.
+                     Paper uses cosine schedule: 0.996 → 1.0 over training.
+        """
+        if momentum is None:
+            momentum = self.ema_momentum
+
         for param_c, param_t in zip(
             self.context_encoder.parameters(),
             self.target_encoder.parameters()
         ):
             param_t.data = (
-                self.ema_momentum * param_t.data +
-                (1 - self.ema_momentum) * param_c.data
+                momentum * param_t.data +
+                (1 - momentum) * param_c.data
             )
 
     def forward_mae(
@@ -460,36 +489,66 @@ class SignalJEPAPretrainer(nn.Module):
         x: torch.Tensor,
         spatial_mask: torch.Tensor,
         temporal_mask: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass for MAE reconstruction.
 
         Args:
             x: Input EEG (batch, n_chans, n_times)
-            spatial_mask: Spatial mask (batch, n_chans) - 1 = masked
-            temporal_mask: Temporal mask (batch, n_times) - 1 = masked
+            spatial_mask: Spatial mask (batch, n_chans) - 1 = masked, 0 = visible
+            temporal_mask: Temporal mask (batch, n_times) - 1 = masked, 0 = visible
 
         Returns:
-            predictions: Predicted masked tokens (batch, seq_len, d_model)
-            targets: Target encoder outputs for masked positions (batch, seq_len, d_model)
+            predictions: Predicted tokens (batch, seq_len, d_model)
+            targets: Target encoder outputs (batch, seq_len, d_model)
+            combined_mask: Mask for loss computation (batch, seq_len) - 1 = masked
         """
         batch_size = x.shape[0]
 
+        # Apply masking to input: zero out masked positions
+        # spatial_mask: (batch, n_chans) → (batch, n_chans, 1)
+        # temporal_mask: (batch, n_times) → (batch, 1, n_times)
+        # Broadcasting creates (batch, n_chans, n_times) mask
+        spatial_mask_3d = spatial_mask.unsqueeze(2)  # (batch, n_chans, 1)
+        temporal_mask_3d = temporal_mask.unsqueeze(1)  # (batch, 1, n_times)
+
+        # Combined mask: 1 if EITHER spatial OR temporal is masked (union)
+        input_mask = torch.maximum(spatial_mask_3d, temporal_mask_3d)  # (batch, n_chans, n_times)
+
+        # Apply mask: zero out masked positions for context encoder
+        x_masked = x * (1.0 - input_mask)  # Masked positions become 0
+
         # Get context encoder output on visible tokens
-        # TODO: Apply masking to encoder input
-        context_output = self.context_encoder(x)  # (batch, seq_len, d_model)
+        context_output = self.context_encoder(x_masked)  # (batch, seq_len, d_model)
 
         # Get target encoder output (no masking, all tokens)
         with torch.no_grad():
             target_output = self.target_encoder(x)  # (batch, seq_len, d_model)
 
-        # Create mask tokens for ALL sequence positions
+        # Create sequence-level mask for loss computation
+        # SignalJEPA produces one token per channel, so map spatial mask to sequence
         seq_len = context_output.shape[1]
+
+        # Spatial mask directly maps to sequence positions (one token per channel)
+        # Note: If seq_len != n_chans, this needs adjustment based on encoder architecture
+        if seq_len == spatial_mask.shape[1]:
+            # Direct mapping: each sequence position corresponds to a channel
+            combined_mask = spatial_mask  # (batch, seq_len)
+        else:
+            # Fallback: use spatial mask as proxy (may need refinement)
+            # Interpolate or repeat to match seq_len
+            combined_mask = F.interpolate(
+                spatial_mask.unsqueeze(1).float(),  # (batch, 1, n_chans)
+                size=seq_len,
+                mode='nearest'
+            ).squeeze(1)  # (batch, seq_len)
+
+        # Create mask tokens for ALL sequence positions
         mask_tokens = self.mask_token.expand(batch_size, seq_len, -1)  # (batch, seq_len, d_model)
 
-        # Predict masked tokens using transformer decoder
+        # Predict tokens using transformer decoder (cross-attention with context)
         predictions = self.predictor(mask_tokens, context_output)  # (batch, seq_len, d_model)
 
-        return predictions, target_output
+        return predictions, target_output, combined_mask
 
     def forward_contrastive(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass for contrastive learning.
@@ -550,7 +609,7 @@ class GradNorm:
         update_freq: Update weights every N batches (default=10)
     """
 
-    def __init__(self, n_tasks: int = 3, alpha: float = 1.5, warmup_epochs: int = 5, update_freq: int = 10):
+    def __init__(self, n_tasks: int = 3, alpha: float = 1.5, warmup_epochs: int = 0, update_freq: int = 10):
         self.n_tasks = n_tasks
         self.alpha = alpha
         self.warmup_epochs = warmup_epochs
@@ -1222,64 +1281,70 @@ mae_loader = DataLoader(
 )
 
 # %% Load Data - Contrastive Dataset (ISC-based movie pairing)
-print("\n" + "="*60)
-print("Loading ISC contrastive data (4 movie tasks)")
-print("="*60)
+if cfg.use_contrastive:
+    print("\n" + "="*60)
+    print("Loading ISC contrastive data (4 movie tasks)")
+    print("="*60)
 
-print(f"\n📽️  Movie tasks: {cfg.movie_tasks}")
-print(f"  Train releases: {cfg.train_releases}")
-print(f"  Window length: {cfg.window_len}s, Stride: 1.0s (50% overlap)")
-print(f"  Time bin size: {cfg.time_bin_size_s}s (for ISC pairing)")
-print(f"  ISC strategy: pos={cfg.pos_strategy}, neg={cfg.neg_strategy}")
+    print(f"\n📽️  Movie tasks: {cfg.movie_tasks}")
+    print(f"  Train releases: {cfg.train_releases}")
+    print(f"  Window length: {cfg.window_len}s, Stride: 1.0s (50% overlap)")
+    print(f"  Time bin size: {cfg.time_bin_size_s}s (for ISC pairing)")
+    print(f"  ISC strategy: pos={cfg.pos_strategy}, neg={cfg.neg_strategy}")
 
-# Load and window movies with ISC metadata
-print("\n⏳ Loading movies with ISC metadata...")
-movie_windows = load_and_window_movies(
-    movie_names=cfg.movie_tasks,
-    dataset_class=EEGChallengeDataset,
-    cache_dir=cfg.HBN_ROOT,
-    releases=cfg.train_releases,
-    mini=cfg.use_mini,
-    window_len_s=cfg.window_len,
-    stride_s=1.0,  # 1s stride for more contrastive pairs
-    sfreq=cfg.sfreq,
-    time_bin_size_s=cfg.time_bin_size_s,
-    preload=True
-)
+    # Load and window movies with ISC metadata
+    print("\n⏳ Loading movies with ISC metadata...")
+    movie_windows = load_and_window_movies(
+        movie_names=cfg.movie_tasks,
+        dataset_class=EEGChallengeDataset,
+        cache_dir=cfg.HBN_ROOT,
+        releases=cfg.train_releases,
+        mini=cfg.use_mini,
+        window_len_s=cfg.window_len,
+        stride_s=1.0,  # 1s stride for more contrastive pairs
+        sfreq=cfg.sfreq,
+        time_bin_size_s=cfg.time_bin_size_s,
+        preload=True
+    )
 
-print(f"✅ Loaded {len(movie_windows):,} movie windows with ISC metadata")
+    print(f"✅ Loaded {len(movie_windows):,} movie windows with ISC metadata")
 
-# Wrap with ContrastivePairDataset for ISC-based triplet sampling
-print("\n🔗 Creating ISC triplet dataset...")
-contrastive_dataset = ContrastivePairDataset(
-    movie_windows,
-    pos_strategy=cfg.pos_strategy,  # Same (movie, time_bin), different subjects
-    neg_strategy=cfg.neg_strategy,  # Different movies
-    return_triplets=True,  # Return (anchor, positive, negative)
-    random_state=2025
-)
+    # Wrap with ContrastivePairDataset for ISC-based triplet sampling
+    print("\n🔗 Creating ISC triplet dataset...")
+    contrastive_dataset = ContrastivePairDataset(
+        movie_windows,
+        pos_strategy=cfg.pos_strategy,  # Same (movie, time_bin), different subjects
+        neg_strategy=cfg.neg_strategy,  # Different movies
+        return_triplets=True,  # Return (anchor, positive, negative)
+        random_state=2025
+    )
 
-# Get stats
-stats = contrastive_dataset.get_stats()
-print(f"  ✅ ISC Dataset Statistics:")
-print(f"     Valid anchors: {stats['valid_anchors']:,} (windows with ISC pairs)")
-print(f"     Positive groups: {stats['pos_groups']:,} ((movie, time_bin) combinations)")
-print(f"     Subjects: {stats['subjects']} unique subjects")
-print(f"     Movies: {stats['movies']}")
+    # Get stats
+    stats = contrastive_dataset.get_stats()
+    print(f"  ✅ ISC Dataset Statistics:")
+    print(f"     Valid anchors: {stats['valid_anchors']:,} (windows with ISC pairs)")
+    print(f"     Positive groups: {stats['pos_groups']:,} ((movie, time_bin) combinations)")
+    print(f"     Subjects: {stats['subjects']} unique subjects")
+    print(f"     Movies: {stats['movies']}")
 
-# Create DataLoader for ISC triplets
-contrastive_loader = DataLoader(
-    contrastive_dataset,
-    batch_size=cfg.contrastive_batch_size,
-    shuffle=True,
-    num_workers=cfg.num_workers,
-    pin_memory=True,
-    persistent_workers=True,
-    prefetch_factor=1,
-    collate_fn=collate_triplets  # Handle non-resizable tensor storage
-)
+    # Create DataLoader for ISC triplets
+    contrastive_loader = DataLoader(
+        contrastive_dataset,
+        batch_size=cfg.contrastive_batch_size,
+        shuffle=True,
+        num_workers=cfg.num_workers,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=1,
+        collate_fn=collate_triplets  # Handle non-resizable tensor storage
+    )
 
-print(f"  📦 Contrastive batches: {len(contrastive_loader)} (batch_size={cfg.contrastive_batch_size})")
+    print(f"  📦 Contrastive batches: {len(contrastive_loader)} (batch_size={cfg.contrastive_batch_size})")
+else:
+    print("\n⚠️  Contrastive learning DISABLED (use_contrastive=False)")
+    print("   Skipping movie data loading - using MAE-only training")
+    movie_windows = None
+    contrastive_loader = None
 
 # %% Load Demographics
 print("\n" + "="*60)
@@ -1289,8 +1354,10 @@ print("="*60)
 # Extract demographics from windowed datasets (already in dataset.description)
 demographics = {}
 
-# Collect from both MAE and movie datasets
-all_datasets = list(mae_windows.datasets) + list(movie_windows.datasets)
+# Collect from both MAE and movie datasets (if movie datasets exist)
+all_datasets = list(mae_windows.datasets)
+if movie_windows is not None:
+    all_datasets.extend(list(movie_windows.datasets))
 
 for ds in all_datasets:
     subject = ds.description.get('subject')
@@ -1401,40 +1468,45 @@ if mae_val_windows is None:
 else:
     print(f"  ✅ Loaded {len(mae_val_windows)} windows from cache")
 
-# Load validation movie windows with ISC metadata
-print(f"\n📦 Loading validation movie windows with ISC metadata...")
-movie_val_windows = load_and_window_movies(
-    movie_names=cfg.movie_tasks,
-    dataset_class=EEGChallengeDataset,
-    cache_dir=cfg.HBN_ROOT,
-    releases=cfg.val_releases,
-    mini=cfg.use_mini,
-    window_len_s=cfg.window_len,
-    stride_s=1.0,
-    sfreq=cfg.sfreq,
-    time_bin_size_s=cfg.time_bin_size_s,
-    preload=True
-)
-print(f"  ✅ Loaded {len(movie_val_windows)} validation movie windows")
+# Load validation movie windows with ISC metadata (if contrastive enabled)
+if cfg.use_contrastive:
+    print(f"\n📦 Loading validation movie windows with ISC metadata...")
+    movie_val_windows = load_and_window_movies(
+        movie_names=cfg.movie_tasks,
+        dataset_class=EEGChallengeDataset,
+        cache_dir=cfg.HBN_ROOT,
+        releases=cfg.val_releases,
+        mini=cfg.use_mini,
+        window_len_s=cfg.window_len,
+        stride_s=1.0,
+        sfreq=cfg.sfreq,
+        time_bin_size_s=cfg.time_bin_size_s,
+        preload=True
+    )
+    print(f"  ✅ Loaded {len(movie_val_windows)} validation movie windows")
 
-# Wrap with ContrastivePairDataset for ISC validation
-print("\n🔗 Creating validation ISC triplet dataset...")
-contrastive_val_dataset = ContrastivePairDataset(
-    movie_val_windows,
-    pos_strategy=cfg.pos_strategy,
-    neg_strategy=cfg.neg_strategy,
-    return_triplets=True,
-    random_state=2025
-)
+    # Wrap with ContrastivePairDataset for ISC validation
+    print("\n🔗 Creating validation ISC triplet dataset...")
+    contrastive_val_dataset = ContrastivePairDataset(
+        movie_val_windows,
+        pos_strategy=cfg.pos_strategy,
+        neg_strategy=cfg.neg_strategy,
+        return_triplets=True,
+        random_state=2025
+    )
 
-# Get validation ISC stats
-val_stats = contrastive_val_dataset.get_stats()
-print(f"  ✅ Validation ISC Statistics:")
-print(f"     Valid anchors: {val_stats['valid_anchors']:,}")
-print(f"     Positive groups: {val_stats['pos_groups']:,}")
-print(f"     Subjects: {val_stats['subjects']}")
+    # Get validation ISC stats
+    val_stats = contrastive_val_dataset.get_stats()
+    print(f"  ✅ Validation ISC Statistics:")
+    print(f"     Valid anchors: {val_stats['valid_anchors']:,}")
+    print(f"     Positive groups: {val_stats['pos_groups']:,}")
+    print(f"     Subjects: {val_stats['subjects']}")
 
-print(f"\n✅ Validation data ready: {len(mae_val_windows)} MAE windows, {len(movie_val_windows)} movie windows")
+    print(f"\n✅ Validation data ready: {len(mae_val_windows)} MAE windows, {len(movie_val_windows)} movie windows")
+else:
+    movie_val_windows = None
+    contrastive_val_dataset = None
+    print(f"\n✅ Validation data ready: {len(mae_val_windows)} MAE windows (contrastive disabled)")
 
 # Wrap validation MAE dataset with subject metadata for auxiliary loss
 print("\n🔄 Wrapping validation MAE dataset with subject metadata...")
@@ -1453,19 +1525,22 @@ mae_val_loader = DataLoader(
     collate_fn=collate_with_metadata  # Preserve metadata as list of dicts
 )
 
-contrastive_val_loader = DataLoader(
-    contrastive_val_dataset,  # Use ISC triplet dataset
-    batch_size=cfg.contrastive_batch_size,
-    shuffle=False,  # No shuffle for validation
-    num_workers=cfg.num_workers,
-    pin_memory=True,
-    persistent_workers=True,
-    prefetch_factor=1,
-    collate_fn=collate_triplets  # Handle non-resizable tensor storage
-)
-
-print(f"  Val MAE batches: {len(mae_val_loader)}")
-print(f"  Val contrastive batches: {len(contrastive_val_loader)}")
+if cfg.use_contrastive and contrastive_val_dataset is not None:
+    contrastive_val_loader = DataLoader(
+        contrastive_val_dataset,  # Use ISC triplet dataset
+        batch_size=cfg.contrastive_batch_size,
+        shuffle=False,  # No shuffle for validation
+        num_workers=cfg.num_workers,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=1,
+        collate_fn=collate_triplets  # Handle non-resizable tensor storage
+    )
+    print(f"  Val MAE batches: {len(mae_val_loader)}")
+    print(f"  Val contrastive batches: {len(contrastive_val_loader)}")
+else:
+    contrastive_val_loader = None
+    print(f"  Val MAE batches: {len(mae_val_loader)}")
 
 # %% Initialize Model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1487,6 +1562,18 @@ temporal_masker = TemporalBlockMasker(
 )
 
 # Initialize model
+# Filter auxiliary heads: respect use_auxiliary flag and individual enabled flags
+if cfg.use_auxiliary and demographics is not None:
+    filtered_aux_config = filter_enabled_aux_heads(cfg.aux_heads)
+    if filtered_aux_config:
+        print(f"📋 Auxiliary heads enabled: {list(filtered_aux_config.keys())}")
+    else:
+        print("⚠️  All auxiliary heads disabled via 'enabled' flags")
+else:
+    filtered_aux_config = None
+    if not cfg.use_auxiliary:
+        print("⚠️  Auxiliary heads DISABLED (use_auxiliary=False)")
+
 model = SignalJEPAPretrainer(
     n_chans=cfg.n_channels,
     n_times=cfg.n_times,
@@ -1499,7 +1586,7 @@ model = SignalJEPAPretrainer(
     dropout=cfg.dropout,
     ema_momentum=cfg.ema_momentum,
     predictor_depth=cfg.predictor_depth,
-    aux_heads_config=cfg.aux_heads if demographics is not None else None,
+    aux_heads_config=filtered_aux_config,
 ).to(device)
 
 total_params = sum(p.numel() for p in model.parameters())
@@ -1508,12 +1595,26 @@ print(f"📊 Model parameters: {total_params:,} (trainable: {trainable_params:,}
 
 # Initialize GradNorm for dynamic loss weight balancing
 if cfg.use_gradnorm:
-    print(f"\\n🎯 Initializing GradNorm for dynamic loss balancing")
+    # Dynamically compute number of tasks based on enabled features
+    n_tasks = 1  # Always have MAE
+    task_names = ["MAE"]
+
+    if cfg.use_contrastive:
+        n_tasks += 1
+        task_names.append("Contrastive")
+
+    if filtered_aux_config is not None:
+        n_tasks += 1
+        task_names.append("Auxiliary")
+
+    print(f"\n🎯 Initializing GradNorm for dynamic loss balancing")
+    print(f"   Tasks: {', '.join(task_names)} (n={n_tasks})")
     print(f"   Alpha: {cfg.gradnorm_alpha} (restoring force)")
     print(f"   Warmup: {cfg.gradnorm_warmup_epochs} epochs")
     print(f"   Update frequency: every {cfg.gradnorm_update_freq} batches")
+
     gradnorm = GradNorm(
-        n_tasks=3,  # MAE, contrastive, auxiliary
+        n_tasks=n_tasks,
         alpha=cfg.gradnorm_alpha,
         warmup_epochs=cfg.gradnorm_warmup_epochs,
         update_freq=cfg.gradnorm_update_freq
@@ -1522,7 +1623,8 @@ if cfg.use_gradnorm:
     shared_params = list(model.context_encoder.parameters())
 else:
     gradnorm = None
-    print("\\n📊 Using fixed loss weights (GradNorm disabled)")
+    shared_params = None  # Not used when GradNorm disabled
+    print("\n📊 Using fixed loss weights (GradNorm disabled)")
 
 # %% Optimizer Factory Functions
 def create_muon_optimizer(model, cfg):
@@ -1755,9 +1857,13 @@ def validate_epoch(model, mae_loader, contrastive_loader, device, cfg, demograph
     }
 
     with torch.no_grad():
-        # Create iterator for contrastive loader
-        contrastive_iter = iter(contrastive_loader)
-        n_batches = min(len(mae_loader), len(contrastive_loader))
+        # Create iterator for contrastive loader (if enabled)
+        if contrastive_loader is not None:
+            contrastive_iter = iter(contrastive_loader)
+            n_batches = min(len(mae_loader), len(contrastive_loader))
+        else:
+            contrastive_iter = None
+            n_batches = len(mae_loader)
 
         for batch_idx, mae_batch in enumerate(mae_loader):
             if batch_idx >= n_batches:
@@ -1773,42 +1879,58 @@ def validate_epoch(model, mae_loader, contrastive_loader, device, cfg, demograph
             temporal_mask = temporal_masker.get_batch_masks(batch_size, device)
 
             # Forward MAE
-            predictions, targets = model.forward_mae(X_mae, spatial_mask, temporal_mask)
-            mae_loss = F.l1_loss(predictions, targets)
+            predictions, targets, mask = model.forward_mae(X_mae, spatial_mask, temporal_mask)
+
+            # L1 loss on masked tokens only
+            mask_expanded = mask.unsqueeze(-1).expand_as(predictions)
+            if mask.sum() > 0:
+                mae_loss = (F.l1_loss(predictions, targets, reduction='none') * mask_expanded).sum() / mask_expanded.sum()
+            else:
+                mae_loss = F.l1_loss(predictions, targets)
 
             # === Contrastive Step (ISC Triplets) ===
-            try:
-                contrast_batch = next(contrastive_iter)
-            except StopIteration:
-                contrastive_iter = iter(contrastive_loader)
-                contrast_batch = next(contrastive_iter)
+            if contrastive_loader is not None:
+                try:
+                    contrast_batch = next(contrastive_iter)
+                except StopIteration:
+                    contrastive_iter = iter(contrastive_loader)
+                    contrast_batch = next(contrastive_iter)
 
-            # Unpack ISC triplets: (anchor, positive, negative)
-            anchor, positive, negative = contrast_batch
-            anchor = anchor.to(device, dtype=torch.float32)
-            positive = positive.to(device, dtype=torch.float32)
-            negative = negative.to(device, dtype=torch.float32)
+                # Unpack ISC triplets: (anchor, positive, negative)
+                anchor, positive, negative = contrast_batch
+                anchor = anchor.to(device, dtype=torch.float32)
+                positive = positive.to(device, dtype=torch.float32)
+                negative = negative.to(device, dtype=torch.float32)
 
-            # Forward through encoder
-            z_anchor = model.forward_contrastive(anchor)
-            z_positive = model.forward_contrastive(positive)
-            z_negative = model.forward_contrastive(negative)
+                # Forward through encoder
+                z_anchor = model.forward_contrastive(anchor)
+                z_positive = model.forward_contrastive(positive)
+                z_negative = model.forward_contrastive(negative)
 
-            # InfoNCE with optional hard negatives
-            contrastive_loss = info_nce_loss(
-                z_anchor, z_positive, cfg.temperature,
-                z_neg=z_negative,
-                use_hard_negative=cfg.use_triplet_negatives
-            )
+                # InfoNCE with optional hard negatives
+                contrastive_loss = info_nce_loss(
+                    z_anchor, z_positive, cfg.temperature,
+                    z_neg=z_negative,
+                    use_hard_negative=cfg.use_triplet_negatives
+                )
+            else:
+                contrastive_loss = torch.tensor(0.0, device=device)
 
             # === Auxiliary Step ===
-            aux_loss = compute_auxiliary_loss(model, X_mae, batch_infos, demographics, aux_config, device)
+            if aux_config is not None:
+                aux_loss = compute_auxiliary_loss(model, X_mae, batch_infos, demographics, aux_config, device)
+            else:
+                aux_loss = torch.tensor(0.0, device=device)
 
             # === Combined Loss ===
+            mae_weight = cfg.mae_loss_weight
+            contrast_weight = cfg.contrastive_loss_weight if contrastive_loader is not None else 0.0
+            aux_weight = cfg.auxiliary_loss_weight if aux_config is not None else 0.0
+
             total_loss = (
-                cfg.mae_loss_weight * mae_loss +
-                cfg.contrastive_loss_weight * contrastive_loss +
-                cfg.auxiliary_loss_weight * aux_loss
+                mae_weight * mae_loss +
+                contrast_weight * contrastive_loss +
+                aux_weight * aux_loss
             )
 
             # Track
@@ -1824,6 +1946,28 @@ def validate_epoch(model, mae_loader, contrastive_loader, device, cfg, demograph
         'auxiliary': np.mean(epoch_losses['auxiliary']),
         'total': np.mean(epoch_losses['total'])
     }
+
+# %% EMA Momentum Schedule
+def get_ema_momentum(current_epoch: int, max_epochs: int, start: float = 0.996, end: float = 1.0) -> float:
+    """Compute EMA momentum using cosine schedule.
+
+    Paper (S-JEPA): "exponential moving average (EMA) with cosine schedule"
+    Schedules momentum from start to end over training.
+
+    Args:
+        current_epoch: Current epoch (0-indexed)
+        max_epochs: Total number of epochs
+        start: Starting momentum (default: 0.996)
+        end: Ending momentum (default: 1.0)
+
+    Returns:
+        Current EMA momentum value
+    """
+    # Cosine annealing: smoothly transitions from start to end
+    progress = current_epoch / max(1, max_epochs - 1)  # 0 to 1
+    cosine_factor = 0.5 * (1 + math.cos(math.pi * progress))  # 1 to 0
+    momentum = end + (start - end) * cosine_factor
+    return momentum
 
 # %% Training Loop
 print("\n" + "="*60)
@@ -1864,9 +2008,14 @@ for epoch in range(cfg.n_epochs):
 
     # Alternate between MAE and contrastive batches
     mae_iter = iter(mae_loader)
-    contrastive_iter = iter(contrastive_loader)
 
-    n_batches = min(len(mae_loader), len(contrastive_loader))
+    if contrastive_loader is not None:
+        contrastive_iter = iter(contrastive_loader)
+        n_batches = min(len(mae_loader), len(contrastive_loader))
+    else:
+        contrastive_iter = None
+        n_batches = len(mae_loader)
+
     pbar = tqdm(range(n_batches), desc=f"Epoch {epoch+1}")
 
     for batch_idx in pbar:
@@ -1886,54 +2035,104 @@ for epoch in range(cfg.n_epochs):
         temporal_mask = temporal_masker.get_batch_masks(batch_size, device)
 
         # Forward MAE
-        predictions, targets = model.forward_mae(X_mae, spatial_mask, temporal_mask)
+        predictions, targets, mask = model.forward_mae(X_mae, spatial_mask, temporal_mask)
 
-        # L1 loss on masked tokens
-        mae_loss = F.l1_loss(predictions, targets)
+        # === VERIFICATION: Print masking statistics for first batch ===
+        if epoch == 0 and batch_idx == 0:
+            print(f"\n{'='*60}")
+            print("🔍 MASKING VERIFICATION (First Batch)")
+            print(f"{'='*60}")
+            print(f"  Input shape: {X_mae.shape}")
+            print(f"  Spatial mask shape: {spatial_mask.shape}, masked channels: {spatial_mask[0].sum().item():.0f}/{spatial_mask.shape[1]}")
+            print(f"  Temporal mask shape: {temporal_mask.shape}, masked timepoints: {temporal_mask[0].sum().item():.0f}/{temporal_mask.shape[1]}")
+            print(f"  Sequence mask shape: {mask.shape}, masked tokens: {mask[0].sum().item():.0f}/{mask.shape[1]}")
+            print(f"  Predictions shape: {predictions.shape}")
+            print(f"  Targets shape: {targets.shape}")
+            print(f"  Masked token ratio: {mask.float().mean().item():.2%}")
+            print(f"{'='*60}\n")
+
+        # L1 loss on masked tokens only
+        # mask: (batch, seq_len) where 1 = masked, 0 = visible
+        # Expand mask to match prediction dimensions: (batch, seq_len, d_model)
+        mask_expanded = mask.unsqueeze(-1).expand_as(predictions)
+
+        # Compute loss only on masked positions
+        if mask.sum() > 0:  # Ensure we have masked tokens
+            mae_loss = (F.l1_loss(predictions, targets, reduction='none') * mask_expanded).sum() / mask_expanded.sum()
+        else:
+            # No masked tokens (shouldn't happen, but handle gracefully)
+            mae_loss = F.l1_loss(predictions, targets)
 
         # === Contrastive Step (ISC Triplets) ===
-        try:
-            contrast_batch = next(contrastive_iter)
-        except StopIteration:
-            contrastive_iter = iter(contrastive_loader)
-            contrast_batch = next(contrastive_iter)
+        if cfg.use_contrastive and contrastive_loader is not None:
+            try:
+                contrast_batch = next(contrastive_iter)
+            except StopIteration:
+                contrastive_iter = iter(contrastive_loader)
+                contrast_batch = next(contrastive_iter)
 
-        # Unpack ISC triplets: (anchor, positive, negative)
-        anchor, positive, negative = contrast_batch
-        anchor = anchor.to(device, dtype=torch.float32)
-        positive = positive.to(device, dtype=torch.float32)
-        negative = negative.to(device, dtype=torch.float32)
+            # Unpack ISC triplets: (anchor, positive, negative)
+            anchor, positive, negative = contrast_batch
+            anchor = anchor.to(device, dtype=torch.float32)
+            positive = positive.to(device, dtype=torch.float32)
+            negative = negative.to(device, dtype=torch.float32)
 
-        # Forward through encoder
-        z_anchor = model.forward_contrastive(anchor)
-        z_positive = model.forward_contrastive(positive)
-        z_negative = model.forward_contrastive(negative)
+            # Forward through encoder
+            z_anchor = model.forward_contrastive(anchor)
+            z_positive = model.forward_contrastive(positive)
+            z_negative = model.forward_contrastive(negative)
 
-        # InfoNCE with optional hard negatives
-        contrastive_loss = info_nce_loss(
-            z_anchor, z_positive, cfg.temperature,
-            z_neg=z_negative,
-            use_hard_negative=cfg.use_triplet_negatives
-        )
+            # InfoNCE with optional hard negatives
+            contrastive_loss = info_nce_loss(
+                z_anchor, z_positive, cfg.temperature,
+                z_neg=z_negative,
+                use_hard_negative=cfg.use_triplet_negatives
+            )
+        else:
+            # Contrastive disabled - set to zero
+            contrastive_loss = torch.tensor(0.0, device=device)
+            z_anchor = z_positive = z_negative = None
 
         # === Auxiliary Step ===
-        aux_loss = compute_auxiliary_loss(model, X_mae, batch_infos, demographics, cfg.aux_heads, device)
+        if cfg.use_auxiliary and filtered_aux_config is not None:
+            aux_loss = compute_auxiliary_loss(model, X_mae, batch_infos, demographics, filtered_aux_config, device)
+        else:
+            # Auxiliary disabled - set to zero
+            aux_loss = torch.tensor(0.0, device=device)
 
         # === GradNorm Weight Update (if enabled) ===
         if cfg.use_gradnorm and gradnorm is not None:
+            # Build task_losses list based on enabled tasks
+            task_losses = [mae_loss]
+
+            if cfg.use_contrastive:
+                task_losses.append(contrastive_loss)
+
+            if filtered_aux_config is not None:
+                task_losses.append(aux_loss)
+
             # Update task weights based on gradient norms
-            task_losses = [mae_loss, contrastive_loss, aux_loss]
             dynamic_weights = gradnorm.update_weights(task_losses, shared_params, epoch)
 
-            # Use dynamic weights for loss combination
+            # Extract weights (order: MAE, [Contrastive], [Auxiliary])
             mae_weight = dynamic_weights[0].item()
-            contrast_weight = dynamic_weights[1].item()
-            aux_weight = dynamic_weights[2].item()
+
+            weight_idx = 1
+            if cfg.use_contrastive:
+                contrast_weight = dynamic_weights[weight_idx].item()
+                weight_idx += 1
+            else:
+                contrast_weight = 0.0
+
+            if filtered_aux_config is not None:
+                aux_weight = dynamic_weights[weight_idx].item()
+            else:
+                aux_weight = 0.0
         else:
-            # Use fixed config weights
+            # Use fixed config weights (respect enabled flags)
             mae_weight = cfg.mae_loss_weight
-            contrast_weight = cfg.contrastive_loss_weight
-            aux_weight = cfg.auxiliary_loss_weight
+            contrast_weight = cfg.contrastive_loss_weight if cfg.use_contrastive else 0.0
+            aux_weight = cfg.auxiliary_loss_weight if filtered_aux_config is not None else 0.0
 
         # === Combined Loss with Dynamic/Fixed Weights ===
         total_loss = (
@@ -1995,8 +2194,10 @@ for epoch in range(cfg.n_epochs):
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         optimizer.step()
 
-        # Update target encoder
-        model.update_target_encoder()
+        # Update target encoder with scheduled EMA momentum
+        # Paper uses cosine schedule: 0.996 → 1.0 over training
+        current_momentum = get_ema_momentum(epoch, cfg.n_epochs)
+        model.update_target_encoder(momentum=current_momentum)
 
         # Track losses
         epoch_losses['mae'].append(mae_loss.item())
@@ -2009,29 +2210,35 @@ for epoch in range(cfg.n_epochs):
             'contrast': f"{contrastive_loss.item():.4f}",
             'aux': f"{aux_loss.item():.4f}",
             'total': f"{total_loss.item():.4f}",
-            'grad': f"{max_grad_norm:.2f}"
+            'grad': f"{max_grad_norm:.2f}",
+            'ema_mom': f"{current_momentum:.4f}"
         })
 
         # Periodic detailed monitoring (every 100 batches)
         if batch_idx % 100 == 0 and cfg.use_wandb:
-            # Compute similarity statistics for monitoring
-            with torch.no_grad():
-                z_anchor_monitor = model.forward_contrastive(anchor)
-                z_positive_monitor = model.forward_contrastive(positive)
-                sim_monitor = torch.mm(z_anchor_monitor, z_positive_monitor.t())
-
             log_dict = {
                 'batch_mae_loss': mae_loss.item(),
                 'batch_contrastive_loss': contrastive_loss.item(),
                 'batch_auxiliary_loss': aux_loss.item(),
                 'batch_total_loss': total_loss.item(),
                 'max_gradient_norm': max_grad_norm,
-                'similarity_mean': sim_monitor.mean().item(),
-                'similarity_std': sim_monitor.std().item(),
-                'similarity_max': sim_monitor.max().item(),
-                'similarity_min': sim_monitor.min().item(),
+                'ema_momentum': current_momentum,
                 'batch_idx': batch_idx + epoch * len(mae_loader)
             }
+
+            # Compute similarity statistics (only if contrastive enabled)
+            if cfg.use_contrastive and z_anchor is not None:
+                with torch.no_grad():
+                    z_anchor_monitor = model.forward_contrastive(anchor)
+                    z_positive_monitor = model.forward_contrastive(positive)
+                    sim_monitor = torch.mm(z_anchor_monitor, z_positive_monitor.t())
+
+                log_dict.update({
+                    'similarity_mean': sim_monitor.mean().item(),
+                    'similarity_std': sim_monitor.std().item(),
+                    'similarity_max': sim_monitor.max().item(),
+                    'similarity_min': sim_monitor.min().item(),
+                })
 
             # Add GradNorm weights if enabled
             if cfg.use_gradnorm and gradnorm is not None:
@@ -2067,7 +2274,7 @@ for epoch in range(cfg.n_epochs):
 
     # Validate
     print(f"\n📊 Running validation...")
-    val_losses = validate_epoch(model, mae_val_loader, contrastive_val_loader, device, cfg, demographics, cfg.aux_heads)
+    val_losses = validate_epoch(model, mae_val_loader, contrastive_val_loader, device, cfg, demographics, filtered_aux_config)
     print(f"  Val MAE Loss: {val_losses['mae']:.4f}")
     print(f"  Val Contrastive Loss: {val_losses['contrastive']:.4f}")
     print(f"  Val Auxiliary Loss: {val_losses['auxiliary']:.4f}")
