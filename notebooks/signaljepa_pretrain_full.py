@@ -102,11 +102,14 @@ class Config:
     temporal_mask_span_ms = 200  # Mask spans of 200ms (20 samples @ 100Hz)
 
     # Feature toggles
+    use_mae = False  # Enable/disable MAE reconstruction (spatial+temporal masking)
     use_contrastive = False  # Enable/disable contrastive learning (ISC movie pairing)
-    use_auxiliary = False    # Enable/disable all auxiliary demographic heads
+    use_auxiliary = True    # Enable/disable all auxiliary demographic heads
 
     # Auxiliary head dimensions
     aux_hidden_dim = 128
+    use_separable_aux_heads = True  # Use SignalJEPA-style Conv3d heads (vs simple MLPs)
+    aux_n_spat_filters = 4  # Spatial filters per head (4-16 typical range)
     aux_heads = {
         'age': {'type': 'regression', 'n_outputs': 1, 'weight': 0.15, 'enabled': True},
         'sex': {'type': 'classification', 'n_outputs': 2, 'weight': 0.05, 'enabled': True},
@@ -142,7 +145,7 @@ class Config:
     batch_size = 512  # MAE batch size
     learning_rate = 0.0003  # AdamW learning rate
     weight_decay = 0.05  # Higher for pretraining
-    n_epochs = 200  # Long pretraining
+    n_epochs = 1  # Long pretraining
     warmup_epochs = 10
     grad_clip = 1.0
     early_stopping_patience = 15  # Stop if no improvement for 15 epochs
@@ -161,8 +164,13 @@ class Config:
     adamw_aux_betas = (0.9, 0.95)  # AdamW betas (informational - uses default)
     adamw_aux_weight_decay = 0.01  # Match Muon weight decay
 
+    # Differential learning rates & encoder freezing
+    encoder_lr_multiplier: float = 0.1  # Encoder LR = muon_lr * multiplier (e.g., 0.1 = 10x slower)
+    freeze_encoder: bool = False  # Freeze encoder weights completely (requires_grad=False)
+    freeze_encoder_epochs: int = 0  # Auto-unfreeze after N epochs (0 = never auto-unfreeze)
+
     # Data loading
-    num_workers = 32
+    num_workers = 16
     window_len = 2.0  # seconds
     sfreq = 100
 
@@ -194,10 +202,31 @@ class Config:
     use_wandb = True
     experiment_name = f"signaljepa_pretrain_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+    # Checkpoint loading (for progressive training: MAE → +Contrastive → +Aux)
+    pretrained_checkpoint_path: Optional[str] = "/home/varun/repos/cerebro/cache/signaljepa_pretrain/base_mae_1/best_pretrain.pt"  # Path to pretrained checkpoint
+    # "/home/varun/repos/cerebro/cache/signaljepa_pretrain/base_mae_1/best_pretrain.pt"
+    load_encoder_only: bool = True  # Only load encoder weights (not optimizer/scheduler)
+
     # Output
     checkpoint_dir = CACHE_PATH / "signaljepa_pretrain" / experiment_name
 
 cfg = Config()
+
+# Validation: Ensure at least one loss is enabled
+if not cfg.use_mae and not cfg.use_contrastive and not cfg.use_auxiliary:
+    raise ValueError(
+        "At least one of use_mae, use_contrastive, or use_auxiliary must be enabled! "
+        "All training objectives are currently disabled."
+    )
+
+# Validation: Ensure frozen encoder has trainable components
+if cfg.freeze_encoder:
+    if not cfg.use_mae and not cfg.use_contrastive and not cfg.use_auxiliary:
+        raise ValueError(
+            "Encoder is frozen but no training objectives are enabled! "
+            "Enable at least one of: use_mae, use_contrastive, or use_auxiliary."
+        )
+
 cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
 # Set seeds
@@ -218,6 +247,20 @@ print(f"  Using mini: {cfg.use_mini}")
 print(f"  MAE batch size: {cfg.batch_size}")
 print(f"  Contrastive batch size: {cfg.contrastive_batch_size}")
 print(f"  Model: SignalJEPA with {cfg.transformer_num_encoder_layers} encoder layers")
+
+# %% Helper Functions
+
+def set_encoder_frozen(model, frozen: bool):
+    """Freeze or unfreeze encoder parameters.
+
+    Args:
+        model: SignalJEPA model with context_encoder and target_encoder
+        frozen: If True, set requires_grad=False (freeze). If False, set requires_grad=True (unfreeze).
+    """
+    for param in model.context_encoder.parameters():
+        param.requires_grad = not frozen
+    for param in model.target_encoder.parameters():
+        param.requires_grad = not frozen
 
 # %% Temporal Masking Implementation
 class TemporalBlockMasker:
@@ -338,34 +381,139 @@ def filter_enabled_aux_heads(aux_heads_config: Optional[dict]) -> Optional[dict]
     return enabled_heads if enabled_heads else None
 
 
+# %% Separable Auxiliary Head (SignalJEPA-style)
+class SeparableAuxiliaryHead(nn.Module):
+    """SignalJEPA-style separable head with Conv3d spatial filtering.
+
+    Architecture:
+        1. Rearrange: (batch, n_chans, d_model) → (batch, 1, n_chans, 1, d_model)
+        2. Conv3d: Learn spatial aggregation across channels
+        3. Flatten: Prepare for final linear layer
+        4. Linear: Output prediction
+
+    This matches the head architecture used in SignalJEPA_Contextual and
+    SignalJEPA_PostLocal from braindecode, allowing task-specific spatial
+    learning while maintaining a shared encoder.
+    """
+
+    def __init__(
+        self,
+        n_chans: int,
+        d_model: int,
+        n_outputs: int,
+        n_spat_filters: int = 4,
+    ):
+        """Initialize separable auxiliary head.
+
+        Args:
+            n_chans: Number of EEG channels (e.g., 129 for HBN)
+            d_model: Feature dimension per channel (from encoder)
+            n_outputs: Output dimension (1 for regression, n_classes for classification)
+            n_spat_filters: Number of spatial filters (default: 4, range: 4-16)
+        """
+        super().__init__()
+        from einops.layers.torch import Rearrange
+
+        self.n_chans = n_chans
+        self.d_model = d_model
+        self.n_outputs = n_outputs
+        self.n_spat_filters = n_spat_filters
+
+        # Output embedding dimension after spatial filtering
+        out_emb_dim = n_spat_filters * d_model
+
+        self.head = nn.Sequential(
+            # Reshape: (batch, n_chans, d_model) → (batch, 1, n_chans, 1, d_model)
+            Rearrange("b (n_chans tokens) d -> b 1 n_chans tokens d",
+                     n_chans=n_chans, tokens=1),
+
+            # Spatial filtering: Learn channel aggregation patterns
+            # (batch, 1, n_chans, 1, d_model) → (batch, n_spat_filters, 1, 1, d_model)
+            nn.Conv3d(1, n_spat_filters, kernel_size=(n_chans, 1, 1)),
+
+            # Flatten: (batch, n_spat_filters, 1, 1, d_model) → (batch, n_spat_filters * d_model)
+            nn.Flatten(start_dim=1),
+
+            # Output layer
+            nn.Linear(out_emb_dim, n_outputs),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through separable head.
+
+        Args:
+            x: Encoder output (batch, n_chans, d_model)
+
+        Returns:
+            Predictions (batch, n_outputs)
+        """
+        return self.head(x)
+
+
 class AuxiliaryHeads(nn.Module):
     """Auxiliary prediction heads for demographic/phenotypic variables.
 
     Trained jointly with MAE to organize latent space by demographics.
+
+    Supports two architectures:
+    - Simple MLP: 2-layer feedforward (for flattened embeddings)
+    - Separable: SignalJEPA-style Conv3d spatial filtering (for channel-wise features)
     """
 
-    def __init__(self, input_dim: int, heads_config: dict):
+    def __init__(
+        self,
+        input_dim: int,
+        heads_config: dict,
+        use_separable: bool = False,
+        n_chans: Optional[int] = None,
+        n_spat_filters: int = 4,
+    ):
+        """Initialize auxiliary heads.
+
+        Args:
+            input_dim: Input feature dimension (d_model for separable, flattened dim for MLP)
+            heads_config: Dictionary of head configurations {name: {type, n_outputs, ...}}
+            use_separable: Use SignalJEPA-style Conv3d heads (vs simple MLPs)
+            n_chans: Number of EEG channels (required if use_separable=True)
+            n_spat_filters: Spatial filters per head (default: 4, only used if separable)
+        """
         super().__init__()
         self.heads_config = heads_config
+        self.use_separable = use_separable
         self.heads = nn.ModuleDict()
 
-        for name, config in heads_config.items():
-            # Two-layer MLP for each head
-            self.heads[name] = nn.Sequential(
-                nn.Linear(input_dim, 128),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(128, config['n_outputs'])
-            )
+        if use_separable:
+            if n_chans is None:
+                raise ValueError("n_chans must be provided when use_separable=True")
+
+            # Create separable heads with Conv3d spatial filtering
+            for name, config in heads_config.items():
+                self.heads[name] = SeparableAuxiliaryHead(
+                    n_chans=n_chans,
+                    d_model=input_dim,
+                    n_outputs=config['n_outputs'],
+                    n_spat_filters=n_spat_filters,
+                )
+        else:
+            # Create simple 2-layer MLP heads
+            for name, config in heads_config.items():
+                self.heads[name] = nn.Sequential(
+                    nn.Linear(input_dim, 128),
+                    nn.ReLU(),
+                    nn.Dropout(0.1),
+                    nn.Linear(128, config['n_outputs'])
+                )
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         """Forward pass through all heads.
 
         Args:
-            x: Encoder output (batch, d_model) - CLS token or mean pooling
+            x: Encoder output
+               - If use_separable=True: (batch, n_chans, d_model) - channel-wise features
+               - If use_separable=False: (batch, d_model) - flattened embedding
 
         Returns:
-            Dictionary of predictions for each head
+            Dictionary of predictions for each head {name: predictions}
         """
         return {name: head(x) for name, head in self.heads.items()}
 
@@ -396,11 +544,15 @@ class SignalJEPAPretrainer(nn.Module):
         ema_momentum: float = 0.996,
         predictor_depth: int = 4,
         aux_heads_config: Optional[dict] = None,
+        use_separable_aux_heads: bool = False,
+        aux_n_spat_filters: int = 4,
     ):
         super().__init__()
 
+        self.n_chans = n_chans
         self.d_model = d_model
         self.ema_momentum = ema_momentum
+        self.use_separable_aux_heads = use_separable_aux_heads
 
         # Context encoder (trainable)
         self.context_encoder = SignalJEPA(
@@ -453,7 +605,13 @@ class SignalJEPAPretrainer(nn.Module):
 
         # Auxiliary heads (optional)
         if aux_heads_config is not None:
-            self.aux_heads = AuxiliaryHeads(d_model, aux_heads_config)
+            self.aux_heads = AuxiliaryHeads(
+                input_dim=d_model,
+                heads_config=aux_heads_config,
+                use_separable=use_separable_aux_heads,
+                n_chans=n_chans if use_separable_aux_heads else None,
+                n_spat_filters=aux_n_spat_filters,
+            )
         else:
             self.aux_heads = None
 
@@ -586,13 +744,19 @@ class SignalJEPAPretrainer(nn.Module):
             return None
 
         # Get encoder output
-        encoder_output = self.context_encoder(x)  # (batch, seq_len, d_model)
+        encoder_output = self.context_encoder(x)  # (batch, n_chans, d_model)
 
-        # Global average pooling
-        pooled = encoder_output.mean(dim=1)  # (batch, d_model)
+        if self.use_separable_aux_heads:
+            # Use channel-wise features (no pooling) for separable heads
+            # Shape: (batch, n_chans, d_model)
+            features = encoder_output
+        else:
+            # Global average pooling for simple MLP heads
+            # Shape: (batch, d_model)
+            features = encoder_output.mean(dim=1)
 
         # Auxiliary predictions
-        return self.aux_heads(pooled)
+        return self.aux_heads(features)
 
 
 # %% GradNorm - Dynamic Loss Weight Balancing
@@ -1567,6 +1731,15 @@ if cfg.use_auxiliary and demographics is not None:
     filtered_aux_config = filter_enabled_aux_heads(cfg.aux_heads)
     if filtered_aux_config:
         print(f"📋 Auxiliary heads enabled: {list(filtered_aux_config.keys())}")
+
+        # Show which head architecture is being used
+        if cfg.use_separable_aux_heads:
+            print(f"   Architecture: SignalJEPA-style separable heads (Conv3d spatial filtering)")
+            print(f"   Spatial filters per head: {cfg.aux_n_spat_filters}")
+            print(f"   Input: channel-wise features (batch, {cfg.n_channels}, {cfg.transformer_d_model})")
+        else:
+            print(f"   Architecture: Simple 2-layer MLPs")
+            print(f"   Input: globally-pooled features (batch, {cfg.transformer_d_model})")
     else:
         print("⚠️  All auxiliary heads disabled via 'enabled' flags")
 else:
@@ -1587,25 +1760,102 @@ model = SignalJEPAPretrainer(
     ema_momentum=cfg.ema_momentum,
     predictor_depth=cfg.predictor_depth,
     aux_heads_config=filtered_aux_config,
+    use_separable_aux_heads=cfg.use_separable_aux_heads,
+    aux_n_spat_filters=cfg.aux_n_spat_filters,
 ).to(device)
 
 total_params = sum(p.numel() for p in model.parameters())
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"📊 Model parameters: {total_params:,} (trainable: {trainable_params:,})")
 
+# Load pretrained checkpoint if provided (for progressive training)
+if cfg.pretrained_checkpoint_path is not None:
+    print(f"\n📦 Loading pretrained checkpoint...")
+    print(f"   Path: {cfg.pretrained_checkpoint_path}")
+
+    checkpoint = torch.load(cfg.pretrained_checkpoint_path, map_location=device, weights_only=False)
+
+    if cfg.load_encoder_only:
+        # Load only context encoder (for progressive training: MAE → +Contrastive → +Aux)
+        # Try multiple checkpoint formats in order of preference
+        encoder_loaded = False
+
+        # Try 1: Direct context_encoder key (periodic checkpoint format)
+        if 'context_encoder' in checkpoint:
+            model.context_encoder.load_state_dict(checkpoint['context_encoder'])
+            model.target_encoder.load_state_dict(checkpoint['context_encoder'])
+            print("  ✅ Loaded from context_encoder (periodic checkpoint format)")
+            encoder_loaded = True
+
+        # Try 2: Direct encoder_state_dict key (best checkpoint format)
+        elif 'encoder_state_dict' in checkpoint:
+            model.context_encoder.load_state_dict(checkpoint['encoder_state_dict'])
+            model.target_encoder.load_state_dict(checkpoint['encoder_state_dict'])
+            print("  ✅ Loaded from encoder_state_dict (best checkpoint format)")
+            encoder_loaded = True
+
+        # Try 3: Extract from full_model_state_dict (best checkpoint fallback)
+        elif 'full_model_state_dict' in checkpoint:
+            full_state = checkpoint['full_model_state_dict']
+            context_encoder_state = {
+                k.replace('context_encoder.', ''): v
+                for k, v in full_state.items()
+                if k.startswith('context_encoder.')
+            }
+            model.context_encoder.load_state_dict(context_encoder_state)
+            model.target_encoder.load_state_dict(context_encoder_state)
+            print("  ✅ Extracted encoder from full_model_state_dict")
+            encoder_loaded = True
+
+        # Try 4: Extract from model_state_dict (periodic checkpoint fallback)
+        elif 'model_state_dict' in checkpoint:
+            full_state = checkpoint['model_state_dict']
+            context_encoder_state = {
+                k.replace('context_encoder.', ''): v
+                for k, v in full_state.items()
+                if k.startswith('context_encoder.')
+            }
+            model.context_encoder.load_state_dict(context_encoder_state)
+            model.target_encoder.load_state_dict(context_encoder_state)
+            print("  ✅ Extracted encoder from model_state_dict")
+            encoder_loaded = True
+
+        if not encoder_loaded:
+            raise KeyError(
+                f"Could not find encoder weights in checkpoint. "
+                f"Available keys: {list(checkpoint.keys())}"
+            )
+    else:
+        # Load full model state (including projection head, aux heads if present)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print("  ✅ Loaded full model state")
+
+    print(f"   Checkpoint was trained for {checkpoint.get('epoch', 'unknown')} epochs")
+
 # Initialize GradNorm for dynamic loss weight balancing
-if cfg.use_gradnorm:
+# Auto-disable GradNorm when encoder is frozen (no shared encoder gradients to balance)
+if cfg.use_gradnorm and cfg.freeze_encoder:
+    print("\n⚠️  Encoder frozen: Auto-disabling GradNorm")
+    print("   (GradNorm balances w.r.t. shared encoder parameters, but encoder is frozen)")
+    gradnorm = None
+    shared_params = None
+elif cfg.use_gradnorm:
     # Dynamically compute number of tasks based on enabled features
-    n_tasks = 1  # Always have MAE
-    task_names = ["MAE"]
+    n_tasks = 0
+    task_names = []
+
+    if cfg.use_mae:
+        n_tasks += 1
+        task_names.append("MAE")
 
     if cfg.use_contrastive:
         n_tasks += 1
         task_names.append("Contrastive")
 
+    # Per-head GradNorm: each auxiliary head is a separate task
     if filtered_aux_config is not None:
-        n_tasks += 1
-        task_names.append("Auxiliary")
+        n_tasks += len(filtered_aux_config)
+        task_names.extend([f"aux_{name}" for name in filtered_aux_config.keys()])
 
     print(f"\n🎯 Initializing GradNorm for dynamic loss balancing")
     print(f"   Tasks: {', '.join(task_names)} (n={n_tasks})")
@@ -1633,6 +1883,8 @@ def create_muon_optimizer(model, cfg):
     Muon optimizes 2D weight matrices (Linear/Conv layers) with orthogonalization.
     AdamW optimizes 1D parameters (biases, layer norms, mask token).
 
+    Supports differential learning rates: encoder can have different LR than other components.
+
     Args:
         model: SignalJEPAPretrainer model
         cfg: Config object with Muon hyperparameters
@@ -1640,11 +1892,14 @@ def create_muon_optimizer(model, cfg):
     Returns:
         SingleDeviceMuonWithAuxAdam optimizer with hybrid parameter groups
     """
-    # Separate 2D matrices from 1D parameters
-    muon_params = []
-    adamw_params = []
+    # Separate parameters by component and dimensionality
+    encoder_muon_params = []  # Encoder 2D params (weight matrices)
+    other_muon_params = []    # Non-encoder 2D params (predictor, projection head)
+    adamw_params = []         # All 1D params (biases, layer norms)
 
     print("\n🔍 Parameter grouping for Muon optimizer:")
+    print(f"   Encoder LR multiplier: {cfg.encoder_lr_multiplier}x")
+
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
@@ -1653,51 +1908,79 @@ def create_muon_optimizer(model, cfg):
         if 'target_encoder' in name:
             continue
 
+        # Check if parameter belongs to encoder
+        is_encoder = 'context_encoder' in name
+
         if param.ndim >= 2:
             # 2D+ parameters → Muon (with orthogonalization)
-            muon_params.append(param)
-            print(f"  ✓ Muon: {name:60s} {str(param.shape):20s}")
+            if is_encoder:
+                encoder_muon_params.append(param)
+                lr_info = f"(lr={cfg.muon_lr * cfg.encoder_lr_multiplier:.6f})"
+                print(f"  ✓ Encoder Muon: {name:50s} {str(param.shape):20s} {lr_info}")
+            else:
+                other_muon_params.append(param)
+                print(f"  ✓ Other Muon:   {name:50s} {str(param.shape):20s} (lr={cfg.muon_lr:.6f})")
         else:
             # 1D parameters → AdamW (standard adaptive LR)
             adamw_params.append(param)
-            print(f"  ○ AdamW: {name:60s} {str(param.shape):20s}")
+            component = "Encoder" if is_encoder else "Other"
+            print(f"  ○ {component} AdamW: {name:50s} {str(param.shape):20s}")
 
-    print(f"\n📊 Muon parameters: {len(muon_params)} groups")
-    print(f"📊 AdamW parameters: {len(adamw_params)} groups")
+    print(f"\n📊 Encoder Muon parameters: {len(encoder_muon_params)} (LR: {cfg.muon_lr * cfg.encoder_lr_multiplier:.6f})")
+    print(f"📊 Other Muon parameters: {len(other_muon_params)} (LR: {cfg.muon_lr:.6f})")
+    print(f"📊 AdamW parameters: {len(adamw_params)} (LR: {cfg.adamw_aux_lr:.6f})")
 
     # Create parameter groups
     # NOTE: SingleDeviceMuonWithAuxAdam requires different keys based on use_muon flag:
     #   - Muon groups: params, lr, momentum, weight_decay, use_muon
     #   - Adam groups: params, lr, betas, eps, weight_decay, use_muon
-    param_groups = [
-        dict(
-            params=muon_params,
+    param_groups = []
+
+    # Encoder Muon group (with differential LR)
+    if encoder_muon_params:
+        param_groups.append(dict(
+            params=encoder_muon_params,
+            lr=cfg.muon_lr * cfg.encoder_lr_multiplier,
+            momentum=cfg.muon_momentum,
+            weight_decay=cfg.muon_weight_decay,
+            use_muon=True
+        ))
+
+    # Other Muon group (predictor, projection head)
+    if other_muon_params:
+        param_groups.append(dict(
+            params=other_muon_params,
             lr=cfg.muon_lr,
             momentum=cfg.muon_momentum,
             weight_decay=cfg.muon_weight_decay,
             use_muon=True
-            # ns_steps removed - Muon uses default value of 5 (optimal from paper)
-        ),
-        dict(
+        ))
+
+    # AdamW group (all 1D params: biases, layer norms)
+    if adamw_params:
+        param_groups.append(dict(
             params=adamw_params,
             lr=cfg.adamw_aux_lr,
-            betas=cfg.adamw_aux_betas,  # AdamW uses betas for momentum
-            eps=1e-10,  # Numerical stability for Adam optimizer
+            betas=cfg.adamw_aux_betas,
+            eps=1e-10,
             weight_decay=cfg.adamw_aux_weight_decay,
             use_muon=False
-        )
-    ]
+        ))
 
     return SingleDeviceMuonWithAuxAdam(param_groups)
 
 # %% Create Optimizer
 # Optimizer and scheduler
-print("📊 Using standard AdamW optimizer (stable for multi-task learning)")
-optimizer = optim.AdamW(
-    [p for p in model.parameters() if p.requires_grad],
-    lr=cfg.learning_rate,
-    weight_decay=cfg.weight_decay
-)
+if cfg.use_muon:
+    print("📊 Using hybrid Muon+AdamW optimizer (Muon for 2D weights, AdamW for 1D params)")
+    optimizer = create_muon_optimizer(model, cfg)
+else:
+    print("📊 Using standard AdamW optimizer (stable for multi-task learning)")
+    optimizer = optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=cfg.learning_rate,
+        weight_decay=cfg.weight_decay
+    )
 
 # Create warmup + cosine annealing scheduler
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
@@ -1726,6 +2009,20 @@ scheduler = SequentialLR(
 
 print(f"📈 LR schedule: {cfg.warmup_epochs} epoch warmup → cosine annealing")
 
+# Apply initial encoder freeze if configured
+if cfg.freeze_encoder:
+    print(f"\n🔒 Freezing encoder (requires_grad=False)")
+    if cfg.freeze_encoder_epochs > 0:
+        print(f"   Will auto-unfreeze at epoch {cfg.freeze_encoder_epochs}")
+    else:
+        print(f"   Encoder will remain frozen throughout training")
+    set_encoder_frozen(model, frozen=True)
+
+    # Verify frozen status
+    n_frozen = sum(1 for p in model.context_encoder.parameters() if not p.requires_grad)
+    n_total = sum(1 for _ in model.context_encoder.parameters())
+    print(f"   ✓ Frozen {n_frozen}/{n_total} encoder parameters")
+
 # Initialize wandb
 if cfg.use_wandb:
     tags = ["signaljepa", "pretraining", "mae", "contrastive", "auxiliary", "adamw", "stable"]
@@ -1751,10 +2048,11 @@ def compute_auxiliary_loss(model, X, batch_infos, demographics, aux_config, devi
         device: torch device
 
     Returns:
-        Weighted sum of auxiliary losses
+        Dict of per-head losses {head_name: loss_tensor}
+        Returns empty dict if no valid targets
     """
     if demographics is None or not aux_config:
-        return torch.tensor(0.0, device=device)
+        return {}
 
     # Get batch subjects
     batch_subjects = [info['subject'] for info in batch_infos]
@@ -1773,8 +2071,8 @@ def compute_auxiliary_loss(model, X, batch_infos, demographics, aux_config, devi
     # Forward through auxiliary heads
     aux_preds = model.forward_auxiliary(X)
 
-    total_loss = torch.tensor(0.0, device=device)  # Initialize as tensor
-    valid_count = 0
+    # Store per-head losses (unweighted - GradNorm will apply dynamic weights)
+    head_losses = {}
 
     for head_name, head_config in aux_config.items():
         # Collect targets for this batch
@@ -1815,11 +2113,10 @@ def compute_auxiliary_loss(model, X, batch_infos, demographics, aux_config, devi
                 if not hasattr(compute_auxiliary_loss, f'_warned_{head_name}_nan'):
                     print(f"⚠️  NaN/Inf in {head_name} loss - skipping this head")
                     setattr(compute_auxiliary_loss, f'_warned_{head_name}_nan', True)
-                continue  # Skip this head instead of poisoning total
+                continue  # Skip this head
 
-            # Add weighted loss
-            total_loss += head_config['weight'] * loss
-            valid_count += 1
+            # Store unweighted loss (GradNorm will apply dynamic weights)
+            head_losses[head_name] = loss
 
         except Exception as e:
             # Catch any unexpected errors (tensor shape mismatches, etc.)
@@ -1828,21 +2125,13 @@ def compute_auxiliary_loss(model, X, batch_infos, demographics, aux_config, devi
                 setattr(compute_auxiliary_loss, f'_warned_{head_name}_error', True)
             continue
 
-    # Normalize by number of heads that had valid targets
-    if valid_count > 0:
-        total_loss = total_loss / valid_count
-    else:
-        # No valid targets in batch - return zero loss with gradient
-        # This prevents NaN propagation when demographic data is sparse
-        total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+    # Warn once if no valid targets in batch
+    if not head_losses and not hasattr(compute_auxiliary_loss, '_warned_empty_batch'):
+        print("⚠️  WARNING: Auxiliary loss batch has no valid demographic data")
+        print("   This is expected if subjects lack p_factor/attention/etc.")
+        compute_auxiliary_loss._warned_empty_batch = True
 
-        # Warn once about empty batches
-        if not hasattr(compute_auxiliary_loss, '_warned_empty_batch'):
-            print("⚠️  WARNING: Auxiliary loss batch has no valid demographic data")
-            print("   This is expected if subjects lack p_factor/attention/etc.")
-            compute_auxiliary_loss._warned_empty_batch = True
-
-    return total_loss
+    return head_losses
 
 # %% Validation Function
 def validate_epoch(model, mae_loader, contrastive_loader, device, cfg, demographics, aux_config):
@@ -1874,19 +2163,23 @@ def validate_epoch(model, mae_loader, contrastive_loader, device, cfg, demograph
             X_mae = X_mae.to(device, dtype=torch.float32)
             batch_size = X_mae.shape[0]
 
-            # Generate masks
-            spatial_mask = spatial_masker.get_batch_masks(batch_size, device)
-            temporal_mask = temporal_masker.get_batch_masks(batch_size, device)
+            if cfg.use_mae:
+                # Generate masks
+                spatial_mask = spatial_masker.get_batch_masks(batch_size, device)
+                temporal_mask = temporal_masker.get_batch_masks(batch_size, device)
 
-            # Forward MAE
-            predictions, targets, mask = model.forward_mae(X_mae, spatial_mask, temporal_mask)
+                # Forward MAE
+                predictions, targets, mask = model.forward_mae(X_mae, spatial_mask, temporal_mask)
 
-            # L1 loss on masked tokens only
-            mask_expanded = mask.unsqueeze(-1).expand_as(predictions)
-            if mask.sum() > 0:
-                mae_loss = (F.l1_loss(predictions, targets, reduction='none') * mask_expanded).sum() / mask_expanded.sum()
+                # L1 loss on masked tokens only
+                mask_expanded = mask.unsqueeze(-1).expand_as(predictions)
+                if mask.sum() > 0:
+                    mae_loss = (F.l1_loss(predictions, targets, reduction='none') * mask_expanded).sum() / mask_expanded.sum()
+                else:
+                    mae_loss = F.l1_loss(predictions, targets)
             else:
-                mae_loss = F.l1_loss(predictions, targets)
+                # MAE disabled
+                mae_loss = torch.tensor(0.0, device=device)
 
             # === Contrastive Step (ISC Triplets) ===
             if contrastive_loader is not None:
@@ -1916,27 +2209,32 @@ def validate_epoch(model, mae_loader, contrastive_loader, device, cfg, demograph
             else:
                 contrastive_loss = torch.tensor(0.0, device=device)
 
-            # === Auxiliary Step ===
+            # === Auxiliary Step (Per-Head) ===
             if aux_config is not None:
-                aux_loss = compute_auxiliary_loss(model, X_mae, batch_infos, demographics, aux_config, device)
+                aux_loss_dict = compute_auxiliary_loss(model, X_mae, batch_infos, demographics, aux_config, device)
             else:
-                aux_loss = torch.tensor(0.0, device=device)
+                aux_loss_dict = {}
 
             # === Combined Loss ===
-            mae_weight = cfg.mae_loss_weight
+            mae_weight = cfg.mae_loss_weight if cfg.use_mae else 0.0
             contrast_weight = cfg.contrastive_loss_weight if contrastive_loader is not None else 0.0
-            aux_weight = cfg.auxiliary_loss_weight if aux_config is not None else 0.0
+
+            # Compute weighted auxiliary loss using fixed config weights
+            aux_loss_combined = sum(
+                aux_config[head_name]['weight'] * loss
+                for head_name, loss in aux_loss_dict.items()
+            ) if aux_loss_dict else torch.tensor(0.0, device=device)
 
             total_loss = (
                 mae_weight * mae_loss +
                 contrast_weight * contrastive_loss +
-                aux_weight * aux_loss
+                aux_loss_combined
             )
 
             # Track
             epoch_losses['mae'].append(mae_loss.item())
             epoch_losses['contrastive'].append(contrastive_loss.item())
-            epoch_losses['auxiliary'].append(aux_loss.item())
+            epoch_losses['auxiliary'].append(aux_loss_combined.item())
             epoch_losses['total'].append(total_loss.item())
 
     # Return average losses
@@ -1974,11 +2272,19 @@ print("\n" + "="*60)
 print("🚀 Starting combined pretraining...")
 print("="*60)
 
+print(f"\n🎯 Loss Toggles:")
+print(f"  MAE: {'✅ Enabled' if cfg.use_mae else '❌ Disabled'}")
+print(f"  Contrastive: {'✅ Enabled' if cfg.use_contrastive else '❌ Disabled'}")
+print(f"  Auxiliary: {'✅ Enabled' if cfg.use_auxiliary else '❌ Disabled'}")
+
 print(f"\n📋 Training Configuration:")
 print(f"  Model: SignalJEPA with {total_params:,} parameters")
-print(f"  MAE loss weight: {cfg.mae_loss_weight}")
-print(f"  Contrastive loss weight: {cfg.contrastive_loss_weight}")
-print(f"  Auxiliary loss weight: {cfg.aux_total_weight}")
+if cfg.use_mae:
+    print(f"  MAE loss weight: {cfg.mae_loss_weight}")
+if cfg.use_contrastive:
+    print(f"  Contrastive loss weight: {cfg.contrastive_loss_weight}")
+if cfg.use_auxiliary:
+    print(f"  Auxiliary loss weight: {cfg.aux_total_weight}")
 print(f"  Epochs: {cfg.n_epochs}")
 print(f"  MAE batch size: {cfg.batch_size}")
 print(f"  Contrastive batch size: {cfg.contrastive_batch_size}")
@@ -1998,6 +2304,17 @@ last_checkpoint_epoch = -1
 for epoch in range(cfg.n_epochs):
     print(f"\n📅 Epoch {epoch+1}/{cfg.n_epochs}")
     print("-" * 40)
+
+    # Auto-unfreeze encoder if configured
+    if cfg.freeze_encoder and cfg.freeze_encoder_epochs > 0 and epoch == cfg.freeze_encoder_epochs:
+        print(f"\n🔓 Unfreezing encoder at epoch {epoch+1} (frozen for {cfg.freeze_encoder_epochs} epochs)")
+        print(f"   Encoder will train with LR multiplier: {cfg.encoder_lr_multiplier}x")
+        set_encoder_frozen(model, frozen=False)
+
+        # Verify unfrozen status
+        n_trainable = sum(1 for p in model.context_encoder.parameters() if p.requires_grad)
+        n_total = sum(1 for _ in model.context_encoder.parameters())
+        print(f"   ✓ Unfrozen {n_trainable}/{n_total} encoder parameters")
 
     model.train()
     epoch_losses = {
@@ -2030,38 +2347,42 @@ for epoch in range(cfg.n_epochs):
         X_mae = X_mae.to(device, dtype=torch.float32)
         batch_size = X_mae.shape[0]
 
-        # Generate masks
-        spatial_mask = spatial_masker.get_batch_masks(batch_size, device)
-        temporal_mask = temporal_masker.get_batch_masks(batch_size, device)
+        if cfg.use_mae:
+            # Generate masks
+            spatial_mask = spatial_masker.get_batch_masks(batch_size, device)
+            temporal_mask = temporal_masker.get_batch_masks(batch_size, device)
 
-        # Forward MAE
-        predictions, targets, mask = model.forward_mae(X_mae, spatial_mask, temporal_mask)
+            # Forward MAE
+            predictions, targets, mask = model.forward_mae(X_mae, spatial_mask, temporal_mask)
 
-        # === VERIFICATION: Print masking statistics for first batch ===
-        if epoch == 0 and batch_idx == 0:
-            print(f"\n{'='*60}")
-            print("🔍 MASKING VERIFICATION (First Batch)")
-            print(f"{'='*60}")
-            print(f"  Input shape: {X_mae.shape}")
-            print(f"  Spatial mask shape: {spatial_mask.shape}, masked channels: {spatial_mask[0].sum().item():.0f}/{spatial_mask.shape[1]}")
-            print(f"  Temporal mask shape: {temporal_mask.shape}, masked timepoints: {temporal_mask[0].sum().item():.0f}/{temporal_mask.shape[1]}")
-            print(f"  Sequence mask shape: {mask.shape}, masked tokens: {mask[0].sum().item():.0f}/{mask.shape[1]}")
-            print(f"  Predictions shape: {predictions.shape}")
-            print(f"  Targets shape: {targets.shape}")
-            print(f"  Masked token ratio: {mask.float().mean().item():.2%}")
-            print(f"{'='*60}\n")
+            # === VERIFICATION: Print masking statistics for first batch ===
+            if epoch == 0 and batch_idx == 0:
+                print(f"\n{'='*60}")
+                print("🔍 MASKING VERIFICATION (First Batch)")
+                print(f"{'='*60}")
+                print(f"  Input shape: {X_mae.shape}")
+                print(f"  Spatial mask shape: {spatial_mask.shape}, masked channels: {spatial_mask[0].sum().item():.0f}/{spatial_mask.shape[1]}")
+                print(f"  Temporal mask shape: {temporal_mask.shape}, masked timepoints: {temporal_mask[0].sum().item():.0f}/{temporal_mask.shape[1]}")
+                print(f"  Sequence mask shape: {mask.shape}, masked tokens: {mask[0].sum().item():.0f}/{mask.shape[1]}")
+                print(f"  Predictions shape: {predictions.shape}")
+                print(f"  Targets shape: {targets.shape}")
+                print(f"  Masked token ratio: {mask.float().mean().item():.2%}")
+                print(f"{'='*60}\n")
 
-        # L1 loss on masked tokens only
-        # mask: (batch, seq_len) where 1 = masked, 0 = visible
-        # Expand mask to match prediction dimensions: (batch, seq_len, d_model)
-        mask_expanded = mask.unsqueeze(-1).expand_as(predictions)
+            # L1 loss on masked tokens only
+            # mask: (batch, seq_len) where 1 = masked, 0 = visible
+            # Expand mask to match prediction dimensions: (batch, seq_len, d_model)
+            mask_expanded = mask.unsqueeze(-1).expand_as(predictions)
 
-        # Compute loss only on masked positions
-        if mask.sum() > 0:  # Ensure we have masked tokens
-            mae_loss = (F.l1_loss(predictions, targets, reduction='none') * mask_expanded).sum() / mask_expanded.sum()
+            # Compute loss only on masked positions
+            if mask.sum() > 0:  # Ensure we have masked tokens
+                mae_loss = (F.l1_loss(predictions, targets, reduction='none') * mask_expanded).sum() / mask_expanded.sum()
+            else:
+                # No masked tokens (shouldn't happen, but handle gracefully)
+                mae_loss = F.l1_loss(predictions, targets)
         else:
-            # No masked tokens (shouldn't happen, but handle gracefully)
-            mae_loss = F.l1_loss(predictions, targets)
+            # MAE disabled - set to zero, but keep batch data for auxiliary heads
+            mae_loss = torch.tensor(0.0, device=device)
 
         # === Contrastive Step (ISC Triplets) ===
         if cfg.use_contrastive and contrastive_loader is not None:
@@ -2093,77 +2414,106 @@ for epoch in range(cfg.n_epochs):
             contrastive_loss = torch.tensor(0.0, device=device)
             z_anchor = z_positive = z_negative = None
 
-        # === Auxiliary Step ===
+        # === Auxiliary Step (Per-Head) ===
         if cfg.use_auxiliary and filtered_aux_config is not None:
-            aux_loss = compute_auxiliary_loss(model, X_mae, batch_infos, demographics, filtered_aux_config, device)
+            aux_loss_dict = compute_auxiliary_loss(model, X_mae, batch_infos, demographics, filtered_aux_config, device)
         else:
-            # Auxiliary disabled - set to zero
-            aux_loss = torch.tensor(0.0, device=device)
+            # Auxiliary disabled - empty dict
+            aux_loss_dict = {}
 
         # === GradNorm Weight Update (if enabled) ===
         if cfg.use_gradnorm and gradnorm is not None:
-            # Build task_losses list based on enabled tasks
-            task_losses = [mae_loss]
+            # Build task_losses list based on enabled tasks (per-head for aux)
+            task_losses = []
+
+            if cfg.use_mae:
+                task_losses.append(mae_loss)
 
             if cfg.use_contrastive:
                 task_losses.append(contrastive_loss)
 
-            if filtered_aux_config is not None:
-                task_losses.append(aux_loss)
+            # Per-head auxiliary losses (each head is a separate task)
+            if aux_loss_dict:
+                task_losses.extend(aux_loss_dict.values())
 
             # Update task weights based on gradient norms
             dynamic_weights = gradnorm.update_weights(task_losses, shared_params, epoch)
 
-            # Extract weights (order: MAE, [Contrastive], [Auxiliary])
-            mae_weight = dynamic_weights[0].item()
+            # Extract weights (order: [MAE], [Contrastive], [aux_head1, aux_head2, ...])
+            weight_idx = 0
 
-            weight_idx = 1
+            if cfg.use_mae:
+                mae_weight = dynamic_weights[weight_idx].item()
+                weight_idx += 1
+            else:
+                mae_weight = 0.0
+
             if cfg.use_contrastive:
                 contrast_weight = dynamic_weights[weight_idx].item()
                 weight_idx += 1
             else:
                 contrast_weight = 0.0
 
-            if filtered_aux_config is not None:
-                aux_weight = dynamic_weights[weight_idx].item()
+            # Extract per-head auxiliary weights
+            if aux_loss_dict:
+                aux_head_weights = {
+                    head_name: dynamic_weights[weight_idx + i].item()
+                    for i, head_name in enumerate(aux_loss_dict.keys())
+                }
             else:
-                aux_weight = 0.0
+                aux_head_weights = {}
         else:
             # Use fixed config weights (respect enabled flags)
-            mae_weight = cfg.mae_loss_weight
+            mae_weight = cfg.mae_loss_weight if cfg.use_mae else 0.0
             contrast_weight = cfg.contrastive_loss_weight if cfg.use_contrastive else 0.0
-            aux_weight = cfg.auxiliary_loss_weight if filtered_aux_config is not None else 0.0
+
+            # Fixed per-head weights from config
+            if aux_loss_dict:
+                aux_head_weights = {
+                    head_name: filtered_aux_config[head_name]['weight']
+                    for head_name in aux_loss_dict.keys()
+                }
+            else:
+                aux_head_weights = {}
 
         # === Combined Loss with Dynamic/Fixed Weights ===
+        # Compute weighted auxiliary loss
+        aux_loss_combined = sum(
+            aux_head_weights[head_name] * loss
+            for head_name, loss in aux_loss_dict.items()
+        ) if aux_loss_dict else torch.tensor(0.0, device=device)
+
         total_loss = (
             mae_weight * mae_loss +
             contrast_weight * contrastive_loss +
-            aux_weight * aux_loss
+            aux_loss_combined
         )
 
         # === NaN Detection (Pre-Backward) ===
         # Check for NaN/Inf in losses BEFORE backprop
         if torch.isnan(mae_loss) or torch.isinf(mae_loss):
             print(f"🛑 NaN/Inf in MAE loss at epoch {epoch+1}, batch {batch_idx}")
-            print(f"   MAE: {mae_loss.item()}, Contrast: {contrastive_loss.item()}, Aux: {aux_loss.item()}")
+            print(f"   MAE: {mae_loss.item()}, Contrast: {contrastive_loss.item()}, Aux: {aux_loss_combined.item()}")
             optimizer.zero_grad(set_to_none=True)
             continue
 
         if torch.isnan(contrastive_loss) or torch.isinf(contrastive_loss):
             print(f"🛑 NaN/Inf in contrastive loss at epoch {epoch+1}, batch {batch_idx}")
-            print(f"   MAE: {mae_loss.item()}, Contrast: {contrastive_loss.item()}, Aux: {aux_loss.item()}")
+            print(f"   MAE: {mae_loss.item()}, Contrast: {contrastive_loss.item()}, Aux: {aux_loss_combined.item()}")
             optimizer.zero_grad(set_to_none=True)
             continue
 
-        if torch.isnan(aux_loss) or torch.isinf(aux_loss):
+        if torch.isnan(aux_loss_combined) or torch.isinf(aux_loss_combined):
             print(f"🛑 NaN/Inf in auxiliary loss at epoch {epoch+1}, batch {batch_idx}")
-            print(f"   MAE: {mae_loss.item()}, Contrast: {contrastive_loss.item()}, Aux: {aux_loss.item()}")
+            print(f"   MAE: {mae_loss.item()}, Contrast: {contrastive_loss.item()}, Aux: {aux_loss_combined.item()}")
+            if aux_loss_dict:
+                print(f"   Per-head losses: {', '.join(f'{k}={v.item():.4f}' for k, v in aux_loss_dict.items())}")
             optimizer.zero_grad(set_to_none=True)
             continue
 
         if torch.isnan(total_loss) or torch.isinf(total_loss):
             print(f"🛑 NaN/Inf in total loss at epoch {epoch+1}, batch {batch_idx}")
-            print(f"   MAE: {mae_loss.item()}, Contrast: {contrastive_loss.item()}, Aux: {aux_loss.item()}")
+            print(f"   MAE: {mae_loss.item()}, Contrast: {contrastive_loss.item()}, Aux: {aux_loss_combined.item()}")
             optimizer.zero_grad(set_to_none=True)
             continue
 
@@ -2185,7 +2535,7 @@ for epoch in range(cfg.n_epochs):
 
         if has_nan_grad:
             print(f"🛑 NaN gradients detected at epoch {epoch+1}, batch {batch_idx}")
-            print(f"   MAE: {mae_loss.item():.4f}, Contrast: {contrastive_loss.item():.4f}, Aux: {aux_loss.item():.4f}")
+            print(f"   MAE: {mae_loss.item():.4f}, Contrast: {contrastive_loss.item():.4f}, Aux: {aux_loss_combined.item():.4f}")
             print(f"   Skipping batch to prevent optimizer corruption")
             optimizer.zero_grad(set_to_none=True)
             continue
@@ -2202,13 +2552,13 @@ for epoch in range(cfg.n_epochs):
         # Track losses
         epoch_losses['mae'].append(mae_loss.item())
         epoch_losses['contrastive'].append(contrastive_loss.item())
-        epoch_losses['auxiliary'].append(aux_loss.item())
+        epoch_losses['auxiliary'].append(aux_loss_combined.item())
 
         # Update progress
         pbar.set_postfix({
             'mae': f"{mae_loss.item():.4f}",
             'contrast': f"{contrastive_loss.item():.4f}",
-            'aux': f"{aux_loss.item():.4f}",
+            'aux': f"{aux_loss_combined.item():.4f}",
             'total': f"{total_loss.item():.4f}",
             'grad': f"{max_grad_norm:.2f}",
             'ema_mom': f"{current_momentum:.4f}"
@@ -2219,12 +2569,22 @@ for epoch in range(cfg.n_epochs):
             log_dict = {
                 'batch_mae_loss': mae_loss.item(),
                 'batch_contrastive_loss': contrastive_loss.item(),
-                'batch_auxiliary_loss': aux_loss.item(),
+                'batch_auxiliary_loss': aux_loss_combined.item(),
                 'batch_total_loss': total_loss.item(),
                 'max_gradient_norm': max_grad_norm,
                 'ema_momentum': current_momentum,
                 'batch_idx': batch_idx + epoch * len(mae_loader)
             }
+
+            # Log per-head auxiliary losses
+            if aux_loss_dict:
+                for head_name, head_loss in aux_loss_dict.items():
+                    log_dict[f'batch_aux_{head_name}_loss'] = head_loss.item()
+
+            # Log per-head auxiliary weights
+            if aux_head_weights:
+                for head_name, head_weight in aux_head_weights.items():
+                    log_dict[f'weight_aux_{head_name}'] = head_weight
 
             # Compute similarity statistics (only if contrastive enabled)
             if cfg.use_contrastive and z_anchor is not None:
@@ -2245,9 +2605,9 @@ for epoch in range(cfg.n_epochs):
                 log_dict.update({
                     'gradnorm_mae_weight': mae_weight,
                     'gradnorm_contrastive_weight': contrast_weight,
-                    'gradnorm_auxiliary_weight': aux_weight,
                     'gradnorm_active': epoch >= cfg.gradnorm_warmup_epochs
                 })
+                # Per-head aux weights already logged above
 
             wandb.log(log_dict)
 
@@ -2255,9 +2615,11 @@ for epoch in range(cfg.n_epochs):
     avg_mae = np.mean(epoch_losses['mae'])
     avg_contrast = np.mean(epoch_losses['contrastive'])
     avg_aux = np.mean(epoch_losses['auxiliary'])
-    avg_total = (avg_mae * cfg.mae_loss_weight +
-                 avg_contrast * cfg.contrastive_loss_weight +
-                 avg_aux * cfg.auxiliary_loss_weight)
+    avg_total = (
+        (avg_mae * cfg.mae_loss_weight if cfg.use_mae else 0.0) +
+        (avg_contrast * cfg.contrastive_loss_weight if cfg.use_contrastive else 0.0) +
+        (avg_aux * cfg.auxiliary_loss_weight if cfg.use_auxiliary else 0.0)
+    )
 
     # Update EMA for loss stability tracking
     if loss_ema is None:
@@ -2354,8 +2716,8 @@ for epoch in range(cfg.n_epochs):
         checkpoint_counter += 1
         periodic_checkpoint = {
             'epoch': epoch,
-            'encoder_state_dict': model.context_encoder.state_dict(),
-            'full_model_state_dict': model.state_dict(),
+            'context_encoder': model.context_encoder.state_dict(),  # For encoder-only loading
+            'model_state_dict': model.state_dict(),  # For full model loading
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
             'val_loss': val_losses['total'],
