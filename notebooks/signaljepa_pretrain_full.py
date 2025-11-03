@@ -46,6 +46,10 @@ except ImportError:
 from braindecode.models import SignalJEPA
 from cerebro.utils.electrode_locations import load_hbn_chs_info
 
+# ISC contrastive learning utilities (no Lightning dependencies)
+from cerebro.utils.movie_windows import load_and_window_movies
+from cerebro.utils.contrastive_dataset import ContrastivePairDataset
+
 # Braindecode and startkit imports for data loading
 from eegdash import EEGChallengeDataset
 from eegdash.dataset import EEGChallengeDataset
@@ -109,17 +113,22 @@ class Config:
     }
 
     # Loss weights
-    mae_loss_weight = 1.0  # MAE reconstruction
-    contrastive_loss_weight = 0.3  # Movie contrastive
-    aux_total_weight = 0.5  # Total weight for all auxiliary heads
-    auxiliary_loss_weight = 0.5  # Alias for aux_total_weight
+    mae_loss_weight = 0.45  # MAE reconstruction
+    contrastive_loss_weight = 0.5  # Movie contrastive
+    aux_total_weight = 0.05  # Total weight for all auxiliary heads
+    auxiliary_loss_weight = 0.05  # Alias for aux_total_weight
 
-    # Contrastive learning
+    # Contrastive learning (ISC-based pairing)
     temperature = 0.07  # Temperature for InfoNCE
-    contrastive_batch_size = 512  # Larger for contrastive
+    contrastive_batch_size = 128  # Larger for contrastive
+    use_triplet_negatives = False  # Use explicit hard negatives from ISC triplets (toggleable)
+    time_bin_size_s = 1.0  # Time bin size for ISC pairing (1s = good balance)
+    pos_strategy = "same_movie_time"  # ISC positive pairs: same (movie, time_bin)
+    neg_strategy = "diff_movie_mixed"  # Hard negatives: different movies
+    val_frac = 0.1  # Fraction of subjects for validation (subject-level split)
 
     # Training
-    batch_size = 64  # MAE batch size
+    batch_size = 128  # MAE batch size
     learning_rate = 0.0003  # AdamW learning rate
     weight_decay = 0.05  # Higher for pretraining
     n_epochs = 200  # Long pretraining
@@ -168,7 +177,7 @@ class Config:
     test_release = "R5"  # Competition held-out set
 
     # Full dataset (not mini)
-    use_mini = True
+    use_mini = False
 
     # Tracking
     use_wandb = True
@@ -521,38 +530,73 @@ class SignalJEPAPretrainer(nn.Module):
 
 
 # %% InfoNCE Loss
-def info_nce_loss(z_i: torch.Tensor, z_j: torch.Tensor, temperature: float = 0.07) -> torch.Tensor:
-    """InfoNCE loss for contrastive learning.
+def info_nce_loss(
+    z_i: torch.Tensor,
+    z_j: torch.Tensor,
+    temperature: float = 0.07,
+    z_neg: Optional[torch.Tensor] = None,
+    use_hard_negative: bool = False
+) -> torch.Tensor:
+    """InfoNCE loss for contrastive learning with optional explicit hard negatives.
+
+    Two modes:
+    1. Pair-based (default): Uses batch negatives only
+    2. Triplet-based (use_hard_negative=True): Adds explicit hard negatives from ISC
 
     Args:
         z_i: Embeddings for anchors (batch, dim)
         z_j: Embeddings for positives (batch, dim)
         temperature: Temperature scaling parameter
+        z_neg: Embeddings for hard negatives (batch, dim), optional
+        use_hard_negative: If True and z_neg provided, add explicit hard negatives
 
     Returns:
         Scalar loss
     """
     batch_size = z_i.shape[0]
 
-    # Concatenate to create 2N samples
-    z = torch.cat([z_i, z_j], dim=0)  # (2*batch, dim)
+    if use_hard_negative and z_neg is not None:
+        # Triplet mode: Include explicit hard negatives
+        # Concatenate to create 3N samples
+        z = torch.cat([z_i, z_j, z_neg], dim=0)  # (3*batch, dim)
 
-    # Compute similarity matrix
-    sim_matrix = torch.mm(z, z.t()) / temperature  # (2*batch, 2*batch)
+        # Compute similarity matrix
+        sim_matrix = torch.mm(z, z.t()) / temperature  # (3*batch, 3*batch)
 
-    # Create positive pair mask
-    # Positive pairs: (i, i+N) and (i+N, i)
-    mask = torch.eye(2 * batch_size, device=z.device).bool()
-    sim_matrix.masked_fill_(mask, float('-inf'))  # Remove self-similarities
+        # Remove self-similarities
+        mask = torch.eye(3 * batch_size, device=z.device).bool()
+        sim_matrix.masked_fill_(mask, float('-inf'))
 
-    # Positive similarities
-    pos_sim = torch.cat([
-        sim_matrix[:batch_size, batch_size:].diag(),  # (i, i+N)
-        sim_matrix[batch_size:, :batch_size].diag()   # (i+N, i)
-    ])  # (2*batch,)
+        # Positive similarities: (anchor, positive) pairs
+        pos_sim = torch.cat([
+            sim_matrix[:batch_size, batch_size:2*batch_size].diag(),  # (i, i+N)
+            sim_matrix[batch_size:2*batch_size, :batch_size].diag()   # (i+N, i)
+        ])  # (2*batch,)
 
-    # Negative similarities (all other pairs)
-    neg_sim = sim_matrix
+        # Negative similarities: All other pairs (includes hard negatives)
+        neg_sim = sim_matrix[:2*batch_size]  # Only need rows for anchors and positives
+
+    else:
+        # Pair mode: Original implementation with batch negatives only
+        # Concatenate to create 2N samples
+        z = torch.cat([z_i, z_j], dim=0)  # (2*batch, dim)
+
+        # Compute similarity matrix
+        sim_matrix = torch.mm(z, z.t()) / temperature  # (2*batch, 2*batch)
+
+        # Create positive pair mask
+        # Positive pairs: (i, i+N) and (i+N, i)
+        mask = torch.eye(2 * batch_size, device=z.device).bool()
+        sim_matrix.masked_fill_(mask, float('-inf'))  # Remove self-similarities
+
+        # Positive similarities
+        pos_sim = torch.cat([
+            sim_matrix[:batch_size, batch_size:].diag(),  # (i, i+N)
+            sim_matrix[batch_size:, :batch_size].diag()   # (i+N, i)
+        ])  # (2*batch,)
+
+        # Negative similarities (all other pairs)
+        neg_sim = sim_matrix
 
     # LogSumExp for numerical stability
     loss = -pos_sim + torch.logsumexp(neg_sim, dim=1)
@@ -631,6 +675,37 @@ def collate_with_metadata(batch):
         window_inds_batch = torch.tensor(window_inds_list)
 
     return X_batch, y_batch, window_inds_batch, infos_list
+
+
+def collate_triplets(batch):
+    """Custom collate for (anchor, positive, negative) triplets.
+
+    Handles tensors from ContrastivePairDataset that may have non-resizable storage.
+    Creates new tensors with proper storage for batching.
+    """
+    import numpy as np
+
+    anchors = []
+    positives = []
+    negatives = []
+
+    for anchor, pos, neg in batch:
+        # Ensure contiguous tensors with resizable storage
+        if isinstance(anchor, np.ndarray):
+            anchors.append(torch.from_numpy(anchor.copy()))
+            positives.append(torch.from_numpy(pos.copy()))
+            negatives.append(torch.from_numpy(neg.copy()))
+        else:
+            # Handle tensors - clone if not contiguous to ensure resizable storage
+            anchors.append(anchor.clone() if not anchor.is_contiguous() else anchor.contiguous())
+            positives.append(pos.clone() if not pos.is_contiguous() else pos.contiguous())
+            negatives.append(neg.clone() if not neg.is_contiguous() else neg.contiguous())
+
+    return (
+        torch.stack(anchors),
+        torch.stack(positives),
+        torch.stack(negatives)
+    )
 
 
 # %% DatasetWrapper for Subject Metadata
@@ -751,6 +826,19 @@ if mae_windows is None:
                     preload=True
                 )
 
+                # Validate all windows have expected shape (129 channels, window_size_samples)
+                expected_shape = (129, int(cfg.window_len * cfg.sfreq))
+                if len(release_windows) > 0:
+                    # Check for shape consistency
+                    invalid_count = 0
+                    for i in range(len(release_windows)):
+                        if release_windows[i][0].shape != expected_shape:
+                            invalid_count += 1
+
+                    if invalid_count > 0:
+                        print(f" ⚠️  Found {invalid_count}/{len(release_windows)} windows with wrong shape, skipping release")
+                        continue  # Skip this release entirely if it has malformed windows
+
                 all_windowed_datasets.append(release_windows)
                 print(f" ✓ {len(release_windows)} windows")
 
@@ -766,6 +854,21 @@ if mae_windows is None:
     print(f"✅ Windowing completed in {elapsed/60:.1f} minutes")
     print(f"   Total windows: {len(mae_windows):,}")
 
+    # Final validation: ensure all windows have consistent shapes
+    expected_shape = (129, int(cfg.window_len * cfg.sfreq))
+    print(f"\n🔍 Validating window shapes (expected: {expected_shape})...")
+    invalid_indices = []
+    for i in range(len(mae_windows)):
+        if mae_windows[i][0].shape != expected_shape:
+            invalid_indices.append(i)
+
+    if invalid_indices:
+        print(f"⚠️  Found {len(invalid_indices)} windows with wrong shape, filtering...")
+        from torch.utils.data import Subset
+        valid_indices = [i for i in range(len(mae_windows)) if i not in set(invalid_indices)]
+        mae_windows = Subset(mae_windows, valid_indices)
+        print(f"✅ Filtered dataset: {len(mae_windows):,} valid windows")
+
     # Save to cache for future runs
     print(f"\n💾 Saving to cache...")
     save_windowed_dataset(mae_windows, PRETRAIN_CACHE_DIR, "mae", mae_cache_key)
@@ -773,6 +876,21 @@ if mae_windows is None:
 else:
     print(f"✅ Using cached MAE dataset (skipped windowing)")
     print(f"   Total windows: {len(mae_windows):,}")
+
+    # Validate cached dataset shapes
+    expected_shape = (129, int(cfg.window_len * cfg.sfreq))
+    print(f"\n🔍 Validating cached window shapes (expected: {expected_shape})...")
+    invalid_indices = []
+    for i in range(len(mae_windows)):
+        if mae_windows[i][0].shape != expected_shape:
+            invalid_indices.append(i)
+
+    if invalid_indices:
+        print(f"⚠️  Found {len(invalid_indices)} cached windows with wrong shape, filtering...")
+        from torch.utils.data import Subset
+        valid_indices = [i for i in range(len(mae_windows)) if i not in set(invalid_indices)]
+        mae_windows = Subset(mae_windows, valid_indices)
+        print(f"✅ Filtered cached dataset: {len(mae_windows):,} valid windows")
 
 # Wrap with subject metadata for auxiliary loss
 print("\n🔄 Wrapping MAE dataset with subject metadata...")
@@ -791,134 +909,65 @@ mae_loader = DataLoader(
     collate_fn=collate_with_metadata  # Preserve metadata as list of dicts
 )
 
-# %% Load Data - Contrastive Dataset (movie tasks only)
+# %% Load Data - Contrastive Dataset (ISC-based movie pairing)
 print("\n" + "="*60)
-print("Loading Contrastive pretraining data (4 movie tasks)")
+print("Loading ISC contrastive data (4 movie tasks)")
 print("="*60)
 
-# Count movie recordings first
-print("\n📊 Counting movie recordings per task...")
-movie_release_counts = {}
-total_movie_recordings = 0
+print(f"\n📽️  Movie tasks: {cfg.movie_tasks}")
+print(f"  Train releases: {cfg.train_releases}")
+print(f"  Window length: {cfg.window_len}s, Stride: 1.0s (50% overlap)")
+print(f"  Time bin size: {cfg.time_bin_size_s}s (for ISC pairing)")
+print(f"  ISC strategy: pos={cfg.pos_strategy}, neg={cfg.neg_strategy}")
 
-for task in cfg.movie_tasks:
-    movie_release_counts[task] = {}
-    for release in cfg.train_releases:
-        try:
-            ds = EEGChallengeDataset(
-                task=task,
-                release=release,
-                cache_dir=Path(str(cfg.HBN_ROOT)),
-                mini=cfg.use_mini,
-                description_fields=["subject", "age", "sex", "p_factor", "attention", "internalizing", "ehq_total"]
-            )
-            count = len(ds.datasets)
-            movie_release_counts[task][release] = count
-            total_movie_recordings += count
-        except Exception as e:
-            movie_release_counts[task][release] = 0
-
-print(f"\n✅ Found {total_movie_recordings} total movie recordings across {len(cfg.movie_tasks)} tasks")
-
-# Generate cache key for movie windows
-movie_cache_key = get_dataset_cache_key(
-    cfg.movie_tasks,
-    cfg.train_releases,
-    cfg.window_len,
-    1.0,  # stride = 1s (with overlap)
-    cfg.use_mini
+# Load and window movies with ISC metadata
+print("\n⏳ Loading movies with ISC metadata...")
+movie_windows = load_and_window_movies(
+    movie_names=cfg.movie_tasks,
+    dataset_class=EEGChallengeDataset,
+    cache_dir=cfg.HBN_ROOT,
+    releases=cfg.train_releases,
+    mini=cfg.use_mini,
+    window_len_s=cfg.window_len,
+    stride_s=1.0,  # 1s stride for more contrastive pairs
+    sfreq=cfg.sfreq,
+    time_bin_size_s=cfg.time_bin_size_s,
+    preload=True
 )
-print(f"  Movie cache key: {movie_cache_key}")
 
-# Try loading from cache
-movie_windows = load_windowed_dataset(PRETRAIN_CACHE_DIR, "movie", movie_cache_key)
+print(f"✅ Loaded {len(movie_windows):,} movie windows with ISC metadata")
 
-if movie_windows is None:
-    # Cache miss - create windows with per-release progress
-    print("\n⚠️  Cache miss - creating movie windows from scratch...")
-    print("  ⏱️  Estimated time:")
-    print(f"     - {len(cfg.movie_tasks)} movie tasks × {len(cfg.train_releases)} releases")
-    print(f"     - ~{total_movie_recordings} recordings")
-    print(f"     - Expected: 15-30 minutes total (mini: ~3-6 min)")
-    print("  💡 Future runs will use cache and load in ~10 seconds")
-    print("")
-
-    import time
-    start = time.time()
-
-    # Process each (movie, release) pair separately with progress
-    all_movie_windows = []
-
-    for task_idx, task in enumerate(cfg.movie_tasks):
-        print(f"\n{'='*60}")
-        print(f"Processing Movie {task_idx+1}/{len(cfg.movie_tasks)}: {task}")
-        print(f"{'='*60}")
-
-        for release_idx, release in enumerate(cfg.train_releases):
-            n_recordings = movie_release_counts[task].get(release, 0)
-
-            if n_recordings == 0:
-                print(f"  [{release_idx+1}/{len(cfg.train_releases)}] {release}: Skipped (no recordings)")
-                continue
-
-            print(f"  [{release_idx+1}/{len(cfg.train_releases)}] {release}: Windowing {n_recordings} recordings...", end="", flush=True)
-
-            try:
-                # Load this specific (movie, release) pair
-                ds = EEGChallengeDataset(
-                    task=task,
-                    release=release,
-                    cache_dir=Path(str(cfg.HBN_ROOT)),
-                    mini=cfg.use_mini,
-                    description_fields=["subject", "age", "sex", "p_factor", "attention", "internalizing", "ehq_total"]
-                )
-
-                # Window with 1s stride (overlap for more contrastive pairs)
-                release_windows = create_fixed_length_windows(
-                    ds,
-                    window_size_samples=int(cfg.window_len * cfg.sfreq),
-                    window_stride_samples=int(1.0 * cfg.sfreq),  # 1s stride
-                    drop_last_window=True,
-                    preload=True
-                )
-
-                all_movie_windows.append(release_windows)
-                print(f" ✓ {len(release_windows)} windows")
-
-            except Exception as e:
-                print(f" ✗ Error: {e}")
-
-    # Concatenate all windowed datasets
-    print(f"\n{'='*60}")
-    print("Concatenating all movie windows...")
-    movie_windows = BaseConcatDataset([w for ws in all_movie_windows for w in ws.datasets])
-
-    elapsed = time.time() - start
-    print(f"✅ Windowing completed in {elapsed/60:.1f} minutes")
-    print(f"   Total movie windows: {len(movie_windows):,}")
-
-    # Save to cache
-    print(f"\n💾 Saving to cache...")
-    save_windowed_dataset(movie_windows, PRETRAIN_CACHE_DIR, "movie", movie_cache_key)
-    print(f"✅ Movie dataset cached - next run will be much faster!")
-else:
-    print(f"✅ Using cached movie dataset (skipped windowing)")
-    print(f"   Total movie windows: {len(movie_windows):,}")
-
-# Add metadata for contrastive pair sampling
-# TODO: Need to add movie_id, subject_id, time_offset to metadata
-
-# For now, create simple contrastive loader (without pair sampling)
-# In production, would use ContrastivePairDataset
-contrastive_loader = DataLoader(
+# Wrap with ContrastivePairDataset for ISC-based triplet sampling
+print("\n🔗 Creating ISC triplet dataset...")
+contrastive_dataset = ContrastivePairDataset(
     movie_windows,
+    pos_strategy=cfg.pos_strategy,  # Same (movie, time_bin), different subjects
+    neg_strategy=cfg.neg_strategy,  # Different movies
+    return_triplets=True,  # Return (anchor, positive, negative)
+    random_state=2025
+)
+
+# Get stats
+stats = contrastive_dataset.get_stats()
+print(f"  ✅ ISC Dataset Statistics:")
+print(f"     Valid anchors: {stats['valid_anchors']:,} (windows with ISC pairs)")
+print(f"     Positive groups: {stats['pos_groups']:,} ((movie, time_bin) combinations)")
+print(f"     Subjects: {stats['subjects']} unique subjects")
+print(f"     Movies: {stats['movies']}")
+
+# Create DataLoader for ISC triplets
+contrastive_loader = DataLoader(
+    contrastive_dataset,
     batch_size=cfg.contrastive_batch_size,
     shuffle=True,
     num_workers=cfg.num_workers,
     pin_memory=True,
     persistent_workers=True,
-    prefetch_factor=1
+    prefetch_factor=1,
+    collate_fn=collate_triplets  # Handle non-resizable tensor storage
 )
+
+print(f"  📦 Contrastive batches: {len(contrastive_loader)} (batch_size={cfg.contrastive_batch_size})")
 
 # %% Load Demographics
 print("\n" + "="*60)
@@ -1002,50 +1051,95 @@ if mae_val_windows is None:
                 windows = create_fixed_length_windows(ds, window_size_samples=int(cfg.window_len * cfg.sfreq),
                                                      window_stride_samples=int(cfg.window_len * cfg.sfreq),
                                                      drop_last_window=False, preload=True)
-                all_mae_val_windows.extend(windows.datasets)
-                print(f"    {task}/{release}: {len(windows)} windows")
+
+                # Validate window shapes before adding
+                expected_shape = (129, int(cfg.window_len * cfg.sfreq))
+                valid_windows = []
+                invalid_count = 0
+                for w in windows.datasets:
+                    if w[0][0].shape == expected_shape:  # w[0] is the WindowsDataset, w[0][0] is the first window's data
+                        valid_windows.append(w)
+                    else:
+                        invalid_count += 1
+
+                all_mae_val_windows.extend(valid_windows)
+                if invalid_count > 0:
+                    print(f"    {task}/{release}: {len(valid_windows)} windows ({invalid_count} filtered)")
+                else:
+                    print(f"    {task}/{release}: {len(windows)} windows")
             except:
                 pass
 
     mae_val_windows = BaseConcatDataset(all_mae_val_windows)
+
+    # Final validation for val dataset
+    expected_shape = (129, int(cfg.window_len * cfg.sfreq))
+    invalid_val_indices = []
+    for i in range(len(mae_val_windows)):
+        if mae_val_windows[i][0].shape != expected_shape:
+            invalid_val_indices.append(i)
+
+    if invalid_val_indices:
+        print(f"  ⚠️  Found {len(invalid_val_indices)} validation windows with wrong shape, filtering...")
+        from torch.utils.data import Subset
+        valid_val_indices = [i for i in range(len(mae_val_windows)) if i not in set(invalid_val_indices)]
+        mae_val_windows = Subset(mae_val_windows, valid_val_indices)
+        print(f"  ✅ Filtered validation dataset: {len(mae_val_windows):,} valid windows")
+
     save_windowed_dataset(mae_val_windows, PRETRAIN_CACHE_DIR, "mae_val", mae_val_cache_key)
 else:
     print(f"  ✅ Loaded {len(mae_val_windows)} windows from cache")
 
-# Load validation movie windows
-print(f"\n📦 Loading validation movie windows (cache key: {movie_val_cache_key[:50]}...)")
-movie_val_windows = load_windowed_dataset(PRETRAIN_CACHE_DIR, "movie_val", movie_val_cache_key)
+    # Validate cached validation dataset shapes
+    expected_shape = (129, int(cfg.window_len * cfg.sfreq))
+    invalid_val_cached_indices = []
+    for i in range(len(mae_val_windows)):
+        if mae_val_windows[i][0].shape != expected_shape:
+            invalid_val_cached_indices.append(i)
 
-if movie_val_windows is None:
-    print("  Creating validation movie windows from scratch...")
-    all_movie_val_windows = []
-    for task in cfg.movie_tasks:
-        for release in cfg.val_releases:
-            try:
-                ds = EEGChallengeDataset(
-                    task=task,
-                    release=release,
-                    cache_dir=Path(str(cfg.HBN_ROOT)),
-                    mini=cfg.use_mini,
-                    description_fields=["subject", "age", "sex", "p_factor", "attention", "internalizing", "ehq_total"]
-                )
-                windows = create_fixed_length_windows(ds, window_size_samples=int(cfg.window_len * cfg.sfreq),
-                                                     window_stride_samples=int(1.0 * cfg.sfreq),
-                                                     drop_last_window=False, preload=True)
-                all_movie_val_windows.extend(windows.datasets)
-                print(f"    {task}/{release}: {len(windows)} windows")
-            except:
-                pass
+    if invalid_val_cached_indices:
+        print(f"  ⚠️  Found {len(invalid_val_cached_indices)} cached validation windows with wrong shape, filtering...")
+        from torch.utils.data import Subset
+        valid_val_cached_indices = [i for i in range(len(mae_val_windows)) if i not in set(invalid_val_cached_indices)]
+        mae_val_windows = Subset(mae_val_windows, valid_val_cached_indices)
+        print(f"  ✅ Filtered cached validation dataset: {len(mae_val_windows):,} valid windows")
 
-    movie_val_windows = BaseConcatDataset(all_movie_val_windows)
-    save_windowed_dataset(movie_val_windows, PRETRAIN_CACHE_DIR, "movie_val", movie_val_cache_key)
-else:
-    print(f"  ✅ Loaded {len(movie_val_windows)} windows from cache")
+# Load validation movie windows with ISC metadata
+print(f"\n📦 Loading validation movie windows with ISC metadata...")
+movie_val_windows = load_and_window_movies(
+    movie_names=cfg.movie_tasks,
+    dataset_class=EEGChallengeDataset,
+    cache_dir=cfg.HBN_ROOT,
+    releases=cfg.val_releases,
+    mini=cfg.use_mini,
+    window_len_s=cfg.window_len,
+    stride_s=1.0,
+    sfreq=cfg.sfreq,
+    time_bin_size_s=cfg.time_bin_size_s,
+    preload=True
+)
+print(f"  ✅ Loaded {len(movie_val_windows)} validation movie windows")
+
+# Wrap with ContrastivePairDataset for ISC validation
+print("\n🔗 Creating validation ISC triplet dataset...")
+contrastive_val_dataset = ContrastivePairDataset(
+    movie_val_windows,
+    pos_strategy=cfg.pos_strategy,
+    neg_strategy=cfg.neg_strategy,
+    return_triplets=True,
+    random_state=2025
+)
+
+# Get validation ISC stats
+val_stats = contrastive_val_dataset.get_stats()
+print(f"  ✅ Validation ISC Statistics:")
+print(f"     Valid anchors: {val_stats['valid_anchors']:,}")
+print(f"     Positive groups: {val_stats['pos_groups']:,}")
+print(f"     Subjects: {val_stats['subjects']}")
 
 print(f"\n✅ Validation data ready: {len(mae_val_windows)} MAE windows, {len(movie_val_windows)} movie windows")
 
 # Wrap validation MAE dataset with subject metadata for auxiliary loss
-# (Movie datasets don't need metadata - contrastive learning has no auxiliary loss)
 print("\n🔄 Wrapping validation MAE dataset with subject metadata...")
 mae_val_windows_wrapped = BaseConcatDataset([DatasetWrapper(w) for w in mae_val_windows.datasets])
 print(f"   ✅ Wrapped {len(mae_val_windows_wrapped)} MAE windows")
@@ -1063,13 +1157,14 @@ mae_val_loader = DataLoader(
 )
 
 contrastive_val_loader = DataLoader(
-    movie_val_windows,  # Use unwrapped version (no metadata needed)
+    contrastive_val_dataset,  # Use ISC triplet dataset
     batch_size=cfg.contrastive_batch_size,
     shuffle=False,  # No shuffle for validation
     num_workers=cfg.num_workers,
     pin_memory=True,
     persistent_workers=True,
-    prefetch_factor=1
+    prefetch_factor=1,
+    collate_fn=collate_triplets  # Handle non-resizable tensor storage
 )
 
 print(f"  Val MAE batches: {len(mae_val_loader)}")
@@ -1335,18 +1430,30 @@ def validate_epoch(model, mae_loader, contrastive_loader, device, cfg, demograph
             predictions, targets = model.forward_mae(X_mae, spatial_mask, temporal_mask)
             mae_loss = F.l1_loss(predictions, targets)
 
-            # === Contrastive Step ===
+            # === Contrastive Step (ISC Triplets) ===
             try:
                 contrast_batch = next(contrastive_iter)
             except StopIteration:
                 contrastive_iter = iter(contrastive_loader)
                 contrast_batch = next(contrastive_iter)
 
-            X_contrast = contrast_batch[0].to(device, dtype=torch.float32)
-            mid = X_contrast.shape[0] // 2
-            z_i = model.forward_contrastive(X_contrast[:mid])
-            z_j = model.forward_contrastive(X_contrast[mid:])
-            contrastive_loss = info_nce_loss(z_i, z_j, cfg.temperature)
+            # Unpack ISC triplets: (anchor, positive, negative)
+            anchor, positive, negative = contrast_batch
+            anchor = anchor.to(device, dtype=torch.float32)
+            positive = positive.to(device, dtype=torch.float32)
+            negative = negative.to(device, dtype=torch.float32)
+
+            # Forward through encoder
+            z_anchor = model.forward_contrastive(anchor)
+            z_positive = model.forward_contrastive(positive)
+            z_negative = model.forward_contrastive(negative)
+
+            # InfoNCE with optional hard negatives
+            contrastive_loss = info_nce_loss(
+                z_anchor, z_positive, cfg.temperature,
+                z_neg=z_negative,
+                use_hard_negative=cfg.use_triplet_negatives
+            )
 
             # === Auxiliary Step ===
             aux_loss = compute_auxiliary_loss(model, X_mae, batch_infos, demographics, aux_config, device)
@@ -1430,21 +1537,30 @@ for epoch in range(cfg.n_epochs):
         # L1 loss on masked tokens
         mae_loss = F.l1_loss(predictions, targets)
 
-        # === Contrastive Step ===
+        # === Contrastive Step (ISC Triplets) ===
         try:
             contrast_batch = next(contrastive_iter)
         except StopIteration:
             contrastive_iter = iter(contrastive_loader)
             contrast_batch = next(contrastive_iter)
 
-        X_contrast = contrast_batch[0].to(device, dtype=torch.float32)
+        # Unpack ISC triplets: (anchor, positive, negative)
+        anchor, positive, negative = contrast_batch
+        anchor = anchor.to(device, dtype=torch.float32)
+        positive = positive.to(device, dtype=torch.float32)
+        negative = negative.to(device, dtype=torch.float32)
 
-        # Split batch into two views (simple augmentation: first half vs second half)
-        mid = X_contrast.shape[0] // 2
-        z_i = model.forward_contrastive(X_contrast[:mid])
-        z_j = model.forward_contrastive(X_contrast[mid:])
+        # Forward through encoder
+        z_anchor = model.forward_contrastive(anchor)
+        z_positive = model.forward_contrastive(positive)
+        z_negative = model.forward_contrastive(negative)
 
-        contrastive_loss = info_nce_loss(z_i, z_j, cfg.temperature)
+        # InfoNCE with optional hard negatives
+        contrastive_loss = info_nce_loss(
+            z_anchor, z_positive, cfg.temperature,
+            z_neg=z_negative,
+            use_hard_negative=cfg.use_triplet_negatives
+        )
 
         # === Auxiliary Step ===
         aux_loss = compute_auxiliary_loss(model, X_mae, batch_infos, demographics, cfg.aux_heads, device)

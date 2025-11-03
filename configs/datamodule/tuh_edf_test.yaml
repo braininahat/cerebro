@@ -6,7 +6,7 @@ class_path: cerebro.data.tuh_edf.TUHEDFDataModule
 init_args:
   # Data paths
   tuh_dir: /projects/academic/wenyaoxu/anarghya/research/eeg-data/tuh/tueg/v2.0.1
-  cache_dir: null  # Auto: {tuh_dir}/cache
+  cache_dir: null  # Uses CACHE_PATH/tuh from .env
 
   # Filtering
   montages: ['01_tcp_ar']  # Standard montage only

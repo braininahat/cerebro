@@ -99,7 +99,7 @@ model:
 
 # Data configuration (mini overrides)
 data:
-  data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+  data_dir: ${oc.env:HBN_ROOT,data}
   # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training!
   # Using R1 for mini prototyping (small enough for fast iteration)
   releases:
@@ -119,7 +119,7 @@ data:
   shift_after_stim: 0.5
   window_len: 2.0
   use_mini: true  # Mini flag
-  cache_dir: null
+  cache_dir: null  # Deprecated/ignored by Challenge1DataModule
   val_frac: 0.1
   test_frac: 0.1
   seed: 2025
@@ -129,4 +129,4 @@ data:
   # R5 Test Evaluation (Competition Validation Set)
   mode: dev  # "dev" = split training releases for train/val/test
   test_on_r5: true  # Use R5 as test set (even for mini prototyping to match competition evaluation)
-  r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data}  # R5 data location
+  r5_data_dir: ${oc.env:HBN_ROOT,data}  # R5 data location

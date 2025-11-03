@@ -80,7 +80,7 @@ model:
 data:
   class_path: cerebro.data.movies.MovieDataModule
   init_args:
-    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    data_dir: ${oc.env:HBN_ROOT,data}
     releases: [R1]                        # Smoke test: only R1
 
     # Movies for contrastive learning
@@ -105,4 +105,4 @@ data:
     test_release: null                    # Specify release for test (e.g., "R5") or null for no test split
     seed: 2025
     use_mini: true                        # Mini: 20 subjects per release
-    cache_dir: null
+    cache_dir: null  # Uses CACHE_PATH/movies from .env

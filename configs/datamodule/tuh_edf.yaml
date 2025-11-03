@@ -47,7 +47,7 @@ data:
     # - Fast: Compression is often faster than uncompressed I/O
     # - Space: ~1.2x compression ratio (saves 13-20 GB for full dataset)
     # - Resume: Checkpoint manifest tracks progress, allows resuming after interruptions
-    cache_dir: null      # Cache directory (null = tuh_dir/cache)
+    cache_dir: null      # Uses CACHE_PATH/tuh from .env
     use_cache: true      # Use cached windows if available
     filelist_cache: data/tuh/filelist.txt  # Cached file list for fast directory scanning
                                             # - First run: scans directory and saves to cache (~5-10 min)

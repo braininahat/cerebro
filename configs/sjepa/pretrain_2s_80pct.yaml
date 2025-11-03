@@ -1,10 +1,10 @@
-# S-JEPA pretraining config with 60% spatial block masking (mini dataset)
+# S-JEPA pretraining config with 80% spatial block masking (full dataset)
 #
-# Same as pretrain_mini_40pct.yaml but with 60% mask diameter.
-# Per paper, 60% masks were among the top performers.
+# Uses all releases (R1-R4, R6-R11) with all 7 tasks for maximum pretraining data.
+# This will take significantly longer than mini dataset but should produce better representations.
 
 seed_everything: 42
-run_lr_finder: false
+run_lr_finder: true
 run_batch_size_finder: false
 
 trainer:
@@ -13,27 +13,27 @@ trainer:
   precision: bf16-mixed
   gradient_clip_val: 1.0
   max_epochs: 100
-  log_every_n_steps: 5
+  log_every_n_steps: 50  # Log less frequently for full dataset
 
   logger:
     class_path: lightning.pytorch.loggers.WandbLogger
     init_args:
       project: eeg2025
       entity: ubcse-eeg2025
-      name: sjepa_pretrain_mini_60pct
+      name: sjepa_pretrain_full_80pct
       tags:
         - sjepa
         - pretrain
-        - mini
-        - spatial_mask_60pct
+        - full_dataset
+        - spatial_mask_80pct
         - vanilla_signaljepa
-      save_dir: outputs/sjepa/pretrain_mini_60pct/${now:%Y%m%d_%H%M%S}
+      save_dir: outputs/sjepa/pretrain_full_80pct/${now:%Y%m%d_%H%M%S}
       mode: offline
 
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: outputs/sjepa/pretrain_mini_60pct/${now:%Y%m%d_%H%M%S}/checkpoints
+        dirpath: outputs/sjepa/pretrain_full_80pct/${now:%Y%m%d_%H%M%S}/checkpoints
         filename: sjepa-{epoch:02d}-{val/loss:.4f}
         monitor: val/loss
         mode: min
@@ -45,7 +45,7 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
-        patience: 10
+        patience: 15  # More patience for full dataset
         mode: min
         verbose: true
 
@@ -64,14 +64,14 @@ model:
       class_path: cerebro.models.components.encoders.VanillaSignalJEPAEncoder
       init_args:
         n_chans: 129
-        n_times: 200
+        n_times: 200  # 2s @ 100Hz
         sfreq: 100
         drop_prob: 0.0
         transformer__d_model: 64
         transformer__num_encoder_layers: 8
         transformer__nhead: 8
 
-    mask_diameter_pct: 60  # 60% of head size (CHANGED FROM 40%)
+    mask_diameter_pct: 80  # 80% of head size - largest mask tested in paper
     ema_momentum: 0.996
     predictor_depth: 4
     predictor_heads: 8
@@ -84,13 +84,15 @@ model:
 data:
   class_path: cerebro.data.jepa_pretrain.JEPAPretrainDataModule
   init_args:
-    data_dir: ${oc.env:EEG2025_DATA_ROOT,./data}
+    data_dir: ${oc.env:HBN_ROOT,./data}
 
+    # Training releases (R5 excluded - competition validation set)
     releases:
       - R1
       - R2
       - R3
       - R4
+      # R5 excluded (competition validation set)
       - R6
       - R7
       - R8
@@ -98,6 +100,7 @@ data:
       - R10
       - R11
 
+    # All 7 tasks for maximum pretraining coverage
     all_tasks:
       - contrastChangeDetection
       - restingState
@@ -111,12 +114,14 @@ data:
     stride: 1.0
     crop_length: null
 
-    val_split: 0.2
-    test_release: null
+    val_split: 0.2  # 80/20 train/val split at subject level
+    test_release: "R5"  # Competition validation set
 
     n_chans_select: 129
     sfreq: 100
-    mini: true
+    mini: false  # FULL DATASET
 
-    batch_size: 256
-    num_workers: 8
+    batch_size: 512
+    num_workers: 16
+    prefetch_factor: 1  # Each worker prefetches 4 batches (32 workers × 4 = 128 batches in flight)
+    persistent_workers: true  # Keep workers alive between epochs (faster epoch transitions)

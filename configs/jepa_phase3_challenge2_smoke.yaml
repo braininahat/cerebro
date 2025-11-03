@@ -97,7 +97,7 @@ model:
 data:
   class_path: cerebro.data.tasks.challenge2.Challenge2DataModule
   init_args:
-    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    data_dir: ${oc.env:HBN_ROOT,data}
     releases: [R1]                        # Smoke test: only R1
 
     # Task configuration

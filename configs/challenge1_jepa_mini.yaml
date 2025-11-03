@@ -132,7 +132,7 @@ model:
 
 # Data configuration: MINI DATASET
 data:
-  data_dir: ${oc.env:EEG2025_DATA_ROOT,data}  # Single directory for both mini and full
+  data_dir: ${oc.env:HBN_ROOT,data}  # Single directory for both mini and full
   releases:
     - R1  # Mini prototyping with R1 (NOT R5!)
   batch_size: 512
@@ -150,7 +150,7 @@ data:
   shift_after_stim: 0.5
   window_len: 2.0
   use_mini: true  # Use mini subset
-  cache_dir: null
+  cache_dir: null  # Deprecated/ignored by Challenge1DataModule
   val_frac: 0.1
   test_frac: 0.1
   seed: 2025
@@ -160,4 +160,4 @@ data:
   # R5 Test Evaluation (Competition Validation Set)
   mode: dev  # "dev" = split training releases for train/val/test
   test_on_r5: true  # Use R5 as test set (even for mini prototyping to match competition evaluation)
-  r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data}  # R5 data location
+  r5_data_dir: ${oc.env:HBN_ROOT,data}  # R5 data location

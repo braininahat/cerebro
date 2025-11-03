@@ -147,7 +147,7 @@ model:
 data:
   class_path: cerebro.data.challenge1.Challenge1DataModule
   init_args:
-    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    data_dir: ${oc.env:HBN_ROOT,data}
     releases:
       - R1
       - R2
@@ -186,11 +186,11 @@ data:
     # Data splits
     mode: dev                  # "dev" = train/val/test split
     test_on_r5: true           # Use R5 as test set (matches competition)
-    r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    r5_data_dir: ${oc.env:HBN_ROOT,data}
     val_frac: 0.1
     test_frac: 0.1
     seed: 2025
 
     # Performance
     use_mini: false
-    cache_dir: null            # null = auto (data_dir/../cache/challenge1)
+    cache_dir: null            # Deprecated/ignored by Challenge1DataModule

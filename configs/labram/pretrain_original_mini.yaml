@@ -89,7 +89,7 @@ trainer:
 data:
   class_path: cerebro.data.labram_pretrain.LaBraMPretrainDataModule
   init_args:
-    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    data_dir: ${oc.env:HBN_ROOT,data}
     releases: [R1, R2, R3, R4, R6, R7, R8, R9, R10, R11]  # CHANGED: all mini releases except R5
     use_mini: true
     passive_tasks: [RestingState, DespicableMe]

@@ -113,7 +113,7 @@ model:
 
 # Data configuration (class registered in CLI, just specify __init__ params)
 data:
-  data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+  data_dir: ${oc.env:HBN_ROOT,data}
   # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training!
   # Training releases: R1-R4, R6-R11 only (10 releases total)
   # R5 is held out for competition leaderboard evaluation
@@ -143,7 +143,7 @@ data:
   shift_after_stim: 0.5  # Start window 0.5s after stimulus
   window_len: 2.0  # 2 second windows
   use_mini: false  # Set to true for fast prototyping
-  cache_dir: null  # null = auto (data_dir/../cache/challenge1)
+  cache_dir: null  # Deprecated/ignored by Challenge1DataModule
   val_frac: 0.1
   test_frac: 0.1
   seed: 2025
@@ -153,4 +153,4 @@ data:
   # R5 Test Evaluation (Competition Validation Set)
   mode: dev  # "dev" = split training releases for train/val/test, "submission" = train on all
   test_on_r5: true  # Use R5 as test set (competition validation set for honest evaluation)
-  r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data}  # R5 data location
+  r5_data_dir: ${oc.env:HBN_ROOT,data}  # R5 data location

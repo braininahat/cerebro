@@ -113,7 +113,7 @@ model:
 
 # Data configuration (class registered in CLI)
 data:
-  data_dir: ${oc.env:EEG2025_DATA_ROOT,data/full}
+  data_dir: ${oc.env:HBN_ROOT,data/full}
   releases: [R1, R2, ...]
   batch_size: 512
 ```
@@ -122,7 +122,7 @@ Note: Model and data classes are registered in `src/cli/train.py`, so you only s
 
 ## Environment Variables
 
-- `EEG2025_DATA_ROOT`: Override data directory (default: `data/full` or `data/mini`)
+- `HBN_ROOT`: Override data directory (default: `data/full` or `data/mini`)
 - `WANDB_MODE`: Set to `offline` to disable wandb syncing
 - `WANDB_ENTITY`: Override wandb team/username
 - `WANDB_PROJECT`: Override wandb project name

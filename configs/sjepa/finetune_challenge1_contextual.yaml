@@ -1,27 +1,25 @@
-# S-JEPA fine-tuning with PreLocal architecture (full fine-tuning)
+# S-JEPA fine-tuning with Contextual architecture (full fine-tuning)
 #
-# PreLocal architecture (paper's best):
-#   Spatial conv (129 → n_spat_filters) → Local encoder → FC → output
+# Contextual architecture:
+#   Local encoder → Positional encoding → Transformer → 3D Conv spatial filter → FC → output
 #
 # This config uses full fine-tuning ("full-" strategy):
 #   - Warmup (epochs 0-9): Only new layers trainable
 #   - After warmup (epochs 10+): Encoder unfrozen, all layers trainable
 #   - Encoder gets 10x lower learning rate to prevent catastrophic forgetting
 #
-# Per paper (Figure 5, Page 5):
-#   "16s-60% × full-pre-local occupies rank 1 in two-thirds of cases"
-#   This is the paper's BEST approach for downstream tasks.
+# Contextual uses the FULL pretrained encoder pipeline (maximum transfer learning).
 #
 # Usage:
 #   # 1. First run pretraining (if not done already)
 #   uv run cerebro fit --config configs/sjepa/pretrain_full_80pct.yaml
 #
 #   # 2. Then run fine-tuning with pretrained checkpoint
-#   uv run cerebro fit --config configs/sjepa/finetune_challenge1_prelocal_full.yaml \
+#   uv run cerebro fit --config configs/sjepa/finetune_challenge1_contextual_full.yaml \
 #     --model.pretrained_checkpoint="outputs/sjepa/pretrain_full_80pct/latest/checkpoints/last.ckpt"
 
 seed_everything: 42
-run_lr_finder: false
+run_lr_finder: true
 run_batch_size_finder: false
 
 trainer:
@@ -37,21 +35,21 @@ trainer:
     init_args:
       project: eeg2025
       entity: ubcse-eeg2025
-      name: sjepa_finetune_c1_prelocal_full
+      name: sjepa_finetune_c1_contextual_full
       tags:
         - sjepa
         - finetune
         - challenge1
-        - prelocal
+        - contextual
         - full_finetuning
         - unfrozen_encoder
-      save_dir: outputs/sjepa/finetune_c1_prelocal_full/${now:%Y%m%d_%H%M%S}
+      save_dir: outputs/sjepa/finetune_c1_contextual_full/${now:%Y%m%d_%H%M%S}
       mode: offline
 
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: outputs/sjepa/finetune_c1_prelocal_full/${now:%Y%m%d_%H%M%S}/checkpoints
+        dirpath: outputs/sjepa/finetune_c1_contextual_full/${now:%Y%m%d_%H%M%S}/checkpoints
         filename: finetune-{epoch:02d}-{val/loss:.4f}
         monitor: val/loss
         mode: min
@@ -76,7 +74,7 @@ trainer:
         leave: true
 
 model:
-  class_path: cerebro.trainers.sjepa_finetune_prelocal.PreLocalFinetuneTrainer
+  class_path: cerebro.trainers.sjepa_finetune_contextual.ContextualFinetuneTrainer
   init_args:
     # Uses latest checkpoint from corresponding pretraining run.
     # Override via CLI if needed:
@@ -87,13 +85,20 @@ model:
     n_outputs: 1  # Regression (single output for response time)
     n_spat_filters: 4  # Number of virtual channels (paper tests 4, 8, 16)
 
-    # Freezing strategy (PAPER'S BEST APPROACH)
-    freeze_encoder: false  # Enable full fine-tuning ("full-" strategy)
+    # Freezing strategy
+    freeze_encoder: true  # Enable full fine-tuning ("full-" strategy)
     warmup_epochs: 10  # Paper uses 10-epoch warmup before unfreezing
 
     # Optimizer params
     lr: 0.001  # Learning rate for new layers
     encoder_lr_multiplier: 0.1  # Encoder gets 10x lower LR (0.0001) when unfrozen
+
+    # LR finder at warmup transition (data-driven optimization)
+    warmup_reruns_lr_finder: true  # Re-run LR finder when encoder unfreezes at epoch 10
+    lr_finder_min: 1.0e-8  # Minimum LR for search range
+    lr_finder_max: 1.0e-2  # Maximum LR for search range
+    lr_finder_num_training: 100  # Number of training steps for LR finder
+
     weight_decay: 0.0001
     scheduler_patience: 10
     scheduler_factor: 0.5
@@ -102,30 +107,30 @@ model:
     loss_fn: mse  # MSE for response time regression
 
 data:
-  class_path: cerebro.data.base.BaseTaskDataModule
+  class_path: cerebro.data.jepa_pretrain.JEPAPretrainDataModule
   init_args:
-    dataset:
-      class_path: cerebro.data.datasets.hbn.HBNDataset
-      init_args:
-        data_dir: ${oc.env:EEG2025_DATA_ROOT,./data}
-        # Training releases (all except R5)
-        releases:
-          - R1
-          - R2
-          - R3
-          - R4
-          # R5 excluded (competition validation set)
-          - R6
-          - R7
-          - R8
-          - R9
-          - R10
-          - R11
-        tasks:
-          - contrastChangeDetection  # Challenge 1 task
-        use_mini: false  # Full dataset
+    data_dir: ${oc.env:HBN_ROOT,./data}
 
-    task:
+    # Training releases (all except R5)
+    releases:
+      - R1
+      - R2
+      - R3
+      - R4
+      # R5 excluded (competition validation set)
+      - R6
+      - R7
+      - R8
+      - R9
+      - R10
+      - R11
+
+    # Challenge 1: Only contrastChangeDetection task
+    all_tasks:
+      - contrastChangeDetection
+
+    # Challenge 1: Event-based windowing with trial-level targets
+    task_windowing:
       class_path: cerebro.data.tasks.challenge1.Challenge1Task
       init_args:
         window_len: 2.0
@@ -135,20 +140,11 @@ data:
         anchor: stimulus_anchor
 
     # Data splits and loading (MATCHES PRETRAINING)
-    batch_size: 64
-    num_workers: 4
-    val_frac: 0.2  # 80:20 train:val split (matches pretrain)
-    test_frac: 0.0  # No test split (R5 is external)
+    batch_size: 512
+    num_workers: 16
+    val_split: 0.2  # 80:20 train:val split (matches pretrain)
+    test_release: "R5"  # Competition validation set
     seed: 42  # Same seed as pretrain for split reproducibility
-
-    # Excluded subjects (known bad data)
-    excluded_subjects:
-      - NDARWV769JM7
-      - NDARME789TD2
-      - NDARUA442ZVF
-      - NDARJP304NK1
-      - NDARTY128YLU
-      - NDARDW550GU6
-      - NDARLD243KRE
-      - NDARUJ292JXV
-      - NDARBA381JGH
+    mini: false  # Full dataset
+    persistent_workers: true
+    prefetch_factor: 1

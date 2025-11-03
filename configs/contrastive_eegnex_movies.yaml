@@ -97,7 +97,7 @@ model:
 data:
   class_path: cerebro.data.movies.MovieDataModule
   init_args:
-    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    data_dir: ${oc.env:HBN_ROOT,data}
     # Training releases (R5 is held out for competition)
     releases:
       - R1
@@ -135,4 +135,4 @@ data:
     test_release: null        # Specify release for test (e.g., "R5") or null for no test split
     seed: 2025                # Random seed for splits
     use_mini: false           # Set to true for fast prototyping
-    cache_dir: null           # null = auto (data_dir/../cache/movies)
+    cache_dir: null           # Uses CACHE_PATH/movies from .env

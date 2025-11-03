@@ -160,5 +160,5 @@ data:
     # - Fast: ~1-2 GB/s compression, often faster than uncompressed I/O
     # - Resume: Checkpoint manifest allows resuming after interruptions
     # - Space: ~1.2x compression ratio
-    cache_dir: null      # Auto: {tuh_dir}/cache/
+    cache_dir: null      # Uses CACHE_PATH/tuh from .env
     use_cache: true      # Use cached windows if available

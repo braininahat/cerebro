@@ -75,7 +75,7 @@ trainer:
 data:
   class_path: cerebro.data.labram_pretrain.LaBraMPretrainDataModule
   init_args:
-    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    data_dir: ${oc.env:HBN_ROOT,data}
     releases: [R1]
     passive_tasks: [RestingState, DespicableMe]  # Capitalize task names
     batch_size: 64

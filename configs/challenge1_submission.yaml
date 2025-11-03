@@ -100,7 +100,7 @@ model:
 
 # Data configuration (class registered in CLI, just specify __init__ params)
 data:
-  data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+  data_dir: ${oc.env:HBN_ROOT,data}
   # WARNING: R5 is the COMPETITION VALIDATION SET - NEVER include in training releases!
   # Training on ALL subjects from R1-R4, R6-R11 (10 releases total)
   releases:
@@ -129,7 +129,7 @@ data:
   shift_after_stim: 0.5  # Start window 0.5s after stimulus
   window_len: 2.0  # 2 second windows
   use_mini: false  # Must be false for final submission
-  cache_dir: null  # null = auto (data_dir/../cache/challenge1)
+  cache_dir: null  # Deprecated/ignored by Challenge1DataModule
   val_frac: 0.1  # Ignored in submission mode
   test_frac: 0.1  # Ignored in submission mode
   seed: 2025
@@ -139,4 +139,4 @@ data:
   # Submission mode settings
   mode: submission  # "submission" = train on ALL subjects, no val split
   test_on_r5: true  # REQUIRED in submission mode
-  r5_data_dir: ${oc.env:EEG2025_DATA_ROOT,data}  # R5 data location
+  r5_data_dir: ${oc.env:HBN_ROOT,data}  # R5 data location

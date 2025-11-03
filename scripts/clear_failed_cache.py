@@ -6,7 +6,7 @@ Run this to clean up failed entries and retry them on next run.
 Usage:
     python scripts/clear_failed_cache.py [data_dir]
 
-If data_dir not provided, uses $EEG2025_DATA_ROOT or ./data
+If data_dir not provided, uses $HBN_ROOT or ./data
 """
 
 import os
@@ -25,7 +25,7 @@ def main():
     if len(sys.argv) > 1:
         data_dir = Path(sys.argv[1])
     else:
-        data_dir = Path(os.getenv("EEG2025_DATA_ROOT", "./data"))
+        data_dir = Path(os.getenv("HBN_ROOT", "./data"))
 
     cache_root = data_dir / "cache"
     if not cache_root.exists():

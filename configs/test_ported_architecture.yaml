@@ -63,7 +63,7 @@ model:
 data:
   class_path: cerebro.data.hbn.HBNDataModule
   init_args:
-    data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+    data_dir: ${oc.env:HBN_ROOT,data}
     data_req: challenge1
     releases: [R1]
     batch_size: 64

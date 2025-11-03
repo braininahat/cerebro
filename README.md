@@ -173,12 +173,12 @@ This registers the `cerebro` CLI command and enables clean imports throughout th
 **2. Create `.env` file for paths:**
 
 ```bash
-echo "EEG2025_DATA_ROOT=/path/to/your/data" > .env
+echo "HBN_ROOT=/path/to/your/data" > .env
 echo "WANDB_API_KEY=your_key_here" >> .env
 ```
 
 **Environment variables:**
-- `EEG2025_DATA_ROOT`: Parent directory containing HBN releases (e.g., `/home/user/data`)
+- `HBN_ROOT`: Parent directory containing HBN releases (e.g., `/home/user/data`)
 - `WANDB_API_KEY`: Weights & Biases API key for experiment tracking
 
 ## Data Download
@@ -293,7 +293,7 @@ uv run cerebro fit --config configs/challenge1_eegnex.yaml
 # Planned: scripts/evaluate.py
 uv run python startkit/local_scoring.py \
   --submission-zip submission.zip \
-  --data-dir $EEG2025_DATA_ROOT \
+  --data-dir $HBN_ROOT \
   --output-dir outputs/test_submission
 ```
 
@@ -353,7 +353,7 @@ zip -j ../../submission.zip submission.py model_challenge_1.pt model_challenge_2
 ```bash
 uv run python startkit/local_scoring.py \
   --submission-zip submission.zip \
-  --data-dir $EEG2025_DATA_ROOT \
+  --data-dir $HBN_ROOT \
   --output-dir outputs/local_scoring
 ```
 
@@ -413,7 +413,7 @@ model:
 
 # Data configuration
 data:
-  data_dir: ${oc.env:EEG2025_DATA_ROOT,data}
+  data_dir: ${oc.env:HBN_ROOT,data}
   releases: [R1, R2, R3, R4, R6, R7, R8, R9, R10, R11]
   batch_size: 512
 ```
